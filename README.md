@@ -110,6 +110,88 @@ wskazać krawędź, od której liczy stolarz.
 }
 ```
 
+## Jak to przetestować
+
+### A. Bez drukarki i aparatu — 2 minuty
+
+Repozytorium generuje własne zdjęcie testowe o dokładnie znanej geometrii wraz z kluczem odpowiedzi:
+
+```bash
+python tools/make_test_photo.py --output sciana_testowa.jpg
+python measure_wall.py --image sciana_testowa.jpg --marker-size-mm 180
+```
+
+W oknie klikaj w środki szarych kółek (przybliż klawiszem `+`, celownik zostaje cienki) i porównuj odczyty
+z kluczem wypisanym przez generator:
+
+```
+punkt                 X [mm]    Y [mm]   odleglosc [mm]
+gniazdko_1             300.0     250.0            390.5
+gniazdko_2             700.0     250.0            743.3
+podejscie_wody        -250.0     620.0            668.5
+wentylacja             950.0    -300.0            996.2
+puszka_dolna           120.0     980.0            987.3
+```
+
+Błąd 1–2 mm jest poprawny. Kilkanaście milimetrów oznacza, że kliknięcie poszło obok środka kółka —
+przybliż mocniej. Setki milimetrów albo przeskalowanie wszystkich wyników o stały procent oznaczają
+błąd w `--marker-size-mm`.
+
+Ten sam potok bez klikania (przydatne w CI):
+
+```bash
+python tests/test_accuracy.py     # raport w konsoli, kod wyjścia 0/1
+pytest tests/test_accuracy.py     # 3 testy: łańcuch przekształceń, dokładność, niezależność od skali
+```
+
+### B. Na własnym wydruku, bez ryzyka skalowania drukarki
+
+Nie musisz trafić w skalę 100 % — wystarczy **zmierzyć, co faktycznie wyszło z drukarki**:
+
+```bash
+python tools/generate_marker.py --output marker.png     # wydrukuj jakkolwiek
+```
+
+Zmierz linijką bok czarnego kwadratu (między znacznikami kontrolnymi), np. wyszło 164 mm, i podaj tę wartość:
+
+```bash
+python measure_wall.py --image sciana.jpg --marker-size-mm 164
+```
+
+Marker naklej na sztywną płytę — pofalowana kartka psuje pomiar bardziej niż błąd wydruku.
+
+### C. Prawdziwy test dokładności — referencja z miarki
+
+To jedyny test, który mówi, czy narzędzie nadaje się na budowę:
+
+1. Naklej marker na ścianę (lub płytę) i zaznacz ołówkiem dwa punkty oddalone o ok. 1–1,5 m.
+2. Zmierz odległość między nimi miarką i zapisz — to twoja referencja.
+3. Zrób zdjęcie **pod kątem** (15–30° od prostopadłej), z odległości ok. 2 m, tak żeby marker miał
+   w kadrze co najmniej 150–200 px boku. Nie używaj zoomu cyfrowego.
+4. Zmierz oba punkty w aplikacji i porównaj odległość w linii prostej z miarką.
+
+Kryterium: **błąd poniżej 0,5 % zmierzonej odległości** (na 1 m to 5 mm). Powtórz z 3–4 zdjęć zrobionych
+pod różnymi kątami — rozrzut wyników powie ci więcej niż pojedynczy pomiar.
+
+Aplikacja sama ostrzega przed typowymi błędami ujęcia, jeszcze zanim otworzy okno:
+
+```
+Marker ID 0 (180.0 mm): bok sredni 67.2 px, ukos 2.21, rozdzielczosc zrodla 2.68 mm/px
+UWAGA: Marker zajmuje tylko ~67 px boku - podejdz blizej lub uzyj wiekszej rozdzielczosci, bo precyzja spadnie.
+UWAGA: Duzy ukos ujecia (stosunek bokow markera 2.21). Zrob zdjecie bardziej prostopadle do sciany.
+```
+
+Zdjęcie testowe z punktu A nie wywołuje żadnego ostrzeżenia (bok 205 px, ukos 1,22) — tak wygląda poprawne ujęcie.
+
+Szybka kontrola samego zdjęcia, bez otwierania okna:
+
+```bash
+python measure_wall.py --image sciana.jpg --no-gui --save-rectified rektyfikacja.png
+```
+
+Obejrzyj `rektyfikacja.png`: jeśli fugi płytek albo krawędź ościeżnicy są na nim pionowe i poziome,
+rektyfikacja się udała. Jeśli nadal „uciekają”, marker nie leży w płaszczyźnie ściany.
+
 ## Dokładność
 
 Test `tests/test_accuracy.py` buduje syntetyczną ścianę o znanej geometrii, symuluje zdjęcie zrobione pod kątem
@@ -146,6 +228,7 @@ wallmeasure/
     ui.py                   # okno OpenCV HighGUI (zoom, przesuwanie, klawisze)
     cli.py                  # argumenty wiersza poleceń, spięcie potoku
 tools/generate_marker.py    # generator markera do wydruku
+tools/make_test_photo.py    # syntetyczne zdjęcie testowe z kluczem odpowiedzi
 tests/test_accuracy.py      # test dokładności na syntetycznym zdjęciu
 ```
 
