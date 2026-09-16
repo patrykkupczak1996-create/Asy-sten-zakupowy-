@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.idea/
+.vscode/
+
+# Wyniki pomiarow generowane przez aplikacje
+wynik_pomiaru.png
+wymiary.json
+rektyfikacja*.png
+marker_*.png
