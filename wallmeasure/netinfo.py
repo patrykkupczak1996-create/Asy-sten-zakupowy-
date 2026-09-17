@@ -27,7 +27,7 @@ ZAKRESY_LAN = (
 @dataclass(frozen=True)
 class Adres:
     ip: str
-    rodzaj: str      # 'lan' | 'loopback' | 'link-local' | 'publiczny' | 'inny'
+    rodzaj: str      # 'lan' | 'wirtualny' | 'loopback' | 'link-local' | 'publiczny' | 'inny'
     opis: str
 
     @property
@@ -38,7 +38,37 @@ class Adres:
         return f"http://{self.ip}:{port}"
 
 
-def _sklasyfikuj(ip_tekst: str) -> Adres:
+def _adres_domyslnej_trasy() -> str | None:
+    """Adres karty, ktora komputer wychodzi na zewnatrz.
+
+    To niemal zawsze prawdziwa karta sieciowa (Wi-Fi albo kabel), a nie
+    wirtualny przelacznik Hyper-V, WSL czy VirtualBoksa. Gniazdo UDP niczego
+    nie wysyla - sluzy wylacznie do odczytania trasy.
+    """
+    for cel in ("8.8.8.8", "1.1.1.1"):
+        gniazdo = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            gniazdo.connect((cel, 53))
+            return gniazdo.getsockname()[0]
+        except OSError:
+            continue
+        finally:
+            gniazdo.close()
+    return None
+
+
+def _wyglada_na_wirtualna(ip: ipaddress.IPv4Address) -> bool:
+    """Czy adres wyglada na karte wirtualnej maszyny.
+
+    Hyper-V, WSL, VirtualBox i VMware tworza wlasne podsieci, w ktorych
+    komputer pelni role bramy - i dlatego ma adres konczacy sie na .1.
+    Karta z DHCP prawie nigdy takiego adresu nie dostaje, bo .1 nalezy
+    do routera.
+    """
+    return int(ip) & 0xFF == 1
+
+
+def _sklasyfikuj(ip_tekst: str, domyslny: str | None = None) -> Adres:
     try:
         ip = ipaddress.ip_address(ip_tekst)
     except ValueError:
@@ -49,7 +79,15 @@ def _sklasyfikuj(ip_tekst: str) -> Adres:
     if ip.is_link_local:
         return Adres(ip_tekst, "link-local", "brak adresu z routera - sprawdz polaczenie Wi-Fi")
     if any(ip in siec for siec in ZAKRESY_LAN):
-        return Adres(ip_tekst, "lan", "siec lokalna - tego adresu uzyj na telefonie")
+        if ip_tekst == domyslny:
+            return Adres(ip_tekst, "lan", "karta, ktora komputer laczy sie z siecia - TEGO ADRESU UZYJ")
+        if _wyglada_na_wirtualna(ip):
+            return Adres(
+                ip_tekst,
+                "wirtualny",
+                "prawdopodobnie karta wirtualna (Hyper-V, WSL, VirtualBox) - telefon tu nie dotrze",
+            )
+        return Adres(ip_tekst, "lan", "siec lokalna - moze zadzialac, jesli pierwszy adres zawiedzie")
     if ip.is_private:
         return Adres(ip_tekst, "inny", "adres specjalny, raczej nie zadziala")
     return Adres(ip_tekst, "publiczny", "adres publiczny - nie wystawiaj serwera do internetu")
@@ -77,9 +115,17 @@ def adresy_lokalne() -> list[Adres]:
     except (socket.gaierror, UnicodeError):
         pass
 
-    kolejnosc = {"lan": 0, "publiczny": 1, "inny": 2, "link-local": 3, "loopback": 4}
-    adresy = [_sklasyfikuj(ip) for ip in znalezione]
-    return sorted(adresy, key=lambda a: (kolejnosc.get(a.rodzaj, 9), a.ip))
+    domyslny = _adres_domyslnej_trasy()
+    if domyslny:
+        znalezione.add(domyslny)
+
+    kolejnosc = {"lan": 0, "wirtualny": 1, "publiczny": 2, "inny": 3, "link-local": 4, "loopback": 5}
+    adresy = [_sklasyfikuj(ip, domyslny) for ip in znalezione]
+    # Adres domyslnej trasy zawsze na samej gorze listy.
+    return sorted(
+        adresy,
+        key=lambda a: (a.ip != domyslny, kolejnosc.get(a.rodzaj, 9), a.ip),
+    )
 
 
 def port_zajety(host: str, port: int) -> bool:
@@ -186,7 +232,15 @@ def raport(port: int, host: str = "0.0.0.0") -> str:
     elif len(uzyteczne) > 1:
         linie += [
             "Komputer ma kilka adresow lokalnych (np. Wi-Fi i kabel albo VPN).",
-            "  Jesli pierwszy nie zadziala, sprobuj kolejnego z listy.",
+            "  Uzyj pierwszego z listy; jesli zawiedzie, sprobuj kolejnego.",
+        ]
+
+    if any(adres.rodzaj == "wirtualny" for adres in adresy):
+        linie += [
+            "",
+            "Pominieto adresy kart wirtualnych (Hyper-V, WSL, VirtualBox).",
+            "  Wygladaja jak siec lokalna, ale prowadza do maszyn wirtualnych",
+            "  na tym komputerze, a nie do sieci, w ktorej jest telefon.",
         ]
 
     if port_zajety(host, port):
