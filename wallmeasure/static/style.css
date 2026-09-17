@@ -83,12 +83,29 @@ html, body {
 
 /* --- Panel z punktami --- */
 .panel {
-  flex: 0 0 auto; padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+  /* Bez gornego paddingu - dostarcza go przyklejony pasek akcji, inaczej
+     przewijana lista przeswitywalaby nad nim. */
+  flex: 0 0 auto; padding: 0 16px calc(16px + env(safe-area-inset-bottom));
   background: var(--panel); border-top: 1px solid var(--obramowanie);
   display: flex; flex-direction: column; gap: 10px;
   max-height: 55dvh; overflow-y: auto;
 }
 .pasek-akcji { display: flex; gap: 8px; }
+
+/* Glowne akcje musza byc widoczne zawsze. Panel sie przewija, wiec bez
+   przyklejenia przycisk "Dodaj punkt" znika, gdy tylko lista punktow urosnie. */
+.pasek-akcji.przyklejony {
+  position: sticky; top: 0; z-index: 2;
+  margin: 0 -16px; padding: 12px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--obramowanie);
+}
+
+.wskazowka {
+  margin: 0; padding: 10px 12px; border-radius: 10px;
+  background: rgba(78, 161, 255, .12); border: 1px solid rgba(78, 161, 255, .35);
+  font-size: 13px; color: var(--tekst);
+}
+.wskazowka b { color: var(--akcent); }
 .pasek-akcji .przycisk { flex: 1 1 0; }
 .pasek-akcji .przycisk.glowny { flex: 1.4 1 0; }
 

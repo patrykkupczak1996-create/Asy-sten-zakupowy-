@@ -280,6 +280,7 @@ function odswiezListe() {
     };
     lista.appendChild(element);
   });
+  $('licznik').textContent = `Zmierzone punkty: ${stan.punkty.length}`;
   $('zapisz').disabled = stan.punkty.length === 0;
   $('cofnij').disabled = stan.punkty.length === 0;
   $('pobieranie').classList.add('ukryty');
@@ -299,18 +300,24 @@ $('cofnij').onclick = () => {
   rysuj();
 };
 
-$('baza').onclick = () => {
+function odswiezOpisZera() {
+  $('info-baza').textContent = stan.osnowaWlasna
+    ? 'Zero (0,0): punkt wskazany celownikiem'
+    : 'Zero (0,0): lewy górny róg markera';
+  $('zero').textContent = stan.osnowaWlasna ? 'Zero na marker' : 'Zero tutaj';
+}
+
+$('zero').onclick = () => {
   if (stan.osnowaWlasna) {
     stan.osnowa = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
     stan.osnowaWlasna = false;
-    $('info-baza').textContent = 'Baza (0,0): lewy górny róg markera';
-    $('baza').textContent = 'Ustaw bazę';
+    pokazStatus('status-pomiar', 'Zero wróciło na róg markera.', 'ok');
   } else {
     stan.osnowa = { ...stan.srodek };
     stan.osnowaWlasna = true;
-    $('info-baza').textContent = 'Baza (0,0): punkt wskazany celownikiem';
-    $('baza').textContent = 'Reset bazy';
+    pokazStatus('status-pomiar', 'Nowy punkt zerowy. Wszystkie pomiary przeliczone.', 'ok');
   }
+  odswiezOpisZera();
   odswiezListe();
   rysuj();
 };
@@ -372,8 +379,7 @@ function uruchomPomiar(sesja) {
       stan.skala = 1;
 
       $('raport').textContent = sesja.raport;
-      $('info-baza').textContent = 'Baza (0,0): lewy górny róg markera';
-      $('baza').textContent = 'Ustaw bazę';
+      odswiezOpisZera();
       $('ekran-start').classList.add('ukryty');
       $('ekran-pomiar').classList.remove('ukryty');
 
