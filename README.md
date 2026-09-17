@@ -28,6 +28,36 @@ słownik `DICT_4X4_50`, ID 0) naklejony na mierzoną ścianę.
 
 ## Instalacja
 
+### Najprościej: kliknij launcher
+
+| System | Plik |
+|---|---|
+| Windows | `start_serwer.bat` — kliknij dwa razy w Eksploratorze |
+| macOS / Linux | `./start_serwer.sh` |
+
+Launcher sam znajdzie Pythona, przy pierwszym uruchomieniu doinstaluje biblioteki i wystartuje serwer
+wersji mobilnej. Jeśli Pythona nie ma, wypisze, skąd go pobrać.
+
+### Windows od zera — gdy PowerShell nie zna komendy `python`
+
+Komunikat `The term 'python' is not recognized` oznacza, że **Python nie jest zainstalowany** (albo instalator
+nie dopisał go do PATH). Nie jest to błąd aplikacji — Python to środowisko, w którym ona działa.
+
+1. Pobierz **Windows installer (64-bit)** ze strony <https://www.python.org/downloads/windows/> (wersja 3.12).
+2. W instalatorze **zaznacz pole „Add python.exe to PATH"** na dole okna. To najczęściej pomijany krok.
+3. **Zamknij i otwórz PowerShell na nowo** — PATH jest odczytywany przy starcie okna, więc w starym oknie
+   komenda dalej nie zadziała.
+4. Sprawdź: `python --version` powinno wypisać numer wersji.
+
+Jeśli `python` nadal nie działa, użyj launchera `py`, który instalator zakłada niezależnie od PATH:
+
+```powershell
+py -m pip install -r requirements.txt
+py serve_wall.py
+```
+
+### Ręcznie, w środowisku wirtualnym
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -145,6 +175,7 @@ Przyczyny w kolejności, w jakiej je spotkasz:
 | Strona pusta / „odmowa połączenia" | Użyty adres `127.0.0.1` lub `localhost` | To adres pętli zwrotnej, działa tylko na komputerze. Użyj adresu `192.168.x.x` z listy. |
 | `BLAD: port 8000 jest juz zajety` | Serwer działa w innym oknie | Zamknij tamto okno albo `python serve_wall.py --port 8001`. |
 | `ModuleNotFoundError: No module named 'flask'` | Brak zależności | `pip install -r requirements.txt` — w tym samym środowisku, w którym uruchamiasz serwer. |
+| `The term 'python' is not recognized` | Python nie jest zainstalowany lub nie ma go w PATH | Patrz **Windows od zera** w rozdziale Instalacja. |
 | Komputer ma kilka adresów (Wi-Fi, kabel, VPN) | Pierwszy adres to nie ten interfejs | Spróbuj kolejnych adresów z listy. **Rozłącz VPN** — potrafi przechwycić ruch lokalny. |
 
 Szybki test bez telefonu: otwórz `http://127.0.0.1:8000` na samym komputerze. Jeśli tam działa, problem leży
@@ -312,6 +343,8 @@ Co realnie psuje wynik na budowie:
 ## Struktura projektu
 
 ```
+start_serwer.bat            # launcher dla Windows (klikalny)
+start_serwer.sh             # launcher dla macOS i Linuksa
 measure_wall.py             # punkt wejścia wersji desktopowej
 serve_wall.py               # punkt wejścia serwera wersji mobilnej
 wallmeasure/
