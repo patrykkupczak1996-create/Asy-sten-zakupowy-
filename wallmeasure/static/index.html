@@ -33,9 +33,6 @@
     <label>Skala [mm/px]
       <input type="number" id="mm-px" value="0.5" min="0.1" step="0.05" inputmode="decimal">
     </label>
-    <label class="przelacznik">
-      <input type="checkbox" id="os-y-gora"> Oś Y dodatnia w górę
-    </label>
   </div>
 
   <button id="wyslij" class="przycisk glowny" disabled>Wyprostuj perspektywę</button>
@@ -69,13 +66,25 @@
   <div class="panel">
     <div class="pasek-akcji przyklejony">
       <button id="dodaj" class="przycisk glowny">Dodaj punkt</button>
-      <button id="zero" class="przycisk">Zero tutaj</button>
       <button id="cofnij" class="przycisk">Cofnij</button>
     </div>
 
     <p class="wskazowka">Celownik na środku obrazu wyznacza mierzony punkt —
       ustaw go i naciśnij <b>Dodaj punkt</b>.</p>
-    <p id="info-baza" class="podpis">Zero (0,0): lewy górny róg markera</p>
+
+    <div class="zerowanie">
+      <span class="tytul">Skąd liczyć wymiary</span>
+      <div class="pasek-akcji">
+        <button id="zero-xy" class="przycisk maly">Zeruj X i Y</button>
+        <button id="zero-x" class="przycisk maly">Tylko X</button>
+        <button id="zero-y" class="przycisk maly">Tylko Y</button>
+        <button id="zero-reset" class="przycisk maly" disabled>Marker</button>
+      </div>
+      <p id="info-baza" class="podpis">X i Y liczone od rogu markera</p>
+      <label class="przelacznik">
+        <input type="checkbox" id="os-y-gora"> Y rośnie w górę (wysokość nad posadzką)
+      </label>
+    </div>
 
     <p id="licznik" class="podpis">Zmierzone punkty: 0</p>
     <ul id="lista-punktow" class="lista"></ul>

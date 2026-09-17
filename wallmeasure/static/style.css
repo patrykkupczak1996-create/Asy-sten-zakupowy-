@@ -92,6 +92,23 @@ html, body {
 }
 .pasek-akcji { display: flex; gap: 8px; }
 
+/* Zerowanie osobno dla kazdej osi: stolarz mierzy X od krawedzi sciany,
+   a Y od posadzki, i te dwa odniesienia rzadko spotykaja sie w jednym
+   widocznym naroznku. */
+.zerowanie {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; border: 1px solid var(--obramowanie); border-radius: var(--promien);
+  background: var(--panel-jasny);
+}
+.zerowanie .tytul { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--tekst-przygaszony); }
+.zerowanie .pasek-akcji .przycisk { flex: 1 1 0; }
+.przycisk.maly { min-height: 40px; padding: 8px 6px; font-size: 13.5px; }
+.zerowanie .przelacznik {
+  display: flex; align-items: center; gap: 10px; margin: 0;
+  font-size: 13.5px; color: var(--tekst); cursor: pointer;
+}
+.zerowanie .przelacznik input { width: 20px; height: 20px; accent-color: var(--akcent); }
+
 /* Glowne akcje musza byc widoczne zawsze. Panel sie przewija, wiec bez
    przyklejenia przycisk "Dodaj punkt" znika, gdy tylko lista punktow urosnie. */
 .pasek-akcji.przyklejony {

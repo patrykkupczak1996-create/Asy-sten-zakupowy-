@@ -19,7 +19,8 @@ const stan = {
   skalaMin: 1,
   srodek: { x: 0, y: 0 },   // punkt obrazu (px) pod celownikiem
   osnowa: { x: 0, y: 0 },   // punkt (0,0) w px obrazu
-  osnowaWlasna: false,
+  zrodloX: 'marker',   // 'marker' albo 'wskazany' - osobno dla kazdej osi
+  zrodloY: 'marker',
   punkty: [],
   nastepneId: 1,
   odniesienie: null,   // nazwa punktu, od ktorego liczy zywy odczyt (null = od zera)
@@ -337,26 +338,33 @@ $('cofnij').onclick = () => {
   rysuj();
 };
 
-function odswiezOpisZera() {
-  $('info-baza').textContent = stan.osnowaWlasna
-    ? 'Zero (0,0): punkt wskazany celownikiem'
-    : 'Zero (0,0): lewy górny róg markera';
-  $('zero').textContent = stan.osnowaWlasna ? 'Zero na marker' : 'Zero tutaj';
+function osnowaWlasna() {
+  return stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker';
 }
 
-$('zero').onclick = () => {
-  if (stan.osnowaWlasna) {
-    stan.osnowa = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
-    stan.osnowaWlasna = false;
-    pokazStatus('status-pomiar', 'Zero wróciło na róg markera.', 'ok');
-  } else {
-    stan.osnowa = { ...stan.srodek };
-    stan.osnowaWlasna = true;
-    pokazStatus('status-pomiar', 'Nowy punkt zerowy. Wszystkie pomiary przeliczone.', 'ok');
-  }
-  odswiezOpisZera();
-  odswiezListe();
-  rysuj();
+function odswiezOpisZera() {
+  const opis = (zrodlo) => (zrodlo === 'marker' ? 'od markera' : 'wskazane');
+  $('info-baza').textContent =
+    `X ${opis(stan.zrodloX)}, Y ${opis(stan.zrodloY)}`;
+  $('zero-reset').disabled = !osnowaWlasna();
+}
+
+function ustawZero(osie) {
+  if (osie.includes('x')) { stan.osnowa.x = stan.srodek.x; stan.zrodloX = 'wskazany'; }
+  if (osie.includes('y')) { stan.osnowa.y = stan.srodek.y; stan.zrodloY = 'wskazany'; }
+  const nazwy = { x: 'Poziom (X)', y: 'Pion (Y)', xy: 'Oba wymiary' };
+  pokazStatus('status-pomiar', `${nazwy[osie]} liczony od wskazanego miejsca.`, 'ok');
+  odswiezOpisZera(); odswiezListe(); rysuj();
+}
+
+$('zero-xy').onclick = () => ustawZero('xy');
+$('zero-x').onclick = () => ustawZero('x');
+$('zero-y').onclick = () => ustawZero('y');
+$('zero-reset').onclick = () => {
+  stan.osnowa = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
+  stan.zrodloX = 'marker'; stan.zrodloY = 'marker';
+  pokazStatus('status-pomiar', 'Zero wróciło na róg markera.', 'ok');
+  odswiezOpisZera(); odswiezListe(); rysuj();
 };
 
 $('os-y-gora').addEventListener('change', () => {
@@ -409,7 +417,8 @@ function uruchomPomiar(sesja) {
       stan.sesja = sesja;
       stan.obraz = obraz;
       stan.osnowa = { x: sesja.marker.osnowa_px[0], y: sesja.marker.osnowa_px[1] };
-      stan.osnowaWlasna = false;
+      stan.zrodloX = 'marker';
+      stan.zrodloY = 'marker';
       stan.srodek = { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 };
       stan.punkty = [];
       stan.nastepneId = 1;
@@ -429,7 +438,9 @@ function uruchomPomiar(sesja) {
         const ostrzezenia = sesja.ostrzezenia || [];
         pokazStatus(
           'status-pomiar',
-          ostrzezenia.length ? ostrzezenia.join(' ') : 'Ustaw celownik na punkcie i dodaj pomiar.',
+          ostrzezenia.length
+            ? ostrzezenia.join(' ')
+            : 'Najpierw ustaw zero: celownik na naroznik przy posadzce i "Zeruj X i Y".',
           ostrzezenia.length ? 'ostrzezenie' : '',
         );
         gotowe();
@@ -449,7 +460,7 @@ $('zapisz').onclick = async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        osnowa_px: stan.osnowaWlasna ? [stan.osnowa.x, stan.osnowa.y] : null,
+        osnowa_px: osnowaWlasna() ? [stan.osnowa.x, stan.osnowa.y] : null,
         os_y_w_gore: $('os-y-gora').checked,
         punkty: stan.punkty.map((punkt) => ({ nazwa: punkt.nazwa, px: [punkt.px.x, punkt.px.y] })),
       }),

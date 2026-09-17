@@ -145,11 +145,14 @@ Przebieg pracy:
 3. **Celownik stoi nieruchomo na środku ekranu**, a ty przesuwasz pod nim obraz palcem — dzięki temu palec
    nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
    Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
-4. **Dodaj punkt** zapisuje pozycję celownika. **Zero tutaj** przenosi (0,0) pod celownik — np. na narożnik
-   ściany albo linię posadzki; wszystkie zebrane punkty przeliczają się natychmiast.
-   Pod każdym punktem widnieje **rozstaw względem poprzedniego**, a kliknięcie wiersza przełącza
-   górny odczyt na pomiar **od tego punktu** — tak sprawdzisz odległość między gniazdkami, nie licząc w głowie.
-5. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
+4. **Ustaw, skąd liczyć wymiary.** Marker nadaje skalę, ale nie musi być punktem odniesienia.
+   Naprowadź celownik i naciśnij **Zeruj X i Y** (narożnik), albo zeruj osie osobno: **Tylko X** od krawędzi
+   ściany, **Tylko Y** od posadzki — te dwa odniesienia rzadko spotykają się w jednym widocznym punkcie.
+   Przełącznik **Y rośnie w górę** zamienia wartości na wysokość nad posadzką. **Marker** wraca do stanu wyjściowego.
+5. **Dodaj punkt** zapisuje pozycję celownika. Pod każdym punktem widnieje **rozstaw względem poprzedniego**,
+   a kliknięcie wiersza przełącza górny odczyt na pomiar **od tego punktu** — tak sprawdzisz odległość
+   między gniazdkami, nie licząc w głowie.
+6. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
    widzi telefon) i generuje `wymiary.json`. Oba pliki pobierzesz jednym kliknięciem.
 
 Argumenty: `--host`, `--port` (domyślnie 8000), `--max-sessions` (ile zdjęć trzymać w pamięci naraz), `--debug`.
@@ -203,6 +206,8 @@ w sieci lub zaporze, a nie w aplikacji.
 | `q` lub `Esc` | wyjście |
 
 Domyślny układ odniesienia: **(0,0) = lewy górny róg markera**, X rośnie w prawo, Y w dół (`--y-up` odwraca oś Y).
+Marker jest wzorcem skali, nie punktem, od którego musisz mierzyć — po wskazaniu własnego zera wymiary
+liczą się od krawędzi ściany i posadzki, a marker można ze ściany zdjąć.
 Zmiana punktu bazowego przelicza wszystkie zebrane punkty — możesz więc zmierzyć ścianę, a dopiero na końcu
 wskazać krawędź, od której liczy stolarz.
 
