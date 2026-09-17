@@ -80,16 +80,27 @@ pip install -r requirements.txt
 python serve_wall.py
 ```
 
-Serwer wypisze adresy, pod którymi jest widoczny:
+Serwer wypisze adres, kod QR do zeskanowania aparatem telefonu i podpowiedzi:
 
 ```
-Asystent pomiarowy - wersja mobilna
-  http://127.0.0.1:8000
-  http://192.168.1.14:8000
+──────────────────────────────────────────────────────────
+  ASYSTENT POMIAROWY - WERSJA MOBILNA
+──────────────────────────────────────────────────────────
+
+  Wejdz tym adresem w przegladarce telefonu:
+
+      http://192.168.1.14:8000
+
+  Albo zeskanuj aparatem telefonu:
+
+      [kod QR]
+
+  Na tym komputerze: http://127.0.0.1:8000
+  Telefon i komputer musza byc w tej samej sieci Wi-Fi.
 ```
 
-Wejdź na ten drugi adres w przeglądarce telefonu — **telefon i komputer muszą być w tej samej sieci Wi-Fi**.
-Nie trzeba niczego instalować na telefonie ani konfigurować HTTPS.
+**Telefon i komputer muszą być w tej samej sieci Wi-Fi.** Nie trzeba niczego instalować na telefonie
+ani konfigurować HTTPS. Adres `127.0.0.1` działa **tylko na komputerze** — telefon nigdy tam nie dotrze.
 
 Przebieg pracy:
 
@@ -116,6 +127,28 @@ Znane ograniczenia wersji mobilnej:
   więc granica precyzji wskazania palcem to ~1 mm. Zapis i tak liczony jest w pełnej rozdzielczości.
 * Serwer trzyma w pamięci kilka ostatnich zdjęć (`--max-sessions`); starsze wygasają wraz z plikami wyniku.
 * Jeśli iPhone wysyła HEIC zamiast JPEG, przełącz *Ustawienia → Aparat → Formaty → Najbardziej zgodny*.
+
+### Telefon nie otwiera strony
+
+Zacznij od diagnostyki — wypisuje wszystkie adresy komputera, sprawdza port i podaje komendy do zapory:
+
+```bash
+python serve_wall.py --diagnose
+```
+
+Przyczyny w kolejności, w jakiej je spotkasz:
+
+| Objaw | Przyczyna | Co zrobić |
+|---|---|---|
+| „Nie można połączyć się z serwerem", ładuje się w nieskończoność | **Zapora** blokuje port 8000 | Windows pyta o zgodę przy pierwszym starcie — jeśli kliknąłeś „Anuluj", odblokuj port komendą z `--diagnose`. Sprawdź też, czy sieć Wi-Fi jest oznaczona jako **Prywatna**, nie Publiczna. |
+| To samo, a zapora wyłączona | Telefon jest w **innej sieci** | Wyłącz w telefonie transmisję komórkową (zostaw samo Wi-Fi). Sieci dla gości i hotele blokują ruch między urządzeniami — włącz wtedy **hotspot w telefonie** i podłącz do niego komputer. |
+| Strona pusta / „odmowa połączenia" | Użyty adres `127.0.0.1` lub `localhost` | To adres pętli zwrotnej, działa tylko na komputerze. Użyj adresu `192.168.x.x` z listy. |
+| `BLAD: port 8000 jest juz zajety` | Serwer działa w innym oknie | Zamknij tamto okno albo `python serve_wall.py --port 8001`. |
+| `ModuleNotFoundError: No module named 'flask'` | Brak zależności | `pip install -r requirements.txt` — w tym samym środowisku, w którym uruchamiasz serwer. |
+| Komputer ma kilka adresów (Wi-Fi, kabel, VPN) | Pierwszy adres to nie ten interfejs | Spróbuj kolejnych adresów z listy. **Rozłącz VPN** — potrafi przechwycić ruch lokalny. |
+
+Szybki test bez telefonu: otwórz `http://127.0.0.1:8000` na samym komputerze. Jeśli tam działa, problem leży
+w sieci lub zaporze, a nie w aplikacji.
 
 ## Obsługa okna pomiarowego (wersja desktopowa)
 
@@ -211,16 +244,6 @@ python measure_wall.py --image sciana.jpg --marker-size-mm 164
 
 Marker naklej na sztywną płytę — pofalowana kartka psuje pomiar bardziej niż błąd wydruku.
 
-### D. Wersja mobilna
-
-```bash
-python serve_wall.py
-```
-
-Wejdź telefonem pod wypisany adres, wyślij `sciana_testowa.jpg` (albo zrób zdjęcie ekranu z tym plikiem)
-i porównaj odczyty z tym samym kluczem co w punkcie A — wynik musi się zgadzać co do dziesiątej milimetra
-z wersją desktopową, bo obie liczą tym samym kodem.
-
 ### C. Prawdziwy test dokładności — referencja z miarki
 
 To jedyny test, który mówi, czy narzędzie nadaje się na budowę:
@@ -252,6 +275,16 @@ python measure_wall.py --image sciana.jpg --no-gui --save-rectified rektyfikacja
 
 Obejrzyj `rektyfikacja.png`: jeśli fugi płytek albo krawędź ościeżnicy są na nim pionowe i poziome,
 rektyfikacja się udała. Jeśli nadal „uciekają”, marker nie leży w płaszczyźnie ściany.
+
+### D. Wersja mobilna
+
+```bash
+python serve_wall.py
+```
+
+Wejdź telefonem pod wypisany adres, wyślij `sciana_testowa.jpg` (albo zrób zdjęcie ekranu z tym plikiem)
+i porównaj odczyty z tym samym kluczem co w punkcie A — wynik musi się zgadzać co do dziesiątej milimetra
+z wersją desktopową, bo obie liczą tym samym kodem.
 
 ## Dokładność
 
@@ -290,6 +323,7 @@ wallmeasure/
     ui.py                   # okno OpenCV HighGUI (zoom, przesuwanie, klawisze)
     cli.py                  # argumenty wiersza poleceń, spięcie potoku
     server.py               # API HTTP dla wersji mobilnej
+    netinfo.py              # diagnostyka sieci, kod QR z adresem
     static/                 # interfejs dotykowy (HTML, CSS, JS)
 tools/generate_marker.py    # generator markera do wydruku
 tools/make_test_photo.py    # syntetyczne zdjęcie testowe z kluczem odpowiedzi

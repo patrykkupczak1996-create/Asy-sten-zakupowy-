@@ -10,3 +10,8 @@ numpy>=1.21
 
 # Tylko dla wersji mobilnej - serwer HTTP, z ktorego korzysta telefon.
 flask>=3.0
+
+# Opcjonalne: kod QR z adresem serwera wypisywany w terminalu, zeby nie
+# przepisywac adresu recznie na telefonie. Bez tej biblioteki wszystko dziala,
+# tylko zamiast kodu QR pojawia sie sam adres.
+qrcode>=7.4
