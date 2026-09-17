@@ -20,7 +20,25 @@ from wallmeasure.netinfo import (
     raport,
     wskazowki_zapory,
 )
-from wallmeasure.server import MAX_SESSIONS, SessionStore, create_app
+
+try:
+    from wallmeasure.server import MAX_SESSIONS, SessionStore, create_app
+except ImportError as brak:  # najczestszy blad startu: brak zaleznosci
+    BRAKUJACE = {
+        "flask": "flask (serwer HTTP wersji mobilnej)",
+        "cv2": "opencv-contrib-python (detekcja markera)",
+        "numpy": "numpy",
+    }
+    nazwa = getattr(brak, "name", "") or ""
+    opis = BRAKUJACE.get(nazwa.split(".")[0], nazwa or "brakujaca biblioteka")
+    print(
+        f"BLAD: brakuje biblioteki: {opis}\n\n"
+        "  Zainstaluj zaleznosci w tym samym srodowisku, w ktorym uruchamiasz serwer:\n"
+        f"      {sys.executable} -m pip install -r requirements.txt\n\n"
+        f"  (uzywany interpreter: {sys.executable})",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from brak
 
 KRESKA = "─" * 58
 
