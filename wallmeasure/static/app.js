@@ -21,6 +21,10 @@ const stan = {
   osnowa: { x: 0, y: 0 },   // punkt (0,0) w px obrazu
   zrodloX: 'marker',   // 'marker' albo 'wskazany' - osobno dla kazdej osi
   zrodloY: 'marker',
+  tryb: 'miarka',      // 'miarka' (punkt-punkt) albo 'punkty' (tabela wspolrzednych)
+  odcinki: [],
+  nastepnyOdcinek: 1,
+  poczatek: null,      // pierwszy koniec odcinka, gdy pomiar jest w toku
   punkty: [],
   nastepneId: 1,
   odniesienie: null,   // nazwa punktu, od ktorego liczy zywy odczyt (null = od zera)
@@ -33,6 +37,10 @@ function roznicaMm(od, do_) {
   const dx = (do_.x - od.x) * mm;
   const dy = (do_.y - od.y) * mm * ($('os-y-gora').checked ? -1 : 1);
   return { dx, dy, l: Math.hypot(dx, dy) };
+}
+
+function dlugoscMm(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y) * stan.sesja.mm_na_piksel;
 }
 
 function punktOdniesienia() {
@@ -164,6 +172,36 @@ function rysuj() {
     ctx.stroke();
   }
 
+  // Odcinki mierzone od punktu do punktu.
+  const odcinekNaEkranie = (a, b, kolor, tekst) => {
+    const pa = naEkran(a), pb = naEkran(b);
+    ctx.strokeStyle = kolor;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+    const dx = pb.x - pa.x, dy = pb.y - pa.y;
+    const dl = Math.hypot(dx, dy);
+    if (dl > 1) {
+      const px = -dy / dl * 9, py = dx / dl * 9;
+      ctx.beginPath();
+      ctx.moveTo(pa.x - px, pa.y - py); ctx.lineTo(pa.x + px, pa.y + py);
+      ctx.moveTo(pb.x - px, pb.y - py); ctx.lineTo(pb.x + px, pb.y + py);
+      ctx.stroke();
+    }
+    if (tekst) etykieta(tekst, (pa.x + pb.x) / 2 + 12, (pa.y + pb.y) / 2 - 8, kolor);
+  };
+
+  stan.odcinki.forEach((odc) => {
+    odcinekNaEkranie(odc.a, odc.b, '#ff8a4e', `${odc.nazwa}  ${fmt(dlugoscMm(odc.a, odc.b))} mm`);
+  });
+
+  // Odcinek w trakcie mierzenia - drugi koniec podaza za celownikiem.
+  if (stan.poczatek) {
+    ctx.setLineDash([8, 6]);
+    odcinekNaEkranie(stan.poczatek, stan.srodek, '#ffb020',
+      `${fmt(dlugoscMm(stan.poczatek, stan.srodek))} mm`);
+    ctx.setLineDash([]);
+  }
+
   // Zmierzone punkty.
   stan.punkty.forEach((punkt) => {
     const p = krzyzyk(punkt.px, '#4fd07a', 13, 2);
@@ -202,6 +240,14 @@ function rysuj() {
 }
 
 function odswiezOdczyt() {
+  if (stan.poczatek) {
+    const { dx, dy, l } = roznicaMm(stan.poczatek, stan.srodek);
+    $('odczyt-skad').textContent = 'odcinek';
+    $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
+    $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
+    $('odczyt-l').textContent = `L ${fmt(l)}`;
+    return;
+  }
   const odniesienie = punktOdniesienia();
   const { dx, dy, l } = odniesienie
     ? roznicaMm(odniesienie.px, stan.srodek)
@@ -316,9 +362,8 @@ function odswiezListe() {
     lista.appendChild(element);
   });
   $('licznik').textContent = `Zmierzone punkty: ${stan.punkty.length}`;
-  $('zapisz').disabled = stan.punkty.length === 0;
   $('cofnij').disabled = stan.punkty.length === 0;
-  $('pobieranie').classList.add('ukryty');
+  odswiezZapis();
 }
 
 $('dodaj').onclick = () => {
@@ -337,6 +382,78 @@ $('cofnij').onclick = () => {
   odswiezListe();
   rysuj();
 };
+
+/* --- tryb miarki: klikasz poczatek, klikasz koniec ------------------------ */
+
+function ustawTryb(tryb) {
+  stan.tryb = tryb;
+  stan.poczatek = null;
+  $('tryb-miarka').classList.toggle('aktywny', tryb === 'miarka');
+  $('tryb-punkty').classList.toggle('aktywny', tryb === 'punkty');
+  $('akcje-miarka').hidden = tryb !== 'miarka';
+  $('akcje-punkty').hidden = tryb === 'miarka';
+  $('panel-miarka').hidden = tryb !== 'miarka';
+  $('panel-punkty').hidden = tryb === 'miarka';
+  odswiezOdcinek();
+  rysuj();
+}
+
+function odswiezOdcinek() {
+  $('odcinek').textContent = stan.poczatek ? 'Koniec odcinka' : 'Początek odcinka';
+  $('odcinek-anuluj').disabled = !stan.poczatek;
+}
+
+function odswiezListeOdcinkow() {
+  const lista = $('lista-odcinkow');
+  lista.innerHTML = '';
+  stan.odcinki.forEach((odc, indeks) => {
+    const { dx, dy, l } = roznicaMm(odc.a, odc.b);
+    const element = document.createElement('li');
+    element.innerHTML =
+      `<span class="nazwa">${odc.nazwa}</span>` +
+      `<span class="wartosci"><b>${fmt(l)} mm</b>` +
+      `<span class="rozstaw">poziom ${fmt(dx, true)} &nbsp; pion ${fmt(dy, true)}</span></span>` +
+      `<button class="usun" aria-label="Usuń ${odc.nazwa}">×</button>`;
+    element.querySelector('.usun').onclick = () => {
+      stan.odcinki.splice(indeks, 1);
+      odswiezListeOdcinkow();
+      rysuj();
+    };
+    lista.appendChild(element);
+  });
+  $('licznik-odcinkow').textContent = `Zmierzone odcinki: ${stan.odcinki.length}`;
+  odswiezZapis();
+}
+
+$('tryb-miarka').onclick = () => ustawTryb('miarka');
+$('tryb-punkty').onclick = () => ustawTryb('punkty');
+
+$('odcinek').onclick = () => {
+  if (!stan.poczatek) {
+    stan.poczatek = { ...stan.srodek };
+    pokazStatus('status-pomiar', 'Naprowadź celownik na drugi punkt.', '');
+  } else {
+    const odc = { nazwa: `O${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: { ...stan.srodek } };
+    stan.odcinki.push(odc);
+    stan.poczatek = null;
+    pokazStatus('status-pomiar',
+      `${odc.nazwa}: ${fmt(dlugoscMm(odc.a, odc.b))} mm w linii prostej.`, 'ok');
+    odswiezListeOdcinkow();
+  }
+  odswiezOdcinek();
+  rysuj();
+};
+
+$('odcinek-anuluj').onclick = () => {
+  stan.poczatek = null;
+  odswiezOdcinek();
+  rysuj();
+};
+
+function odswiezZapis() {
+  $('zapisz').disabled = stan.punkty.length === 0 && stan.odcinki.length === 0;
+  $('pobieranie').classList.add('ukryty');
+}
 
 function osnowaWlasna() {
   return stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker';
@@ -423,6 +540,9 @@ function uruchomPomiar(sesja) {
       stan.punkty = [];
       stan.nastepneId = 1;
       stan.odniesienie = null;
+      stan.odcinki = [];
+      stan.nastepnyOdcinek = 1;
+      stan.poczatek = null;
       stan.skala = 1;
 
       $('raport').textContent = sesja.raport;
@@ -435,12 +555,14 @@ function uruchomPomiar(sesja) {
         stan.skala = stan.skalaMin;
         rysuj();
         odswiezListe();
+        odswiezListeOdcinkow();
+        ustawTryb('miarka');
         const ostrzezenia = sesja.ostrzezenia || [];
         pokazStatus(
           'status-pomiar',
           ostrzezenia.length
             ? ostrzezenia.join(' ')
-            : 'Najpierw ustaw zero: celownik na naroznik przy posadzce i "Zeruj X i Y".',
+            : 'Celownik na pierwszy punkt, potem "Początek odcinka".',
           ostrzezenia.length ? 'ostrzezenie' : '',
         );
         gotowe();
@@ -452,7 +574,7 @@ function uruchomPomiar(sesja) {
 }
 
 $('zapisz').onclick = async () => {
-  if (!stan.punkty.length) return;
+  if (!stan.punkty.length && !stan.odcinki.length) return;
   $('zapisz').disabled = true;
   pokazStatus('status-pomiar', 'Zapisuję w pełnej rozdzielczości…');
   try {
@@ -463,6 +585,9 @@ $('zapisz').onclick = async () => {
         osnowa_px: osnowaWlasna() ? [stan.osnowa.x, stan.osnowa.y] : null,
         os_y_w_gore: $('os-y-gora').checked,
         punkty: stan.punkty.map((punkt) => ({ nazwa: punkt.nazwa, px: [punkt.px.x, punkt.px.y] })),
+        odcinki: stan.odcinki.map((odc) => ({
+          nazwa: odc.nazwa, a: [odc.a.x, odc.a.y], b: [odc.b.x, odc.b.y],
+        })),
       }),
     });
     const wynik = await odpowiedz.json();
@@ -472,7 +597,8 @@ $('zapisz').onclick = async () => {
     $('pobieranie').classList.remove('ukryty');
     pokazStatus(
       'status-pomiar',
-      `Zapisano ${wynik.liczba_punktow} punktów (PNG ${(wynik.rozmiar_png / 1048576).toFixed(1)} MB).`,
+      `Zapisano ${wynik.liczba_odcinkow} odcinków i ${wynik.liczba_punktow} punktów ` +
+      `(PNG ${(wynik.rozmiar_png / 1048576).toFixed(1)} MB).`,
       'ok',
     );
     // Przy dluzszej liscie punktow przyciski pobierania sa ponizej krawedzi

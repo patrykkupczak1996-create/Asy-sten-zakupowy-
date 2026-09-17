@@ -38,6 +38,50 @@ class MeasuredPoint:
         }
 
 
+@dataclass
+class MeasuredSegment:
+    """Odcinek miedzy dwoma wskazanymi punktami - zwykla miarka.
+
+    Nie zalezy od osnowy: interesuje nas sama odleglosc, np. od gniazdka
+    do naroznika sciany.
+    """
+
+    segment_id: int
+    a_px: tuple[float, float]
+    b_px: tuple[float, float]
+    mm_per_px: float
+    y_up: bool = False
+    label: str = ""
+
+    @property
+    def name(self) -> str:
+        return self.label or f"O{self.segment_id}"
+
+    @property
+    def dx_mm(self) -> float:
+        return (self.b_px[0] - self.a_px[0]) * self.mm_per_px
+
+    @property
+    def dy_mm(self) -> float:
+        dy = (self.b_px[1] - self.a_px[1]) * self.mm_per_px
+        return -dy if self.y_up else dy
+
+    @property
+    def length_mm(self) -> float:
+        return math.hypot(self.dx_mm, self.dy_mm)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.segment_id,
+            "nazwa": self.name,
+            "dlugosc_mm": round(self.length_mm, 2),
+            "dx_mm": round(self.dx_mm, 2),
+            "dy_mm": round(self.dy_mm, 2),
+            "poczatek_px": [round(self.a_px[0], 2), round(self.a_px[1], 2)],
+            "koniec_px": [round(self.b_px[0], 2), round(self.b_px[1], 2)],
+        }
+
+
 class MeasurementSession:
     """Zbiera punkty pomiarowe i przelicza je wzgledem aktualnej osnowy.
 
@@ -52,6 +96,8 @@ class MeasurementSession:
         self._origin_is_marker = True
         self._points: list[MeasuredPoint] = []
         self._next_id = 1
+        self._segments: list[MeasuredSegment] = []
+        self._next_segment_id = 1
 
     # --- osnowa -----------------------------------------------------------
     @property
@@ -119,6 +165,36 @@ class MeasurementSession:
         self._points.clear()
         self._next_id = 1
 
+    # --- odcinki (pomiar od punktu do punktu) ---------------------------
+    @property
+    def segments(self) -> list[MeasuredSegment]:
+        return list(self._segments)
+
+    def add_segment(
+        self,
+        a_px: tuple[float, float],
+        b_px: tuple[float, float],
+        label: str = "",
+    ) -> MeasuredSegment:
+        segment = MeasuredSegment(
+            segment_id=self._next_segment_id,
+            a_px=(float(a_px[0]), float(a_px[1])),
+            b_px=(float(b_px[0]), float(b_px[1])),
+            mm_per_px=self.rect.mm_per_px,
+            y_up=self.y_up,
+            label=label,
+        )
+        self._segments.append(segment)
+        self._next_segment_id += 1
+        return segment
+
+    def clear_segments(self) -> None:
+        self._segments.clear()
+        self._next_segment_id = 1
+
+    def segment_rows(self) -> list[dict]:
+        return [segment.to_dict() for segment in self._segments]
+
     def _recompute(self) -> None:
         for point in self._points:
             point.dx_mm, point.dy_mm = self.to_mm(point.px)
@@ -146,6 +222,7 @@ class MeasurementSession:
             },
             "os_y": "w gore dodatnia" if self.y_up else "w dol dodatnia",
             "liczba_punktow": len(self._points),
+            "liczba_odcinkow": len(self._segments),
         }
 
     def rows(self) -> list[dict]:

@@ -233,8 +233,9 @@ def create_app(store: SessionStore | None = None) -> Flask:
 
         payload = request.get_json(silent=True) or {}
         points = payload.get("punkty") or []
-        if not points:
-            return jsonify(blad="Brak punktow do zapisania."), 400
+        segments = payload.get("odcinki") or []
+        if not points and not segments:
+            return jsonify(blad="Brak pomiarow do zapisania."), 400
 
         measurement = MeasurementSession(
             server_session.rect, y_up=bool(payload.get("os_y_w_gore"))
@@ -248,8 +249,14 @@ def create_app(store: SessionStore | None = None) -> Flask:
                 measurement.add_point(
                     server_session.to_rect_px(point["px"]), label=str(point.get("nazwa", ""))
                 )
+            for segment in segments:
+                measurement.add_segment(
+                    server_session.to_rect_px(segment["a"]),
+                    server_session.to_rect_px(segment["b"]),
+                    label=str(segment.get("nazwa", "")),
+                )
         except (KeyError, TypeError, ValueError):
-            return jsonify(blad="Nieprawidlowy format punktow."), 400
+            return jsonify(blad="Nieprawidlowy format pomiarow."), 400
 
         image_path, json_path = export_results(
             measurement,
@@ -262,7 +269,9 @@ def create_app(store: SessionStore | None = None) -> Flask:
             json=f"/api/session/{session_id}/download/json",
             rozmiar_png=image_path.stat().st_size,
             liczba_punktow=len(measurement.points),
+            liczba_odcinkow=len(measurement.segments),
             punkty=measurement.rows(),
+            odcinki=measurement.segment_rows(),
             json_nazwa=json_path.name,
         )
 

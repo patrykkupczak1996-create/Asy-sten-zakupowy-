@@ -145,14 +145,18 @@ Przebieg pracy:
 3. **Celownik stoi nieruchomo na środku ekranu**, a ty przesuwasz pod nim obraz palcem — dzięki temu palec
    nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
    Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
-4. **Ustaw, skąd liczyć wymiary.** Marker nadaje skalę, ale nie musi być punktem odniesienia.
+4. **Tryb Miarka (domyślny)** — zwykły pomiar od punktu do punktu. Naprowadź celownik na pierwszy punkt,
+   naciśnij **Początek odcinka**, naprowadź na drugi i naciśnij **Koniec odcinka**. Odległość liczy się
+   na żywo w trakcie celowania. Żadnej bazy, żadnych współrzędnych — od gniazdka do narożnika i tyle.
+5. **Tryb Punkty** — tabela współrzędnych do trasowania, gdy potrzebujesz wszystkiego od jednej bazy.
+   Marker nadaje skalę, ale nie musi być punktem odniesienia.
    Naprowadź celownik i naciśnij **Zeruj X i Y** (narożnik), albo zeruj osie osobno: **Tylko X** od krawędzi
    ściany, **Tylko Y** od posadzki — te dwa odniesienia rzadko spotykają się w jednym widocznym punkcie.
    Przełącznik **Y rośnie w górę** zamienia wartości na wysokość nad posadzką. **Marker** wraca do stanu wyjściowego.
-5. **Dodaj punkt** zapisuje pozycję celownika. Pod każdym punktem widnieje **rozstaw względem poprzedniego**,
+6. **Dodaj punkt** zapisuje pozycję celownika. Pod każdym punktem widnieje **rozstaw względem poprzedniego**,
    a kliknięcie wiersza przełącza górny odczyt na pomiar **od tego punktu** — tak sprawdzisz odległość
    między gniazdkami, nie licząc w głowie.
-6. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
+7. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
    widzi telefon) i generuje `wymiary.json`. Oba pliki pobierzesz jednym kliknięciem.
 
 Argumenty: `--host`, `--port` (domyślnie 8000), `--max-sessions` (ile zdjęć trzymać w pamięci naraz), `--debug`.
@@ -210,6 +214,18 @@ Marker jest wzorcem skali, nie punktem, od którego musisz mierzyć — po wskaz
 liczą się od krawędzi ściany i posadzki, a marker można ze ściany zdjąć.
 Zmiana punktu bazowego przelicza wszystkie zebrane punkty — możesz więc zmierzyć ścianę, a dopiero na końcu
 wskazać krawędź, od której liczy stolarz.
+
+## Dwa tryby pomiaru
+
+| | Miarka | Punkty |
+|---|---|---|
+| Pytanie | „ile jest stąd dotąd?" | „gdzie leży każdy punkt?" |
+| Wynik | długość odcinka + rozkład na poziom i pion | tabela współrzędnych od wspólnej bazy |
+| Baza | żadna | osnowa, ustawiana osobno dla każdej osi |
+| Zastosowanie | rozstaw gniazdek, odległość do narożnika, szerokość wnęki | trasowanie, gdy wszystkie otwory wierci się od jednej krawędzi |
+
+Oba trafiają do tego samego eksportu — `odcinki` i `punkty` w JSON, oba naniesione na PNG.
+Odcinków nie dotyczy żaden układ odniesienia, więc zmiana zera ich nie rusza.
 
 ## Format `wymiary.json`
 

@@ -17,6 +17,7 @@ COLOR_MARKER = (0, 200, 255)     # pomaranczowy - marker referencyjny
 COLOR_ORIGIN = (60, 60, 255)     # czerwony - punkt bazowy (0,0)
 COLOR_POINT = (80, 230, 80)      # zielony - punkty instalacyjne
 COLOR_GUIDE = (255, 200, 0)      # blekitny - linie wymiarowe DX/DY
+COLOR_SEGMENT = (90, 140, 255)   # pomaranczowo-czerwony - odcinki punkt-punkt
 COLOR_TEXT = (255, 255, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -187,7 +188,40 @@ def draw_annotations(
             color,
         )
 
-    # 4. Punkt bazowy rysujemy na koncu - musi byc zawsze na wierzchu.
+    # 4. Odcinki mierzone od punktu do punktu.
+    for segment in session.segments:
+        a = to_canvas(segment.a_px)
+        b = to_canvas(segment.b_px)
+        if not (visible(a, 60 * scale) or visible(b, 60 * scale)):
+            continue
+        cv2.line(
+            canvas,
+            (int(round(a[0])), int(round(a[1]))),
+            (int(round(b[0])), int(round(b[1]))),
+            COLOR_SEGMENT, thickness + 1, cv2.LINE_AA,
+        )
+        # Poprzeczki na koncach, zeby bylo widac, gdzie odcinek sie zaczyna i konczy.
+        kierunek = np.array([b[0] - a[0], b[1] - a[1]], dtype=np.float64)
+        dlugosc = float(np.linalg.norm(kierunek))
+        if dlugosc > 1:
+            prostopadle = np.array([-kierunek[1], kierunek[0]]) / dlugosc * (9 * scale)
+            for koniec in (a, b):
+                cv2.line(
+                    canvas,
+                    (int(round(koniec[0] - prostopadle[0])), int(round(koniec[1] - prostopadle[1]))),
+                    (int(round(koniec[0] + prostopadle[0])), int(round(koniec[1] + prostopadle[1]))),
+                    COLOR_SEGMENT, thickness + 1, cv2.LINE_AA,
+                )
+        srodek = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if visible(srodek, 60 * scale):
+            draw_label(
+                canvas,
+                f"{segment.name}  {segment.length_mm:.1f} mm",
+                (srodek[0] + 12 * scale, srodek[1] - 10 * scale),
+                scale, COLOR_SEGMENT,
+            )
+
+    # 5. Punkt bazowy rysujemy na koncu - musi byc zawsze na wierzchu.
     if visible(origin, 40 * scale):
         draw_crosshair(canvas, origin, scale, COLOR_ORIGIN, radius_base=16.0)
         draw_label(
@@ -215,6 +249,16 @@ def hud_lines(
     if cursor_px is not None:
         cx_mm, cy_mm = session.to_mm(cursor_px)
         lines.append(f"KURSOR: X {cx_mm:+8.1f} mm   Y {cy_mm:+8.1f} mm")
+
+    segments = session.segments
+    if segments:
+        lines.append("")
+        lines.append(f"ODCINKI ({len(segments)}):  ID    dlugosc      DX        DY")
+        for segment in segments[-max_points:]:
+            lines.append(
+                f"  {segment.name:>4}  {segment.length_mm:9.1f} {segment.dx_mm:+9.1f} "
+                f"{segment.dy_mm:+9.1f}"
+            )
 
     points = session.points
     lines.append("")

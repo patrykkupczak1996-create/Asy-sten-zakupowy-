@@ -64,13 +64,31 @@
   </div>
 
   <div class="panel">
-    <div class="pasek-akcji przyklejony">
-      <button id="dodaj" class="przycisk glowny">Dodaj punkt</button>
-      <button id="cofnij" class="przycisk">Cofnij</button>
+    <div class="przyklejony">
+      <div class="tryby">
+        <button id="tryb-miarka" class="tryb aktywny" type="button">Miarka</button>
+        <button id="tryb-punkty" class="tryb" type="button">Punkty</button>
+      </div>
+      <div class="pasek-akcji" id="akcje-miarka">
+        <button id="odcinek" class="przycisk glowny">Początek odcinka</button>
+        <button id="odcinek-anuluj" class="przycisk" disabled>Anuluj</button>
+      </div>
+      <div class="pasek-akcji" id="akcje-punkty" hidden>
+        <button id="dodaj" class="przycisk glowny">Dodaj punkt</button>
+        <button id="cofnij" class="przycisk">Cofnij</button>
+      </div>
     </div>
 
+    <div id="panel-miarka">
+      <p class="wskazowka">Naprowadź celownik na pierwszy punkt i naciśnij <b>Początek odcinka</b>,
+        potem na drugi — <b>Koniec odcinka</b>. Odległość liczy się na żywo, bez żadnej bazy.</p>
+      <p id="licznik-odcinkow" class="podpis">Zmierzone odcinki: 0</p>
+      <ul id="lista-odcinkow" class="lista"></ul>
+    </div>
+
+    <div id="panel-punkty" hidden>
     <p class="wskazowka">Celownik na środku obrazu wyznacza mierzony punkt —
-      ustaw go i naciśnij <b>Dodaj punkt</b>.</p>
+      ustaw go i naciśnij <b>Dodaj punkt</b>. Ten tryb buduje tabelę współrzędnych do trasowania.</p>
 
     <div class="zerowanie">
       <span class="tytul">Skąd liczyć wymiary</span>
@@ -88,6 +106,7 @@
 
     <p id="licznik" class="podpis">Zmierzone punkty: 0</p>
     <ul id="lista-punktow" class="lista"></ul>
+    </div>
 
     <div class="pasek-akcji">
       <button id="zapisz" class="przycisk glowny">Zapisz wynik</button>

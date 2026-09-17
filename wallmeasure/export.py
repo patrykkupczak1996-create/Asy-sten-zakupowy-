@@ -31,6 +31,7 @@ def save_json(session: MeasurementSession, path: str | Path, source_image: str =
         "wersja": 1,
         "data": datetime.now().isoformat(timespec="seconds"),
         "metadane": session.metadata(source_image),
+        "odcinki": session.segment_rows(),
         "punkty": session.rows(),
     }
     path.write_text(
