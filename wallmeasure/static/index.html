@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#14171c">
+<title>Wymiarowanie ściany</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314171c'/%3E%3Cg stroke='%23ffb020' stroke-width='2' fill='none'%3E%3Ccircle cx='16' cy='16' r='6'/%3E%3Cpath d='M16 2v6M16 24v6M2 16h6M24 16h6'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Ekran 1: wybór zdjęcia i parametrów markera -->
+<section id="ekran-start" class="ekran">
+  <header class="naglowek">
+    <h1>Wymiarowanie ściany</h1>
+    <p>Zrób zdjęcie ściany z markerem ArUco. Punkty zmierzysz palcem na wyprostowanym obrazie.</p>
+  </header>
+
+  <label class="przycisk glowny plik">
+    <span>Zrób zdjęcie lub wybierz plik</span>
+    <input type="file" id="plik" accept="image/*" capture="environment">
+  </label>
+  <p id="nazwa-pliku" class="podpis"></p>
+
+  <div class="pola">
+    <label>Bok markera [mm]
+      <input type="number" id="marker-mm" value="180" min="10" step="1" inputmode="decimal">
+    </label>
+    <label>ID markera
+      <input type="number" id="marker-id" value="0" min="-1" step="1" inputmode="numeric">
+    </label>
+    <label>Skala [mm/px]
+      <input type="number" id="mm-px" value="0.5" min="0.1" step="0.05" inputmode="decimal">
+    </label>
+    <label class="przelacznik">
+      <input type="checkbox" id="os-y-gora"> Oś Y dodatnia w górę
+    </label>
+  </div>
+
+  <button id="wyslij" class="przycisk glowny" disabled>Wyprostuj perspektywę</button>
+  <p id="status-start" class="status"></p>
+
+  <details class="pomoc">
+    <summary>Jak zrobić dobre zdjęcie</summary>
+    <ul>
+      <li>Marker naklejony na sztywną płytę, płasko na ścianie.</li>
+      <li>Kąt 15–30° od prostopadłej, z odległości ok. 2 m.</li>
+      <li>Marker ma zajmować minimum 150–200 px boku — nie używaj zoomu cyfrowego.</li>
+      <li>Mierzone punkty muszą leżeć w płaszczyźnie ściany.</li>
+    </ul>
+  </details>
+</section>
+
+<!-- Ekran 2: pomiar na wyprostowanym obrazie -->
+<section id="ekran-pomiar" class="ekran ukryty">
+  <div id="plotno-obudowa">
+    <canvas id="plotno"></canvas>
+    <div id="odczyt" class="odczyt">
+      <span id="odczyt-x">X 0,0</span>
+      <span id="odczyt-y">Y 0,0</span>
+      <span id="odczyt-l">L 0,0</span>
+    </div>
+    <button id="zoom-plus" class="przycisk okragly gora">+</button>
+    <button id="zoom-minus" class="przycisk okragly dol">−</button>
+  </div>
+
+  <div class="panel">
+    <div class="pasek-akcji">
+      <button id="dodaj" class="przycisk glowny">Dodaj punkt</button>
+      <button id="baza" class="przycisk">Ustaw bazę</button>
+      <button id="cofnij" class="przycisk">Cofnij</button>
+    </div>
+    <p id="info-baza" class="podpis">Baza (0,0): lewy górny róg markera</p>
+
+    <ul id="lista-punktow" class="lista"></ul>
+
+    <div class="pasek-akcji">
+      <button id="zapisz" class="przycisk glowny">Zapisz wynik</button>
+      <button id="nowe" class="przycisk">Nowe zdjęcie</button>
+    </div>
+    <p id="status-pomiar" class="status"></p>
+    <div id="pobieranie" class="pobieranie ukryty">
+      <a id="link-png" class="przycisk" download>Pobierz PNG</a>
+      <a id="link-json" class="przycisk" download>Pobierz JSON</a>
+    </div>
+
+    <details class="pomoc">
+      <summary>Szczegóły detekcji</summary>
+      <pre id="raport"></pre>
+    </details>
+  </div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

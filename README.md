@@ -3,6 +3,11 @@
 Proof of Concept narzędzia dla stolarza: ze zwykłego zdjęcia ściany (zrobionego telefonem, także pod lekkim kątem)
 odczytujesz w milimetrach położenie gniazdek, podejść wody i kratek wentylacyjnych — bez miarki i bez dotykania ściany.
 
+Dwa warianty tego samego potoku obliczeniowego:
+
+* **`measure_wall.py`** — okno na komputerze (OpenCV HighGUI), pomiar myszą.
+* **`serve_wall.py`** — serwer dla telefonu: robisz zdjęcie na budowie i mierzysz palcem w przeglądarce.
+
 Jedynym wzorcem skali jest sztywny marker ArUco o znanym rozmiarze fizycznym (domyślnie **180 × 180 mm**,
 słownik `DICT_4X4_50`, ID 0) naklejony na mierzoną ścianę.
 
@@ -66,7 +71,53 @@ Najważniejsze argumenty:
 
 Pełna lista: `python measure_wall.py --help`.
 
-## Obsługa okna pomiarowego
+## Wersja mobilna — pomiar palcem na telefonie
+
+Cała matematyka zostaje w Pythonie na komputerze; telefon jest ekranem dotykowym i aparatem.
+
+```bash
+pip install -r requirements.txt
+python serve_wall.py
+```
+
+Serwer wypisze adresy, pod którymi jest widoczny:
+
+```
+Asystent pomiarowy - wersja mobilna
+  http://127.0.0.1:8000
+  http://192.168.1.14:8000
+```
+
+Wejdź na ten drugi adres w przeglądarce telefonu — **telefon i komputer muszą być w tej samej sieci Wi-Fi**.
+Nie trzeba niczego instalować na telefonie ani konfigurować HTTPS.
+
+Przebieg pracy:
+
+1. **Zrób zdjęcie lub wybierz plik** — na telefonie otworzy się aparat (`capture="environment"`).
+2. Podaj bok markera (domyślnie 180 mm) i naciśnij **Wyprostuj perspektywę**. Zdjęcie leci na serwer,
+   wraca wyprostowany obraz ściany wraz ze skalą mm/px.
+3. **Celownik stoi nieruchomo na środku ekranu**, a ty przesuwasz pod nim obraz palcem — dzięki temu palec
+   nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
+   Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
+4. **Dodaj punkt** zapisuje pozycję celownika. **Ustaw bazę** przenosi (0,0) pod celownik — np. na narożnik
+   ściany albo linię posadzki; wszystkie zebrane punkty przeliczają się natychmiast.
+5. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
+   widzi telefon) i generuje `wymiary.json`. Oba pliki pobierzesz jednym kliknięciem.
+
+Argumenty: `--host`, `--port` (domyślnie 8000), `--max-sessions` (ile zdjęć trzymać w pamięci naraz), `--debug`.
+
+> **Bezpieczeństwo:** to serwer deweloperski bez uwierzytelniania — każdy w tej samej sieci zobaczy Twoje
+> zdjęcia i pomiary. Uruchamiaj go w zaufanej sieci (domowy router, hotspot telefonu) i nigdy nie wystawiaj
+> bezpośrednio do internetu.
+
+Znane ograniczenia wersji mobilnej:
+
+* Obraz wysyłany na telefon jest skalowany do 2400 px dłuższego boku (przy 0,5 mm/px to ok. 1 px ≈ 1 mm),
+  więc granica precyzji wskazania palcem to ~1 mm. Zapis i tak liczony jest w pełnej rozdzielczości.
+* Serwer trzyma w pamięci kilka ostatnich zdjęć (`--max-sessions`); starsze wygasają wraz z plikami wyniku.
+* Jeśli iPhone wysyła HEIC zamiast JPEG, przełącz *Ustawienia → Aparat → Formaty → Najbardziej zgodny*.
+
+## Obsługa okna pomiarowego (wersja desktopowa)
 
 | Klawisz / przycisk | Działanie |
 |---|---|
@@ -160,6 +211,16 @@ python measure_wall.py --image sciana.jpg --marker-size-mm 164
 
 Marker naklej na sztywną płytę — pofalowana kartka psuje pomiar bardziej niż błąd wydruku.
 
+### D. Wersja mobilna
+
+```bash
+python serve_wall.py
+```
+
+Wejdź telefonem pod wypisany adres, wyślij `sciana_testowa.jpg` (albo zrób zdjęcie ekranu z tym plikiem)
+i porównaj odczyty z tym samym kluczem co w punkcie A — wynik musi się zgadzać co do dziesiątej milimetra
+z wersją desktopową, bo obie liczą tym samym kodem.
+
 ### C. Prawdziwy test dokładności — referencja z miarki
 
 To jedyny test, który mówi, czy narzędzie nadaje się na budowę:
@@ -218,7 +279,8 @@ Co realnie psuje wynik na budowie:
 ## Struktura projektu
 
 ```
-measure_wall.py             # punkt wejścia CLI
+measure_wall.py             # punkt wejścia wersji desktopowej
+serve_wall.py               # punkt wejścia serwera wersji mobilnej
 wallmeasure/
     detect.py               # detekcja markera ArUco, subpiksel, ocena jakości ujęcia
     rectify.py              # homografia, prostowanie perspektywy, skala mm/px
@@ -227,6 +289,8 @@ wallmeasure/
     export.py               # zapis PNG + JSON
     ui.py                   # okno OpenCV HighGUI (zoom, przesuwanie, klawisze)
     cli.py                  # argumenty wiersza poleceń, spięcie potoku
+    server.py               # API HTTP dla wersji mobilnej
+    static/                 # interfejs dotykowy (HTML, CSS, JS)
 tools/generate_marker.py    # generator markera do wydruku
 tools/make_test_photo.py    # syntetyczne zdjęcie testowe z kluczem odpowiedzi
 tests/test_accuracy.py      # test dokładności na syntetycznym zdjęciu

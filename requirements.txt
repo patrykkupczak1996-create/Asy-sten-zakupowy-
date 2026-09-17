@@ -2,6 +2,11 @@
 #
 # opencv-contrib-python zawiera modul cv2.aruco (nie ma go w zwyklym opencv-python).
 # Na maszynie bez srodowiska graficznego uzyj zamiast tego:
-#   opencv-contrib-python-headless>=4.7   (dziala tylko tryb --no-gui)
+#   opencv-contrib-python-headless>=4.7
+# Wersja desktopowa (measure_wall.py) potrzebuje wtedy trybu --no-gui,
+# ale serwer wersji mobilnej (serve_wall.py) dziala bez zmian.
 opencv-contrib-python>=4.7
 numpy>=1.21
+
+# Tylko dla wersji mobilnej - serwer HTTP, z ktorego korzysta telefon.
+flask>=3.0

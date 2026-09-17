@@ -176,7 +176,7 @@ def detect_marker(
             other = ", ".join(str(i) for i, _ in found)
             raise MarkerNotFoundError(
                 f"Na zdjeciu nie ma markera o ID {marker_id}. "
-                f"Wykryte ID: {other}. Uzyj --marker-id, aby wskazac wlasciwy marker."
+                f"Wykryte ID: {other}. Wskaz wlasciwe ID markera."
             )
         if len(matches) > 1:
             raise MarkerNotFoundError(
