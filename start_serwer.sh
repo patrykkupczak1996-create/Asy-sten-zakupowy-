@@ -9,6 +9,13 @@ echo "  ASYSTENT POMIAROWY - uruchamianie serwera"
 echo "=========================================================="
 echo
 
+if [ ! -f serve_wall.py ] || [ ! -f requirements.txt ]; then
+    echo "[BLAD] W tym katalogu nie ma plikow aplikacji."
+    echo "  Katalog: $(pwd)"
+    echo "  Rozpakuj cale archiwum i uruchom skrypt z rozpakowanego folderu."
+    exit 1
+fi
+
 PY=""
 for kandydat in python3 python; do
     if command -v "$kandydat" >/dev/null 2>&1; then

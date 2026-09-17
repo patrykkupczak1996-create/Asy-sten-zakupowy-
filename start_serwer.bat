@@ -14,7 +14,33 @@ echo ==========================================================
 echo   ASYSTENT POMIAROWY - uruchamianie serwera
 echo ==========================================================
 echo.
+echo Katalog: %CD%
+echo.
 
+rem Klikniecie pliku bezposrednio w podgladzie archiwum ZIP powoduje, ze
+rem Windows rozpakowuje do katalogu tymczasowego TYLKO ten jeden plik.
+rem Reszta projektu zostaje w archiwum i nic potem nie dziala.
+if not exist "serve_wall.py" goto :brak_plikow
+if not exist "requirements.txt" goto :brak_plikow
+goto :szukaj_pythona
+
+:brak_plikow
+echo [BLAD] W tym katalogu nie ma plikow aplikacji.
+echo.
+echo   Najczestsza przyczyna: archiwum ZIP nie zostalo rozpakowane.
+echo   Windows pozwala zajrzec do archiwum jak do zwyklego folderu, ale
+echo   plik uruchomiony stamtad nie widzi reszty projektu.
+echo.
+echo   Co zrobic:
+echo   1. Znajdz pobrany plik asystent-pomiarowy-aruco.zip w Eksploratorze.
+echo   2. Kliknij go prawym przyciskiem i wybierz "Wyodrebnij wszystko...".
+echo   3. Wejdz do rozpakowanego folderu - musi byc w nim plik serve_wall.py.
+echo   4. Kliknij dwa razy start_serwer.bat wlasnie tam.
+echo.
+pause
+exit /b 1
+
+:szukaj_pythona
 rem Launcher "py" instaluje sie razem z Pythonem z python.org i dziala
 rem nawet wtedy, gdy instalator nie dopisal Pythona do PATH.
 set "PY="

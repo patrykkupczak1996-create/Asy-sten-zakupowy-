@@ -38,6 +38,11 @@ słownik `DICT_4X4_50`, ID 0) naklejony na mierzoną ścianę.
 Launcher sam znajdzie Pythona, przy pierwszym uruchomieniu doinstaluje biblioteki i wystartuje serwer
 wersji mobilnej. Jeśli Pythona nie ma, wypisze, skąd go pobrać.
 
+> **Najpierw rozpakuj archiwum.** Windows pozwala zajrzeć do pliku `.zip` jak do zwykłego folderu, ale program
+> uruchomiony z takiego podglądu nie widzi reszty projektu. Kliknij archiwum prawym przyciskiem →
+> **Wyodrębnij wszystko**, wejdź do rozpakowanego folderu i dopiero tam uruchom launcher.
+> Launcher sam wykryje ten przypadek i powie, co zrobić.
+
 ### Windows od zera — gdy PowerShell nie zna komendy `python`
 
 Komunikat `The term 'python' is not recognized` oznacza, że **Python nie jest zainstalowany** (albo instalator
@@ -176,6 +181,7 @@ Przyczyny w kolejności, w jakiej je spotkasz:
 | `BLAD: port 8000 jest juz zajety` | Serwer działa w innym oknie | Zamknij tamto okno albo `python serve_wall.py --port 8001`. |
 | `ModuleNotFoundError: No module named 'flask'` | Brak zależności | `pip install -r requirements.txt` — w tym samym środowisku, w którym uruchamiasz serwer. |
 | `The term 'python' is not recognized` | Python nie jest zainstalowany lub nie ma go w PATH | Patrz **Windows od zera** w rozdziale Instalacja. |
+| `Could not open requirements file` lub `can't open file serve_wall.py` | Terminal stoi w katalogu **bez plików projektu** — zwykle nierozpakowany zip | `dir` pokaże, co jest w katalogu. Rozpakuj archiwum (prawy przycisk → **Wyodrębnij wszystko**) i wejdź do folderu, w którym leży `serve_wall.py`. |
 | Komputer ma kilka adresów (Wi-Fi, kabel, VPN) | Pierwszy adres to nie ten interfejs | Spróbuj kolejnych adresów z listy. **Rozłącz VPN** — potrafi przechwycić ruch lokalny. |
 
 Szybki test bez telefonu: otwórz `http://127.0.0.1:8000` na samym komputerze. Jeśli tam działa, problem leży
