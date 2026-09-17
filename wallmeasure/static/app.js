@@ -22,9 +22,21 @@ const stan = {
   osnowaWlasna: false,
   punkty: [],
   nastepneId: 1,
+  odniesienie: null,   // nazwa punktu, od ktorego liczy zywy odczyt (null = od zera)
 };
 
 /* --- przeliczenia --------------------------------------------------------- */
+
+function roznicaMm(od, do_) {
+  const mm = stan.sesja.mm_na_piksel;
+  const dx = (do_.x - od.x) * mm;
+  const dy = (do_.y - od.y) * mm * ($('os-y-gora').checked ? -1 : 1);
+  return { dx, dy, l: Math.hypot(dx, dy) };
+}
+
+function punktOdniesienia() {
+  return stan.punkty.find((p) => p.nazwa === stan.odniesienie) || null;
+}
 
 function naMilimetry(px) {
   const mm = stan.sesja.mm_na_piksel;
@@ -189,7 +201,11 @@ function rysuj() {
 }
 
 function odswiezOdczyt() {
-  const { dx, dy, l } = naMilimetry(stan.srodek);
+  const odniesienie = punktOdniesienia();
+  const { dx, dy, l } = odniesienie
+    ? roznicaMm(odniesienie.px, stan.srodek)
+    : naMilimetry(stan.srodek);
+  $('odczyt-skad').textContent = odniesienie ? `od ${odniesienie.nazwa}` : 'od zera';
   $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
   $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
   $('odczyt-l').textContent = `L ${fmt(l)}`;
@@ -268,12 +284,30 @@ function odswiezListe() {
   lista.innerHTML = '';
   stan.punkty.forEach((punkt, indeks) => {
     const { dx, dy, l } = naMilimetry(punkt.px);
+    const poprzedni = indeks ? stan.punkty[indeks - 1] : null;
+    const rozstaw = poprzedni ? roznicaMm(poprzedni.px, punkt.px) : null;
+
     const element = document.createElement('li');
+    if (punkt.nazwa === stan.odniesienie) element.classList.add('odniesienie');
     element.innerHTML =
       `<span class="nazwa">${punkt.nazwa}</span>` +
-      `<span class="wartosci">X ${fmt(dx, true)} &nbsp; Y ${fmt(dy, true)} &nbsp; L ${fmt(l)} mm</span>` +
+      `<button class="tresc-punktu" type="button">` +
+        `<span class="wartosci">X ${fmt(dx, true)} &nbsp; Y ${fmt(dy, true)} &nbsp; L ${fmt(l)} mm</span>` +
+        (rozstaw
+          ? `<span class="rozstaw">od ${poprzedni.nazwa}: <b>${fmt(rozstaw.l)} mm</b>` +
+            ` &nbsp;(${fmt(rozstaw.dx, true)} / ${fmt(rozstaw.dy, true)})</span>`
+          : '') +
+      `</button>` +
       `<button class="usun" aria-label="Usuń ${punkt.nazwa}">×</button>`;
+
+    // Klikniecie wiersza przelacza zywy odczyt na pomiar od tego punktu.
+    element.querySelector('.tresc-punktu').onclick = () => {
+      stan.odniesienie = stan.odniesienie === punkt.nazwa ? null : punkt.nazwa;
+      odswiezListe();
+      rysuj();
+    };
     element.querySelector('.usun').onclick = () => {
+      if (stan.odniesienie === punkt.nazwa) stan.odniesienie = null;
       stan.punkty.splice(indeks, 1);
       odswiezListe();
       rysuj();
@@ -295,7 +329,10 @@ $('dodaj').onclick = () => {
 
 $('cofnij').onclick = () => {
   const usuniety = stan.punkty.pop();
-  if (usuniety) stan.nastepneId--;
+  if (usuniety) {
+    stan.nastepneId--;
+    if (stan.odniesienie === usuniety.nazwa) stan.odniesienie = null;
+  }
   odswiezListe();
   rysuj();
 };
@@ -376,6 +413,7 @@ function uruchomPomiar(sesja) {
       stan.srodek = { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 };
       stan.punkty = [];
       stan.nastepneId = 1;
+      stan.odniesienie = null;
       stan.skala = 1;
 
       $('raport').textContent = sesja.raport;

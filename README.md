@@ -145,8 +145,10 @@ Przebieg pracy:
 3. **Celownik stoi nieruchomo na środku ekranu**, a ty przesuwasz pod nim obraz palcem — dzięki temu palec
    nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
    Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
-4. **Dodaj punkt** zapisuje pozycję celownika. **Ustaw bazę** przenosi (0,0) pod celownik — np. na narożnik
+4. **Dodaj punkt** zapisuje pozycję celownika. **Zero tutaj** przenosi (0,0) pod celownik — np. na narożnik
    ściany albo linię posadzki; wszystkie zebrane punkty przeliczają się natychmiast.
+   Pod każdym punktem widnieje **rozstaw względem poprzedniego**, a kliknięcie wiersza przełącza
+   górny odczyt na pomiar **od tego punktu** — tak sprawdzisz odległość między gniazdkami, nie licząc w głowie.
 5. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
    widzi telefon) i generuje `wymiary.json`. Oba pliki pobierzesz jednym kliknięciem.
 
@@ -225,11 +227,19 @@ wskazać krawędź, od której liczy stolarz.
     "liczba_punktow": 2
   },
   "punkty": [
-    { "id": 1, "nazwa": "P1", "x_mm": 63.18, "y_mm": -423.69,
-      "odleglosc_mm": 428.38, "piksel_x": 1764.66, "piksel_y": 1323.0 }
+    { "id": 1, "nazwa": "P1", "x_mm": 300.64, "y_mm": 250.55,
+      "odleglosc_mm": 391.35, "piksel_x": 1764.66, "piksel_y": 1323.0 },
+    { "id": 2, "nazwa": "P2", "x_mm": 700.67, "y_mm": 250.45,
+      "odleglosc_mm": 744.09, "piksel_x": 2560.12, "piksel_y": 1322.8,
+      "od_poprzedniego": { "nazwa": "P1", "dx_mm": 400.04, "dy_mm": -0.11, "odleglosc_mm": 400.04 } }
   ]
 }
 ```
+
+Wspolrzędne `x_mm` / `y_mm` liczone są zawsze od osnowy — przy trasowaniu każdy otwór odmierza się od tej
+samej bazy, żeby błędy się nie sumowały. `od_poprzedniego` to osobna informacja: rozstaw między kolejnymi
+punktami. Jest **dokładniejszy niż same współrzędne**, bo wspólny błąd obu punktów się w odejmowaniu znosi —
+w teście P1 i P2 mają po ~0,6 mm odchyłki, a ich rozstaw wychodzi 400,04 mm przy zadanych 400,0 mm.
 
 ## Jak to przetestować
 

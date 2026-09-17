@@ -149,4 +149,25 @@ class MeasurementSession:
         }
 
     def rows(self) -> list[dict]:
-        return [point.to_dict() for point in self._points]
+        """Tabela punktow z dodatkowym rozstawem wzgledem punktu poprzedniego.
+
+        Wspolrzedne x/y licza sie zawsze od osnowy - przy trasowaniu kazdy otwor
+        odmierza sie od tej samej bazy, zeby bledy sie nie sumowaly. Rozstaw
+        wzgledem poprzednika to osobna informacja: tego potrzeba przy sprawdzaniu
+        odleglosci miedzy gniazdkami.
+        """
+        wiersze = []
+        for indeks, punkt in enumerate(self._points):
+            wiersz = punkt.to_dict()
+            if indeks:
+                poprzedni = self._points[indeks - 1]
+                dx_mm = punkt.dx_mm - poprzedni.dx_mm
+                dy_mm = punkt.dy_mm - poprzedni.dy_mm
+                wiersz["od_poprzedniego"] = {
+                    "nazwa": poprzedni.name,
+                    "dx_mm": round(dx_mm, 2),
+                    "dy_mm": round(dy_mm, 2),
+                    "odleglosc_mm": round(math.hypot(dx_mm, dy_mm), 2),
+                }
+            wiersze.append(wiersz)
+        return wiersze
