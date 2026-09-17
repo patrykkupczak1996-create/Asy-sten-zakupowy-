@@ -146,8 +146,12 @@ Przebieg pracy:
    nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
    Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
 4. **Tryb Miarka (domyślny)** — zwykły pomiar od punktu do punktu. Naprowadź celownik na pierwszy punkt,
-   naciśnij **Początek odcinka**, naprowadź na drugi i naciśnij **Koniec odcinka**. Odległość liczy się
+   naciśnij **Początek odcinka**, naprowadź na drugi i naciśnij **Koniec odcinka**. Odległość i kąt liczą się
    na żywo w trakcie celowania. Żadnej bazy, żadnych współrzędnych — od gniazdka do narożnika i tyle.
+   **Prostuj do poziomu i pionu** (odpowiednik ORTHO z CAD-a, domyślnie włączone) przyciąga odcinek do
+   równego kąta, gdy zabraknie do niego mniej niż 4° — znacznik zmienia się wtedy na zielone `POZIOM`
+   albo `PION`, a przez kadr biegnie linia śledząca. Trafienie palcem w równe 0° jest praktycznie
+   niemożliwe, a przy montażu to najczęstszy przypadek.
 5. **Tryb Punkty** — tabela współrzędnych do trasowania, gdy potrzebujesz wszystkiego od jednej bazy.
    Marker nadaje skalę, ale nie musi być punktem odniesienia.
    Naprowadź celownik i naciśnij **Zeruj X i Y** (narożnik), albo zeruj osie osobno: **Tylko X** od krawędzi
@@ -220,7 +224,7 @@ wskazać krawędź, od której liczy stolarz.
 | | Miarka | Punkty |
 |---|---|---|
 | Pytanie | „ile jest stąd dotąd?" | „gdzie leży każdy punkt?" |
-| Wynik | długość odcinka + rozkład na poziom i pion | tabela współrzędnych od wspólnej bazy |
+| Wynik | długość odcinka, kąt, rozkład na poziom i pion | tabela współrzędnych od wspólnej bazy |
 | Baza | żadna | osnowa, ustawiana osobno dla każdej osi |
 | Zastosowanie | rozstaw gniazdek, odległość do narożnika, szerokość wnęki | trasowanie, gdy wszystkie otwory wierci się od jednej krawędzi |
 

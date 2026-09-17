@@ -39,6 +39,34 @@ function roznicaMm(od, do_) {
   return { dx, dy, l: Math.hypot(dx, dy) };
 }
 
+/* Przyciaganie do poziomu i pionu, jak ORTHO w programach CAD: gdy odcinek
+ * jest blisko kata prostego, prostujemy go dokladnie i mowimy o tym wprost.
+ * Bez tego trafienie w rowne 0 albo 90 stopni palcem jest praktycznie
+ * niemozliwe, a przy montazu to najczestszy przypadek. */
+const TOLERANCJA_ORTHO = 4;   // stopnie
+
+function katOdcinka(a, b) {
+  const kat = Math.atan2(-(b.y - a.y), b.x - a.x) * 180 / Math.PI;
+  if (kat > 90) return kat - 180;
+  if (kat <= -90) return kat + 180;
+  return kat;
+}
+
+function koniecOdcinka(od, kursor) {
+  const dx = kursor.x - od.x, dy = kursor.y - od.y;
+  if (!$('ortho').checked || (dx === 0 && dy === 0)) {
+    return { px: { ...kursor }, os: null };
+  }
+  const kat = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);   // 0..180
+  if (kat <= TOLERANCJA_ORTHO || kat >= 180 - TOLERANCJA_ORTHO) {
+    return { px: { x: kursor.x, y: od.y }, os: 'poziom' };
+  }
+  if (Math.abs(kat - 90) <= TOLERANCJA_ORTHO) {
+    return { px: { x: od.x, y: kursor.y }, os: 'pion' };
+  }
+  return { px: { ...kursor }, os: null };
+}
+
 function dlugoscMm(a, b) {
   return Math.hypot(b.x - a.x, b.y - a.y) * stan.sesja.mm_na_piksel;
 }
@@ -196,9 +224,35 @@ function rysuj() {
 
   // Odcinek w trakcie mierzenia - drugi koniec podaza za celownikiem.
   if (stan.poczatek) {
+    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const kolor = k.os ? '#4fd07a' : '#ffb020';
+    const kat = katOdcinka(stan.poczatek, k.px);
+    const opis = k.os
+      ? `${fmt(dlugoscMm(stan.poczatek, k.px))} mm  ${k.os === 'poziom' ? 'POZIOM' : 'PION'}`
+      : `${fmt(dlugoscMm(stan.poczatek, k.px))} mm  ${fmt(kat, true)}\u00B0`;
+
+    if (k.os) {
+      // Linia sledzaca przedluzona poza koniec - sygnal, ze os jest zlapana.
+      const a = naEkran(stan.poczatek), b = naEkran(k.px);
+      const dx = b.x - a.x, dy = b.y - a.y, dl = Math.hypot(dx, dy) || 1;
+      ctx.strokeStyle = 'rgba(79, 208, 122, .5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 5]);
+      ctx.beginPath();
+      ctx.moveTo(a.x - dx / dl * 2000, a.y - dy / dl * 2000);
+      ctx.lineTo(b.x + dx / dl * 2000, b.y + dy / dl * 2000);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Cienka odnoga do celownika, zeby bylo widac, ze punkt zostal wyprostowany.
+      const c = naEkran(stan.srodek);
+      ctx.strokeStyle = 'rgba(79, 208, 122, .75)';
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.setLineDash([8, 6]);
-    odcinekNaEkranie(stan.poczatek, stan.srodek, '#ffb020',
-      `${fmt(dlugoscMm(stan.poczatek, stan.srodek))} mm`);
+    odcinekNaEkranie(stan.poczatek, k.px, kolor, opis);
     ctx.setLineDash([]);
   }
 
@@ -241,8 +295,13 @@ function rysuj() {
 
 function odswiezOdczyt() {
   if (stan.poczatek) {
-    const { dx, dy, l } = roznicaMm(stan.poczatek, stan.srodek);
-    $('odczyt-skad').textContent = 'odcinek';
+    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const { dx, dy, l } = roznicaMm(stan.poczatek, k.px);
+    const znacznik = $('odczyt-skad');
+    znacznik.classList.toggle('zlapane', Boolean(k.os));
+    znacznik.textContent = k.os
+      ? (k.os === 'poziom' ? 'poziom' : 'pion')
+      : `${fmt(katOdcinka(stan.poczatek, k.px), true)}\u00B0`;
     $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
     $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
     $('odczyt-l').textContent = `L ${fmt(l)}`;
@@ -252,6 +311,7 @@ function odswiezOdczyt() {
   const { dx, dy, l } = odniesienie
     ? roznicaMm(odniesienie.px, stan.srodek)
     : naMilimetry(stan.srodek);
+  $('odczyt-skad').classList.remove('zlapane');
   $('odczyt-skad').textContent = odniesienie ? `od ${odniesienie.nazwa}` : 'od zera';
   $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
   $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
@@ -412,7 +472,9 @@ function odswiezListeOdcinkow() {
     element.innerHTML =
       `<span class="nazwa">${odc.nazwa}</span>` +
       `<span class="wartosci"><b>${fmt(l)} mm</b>` +
-      `<span class="rozstaw">poziom ${fmt(dx, true)} &nbsp; pion ${fmt(dy, true)}</span></span>` +
+      `<span class="rozstaw">poziom ${fmt(dx, true)} &nbsp; pion ${fmt(dy, true)}` +
+      `&nbsp; ${odc.os ? (odc.os === 'poziom' ? '— poziomo' : '| pionowo')
+                       : fmt(katOdcinka(odc.a, odc.b), true) + '\u00B0'}</span></span>` +
       `<button class="usun" aria-label="Usuń ${odc.nazwa}">×</button>`;
     element.querySelector('.usun').onclick = () => {
       stan.odcinki.splice(indeks, 1);
@@ -433,11 +495,13 @@ $('odcinek').onclick = () => {
     stan.poczatek = { ...stan.srodek };
     pokazStatus('status-pomiar', 'Naprowadź celownik na drugi punkt.', '');
   } else {
-    const odc = { nazwa: `O${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: { ...stan.srodek } };
+    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const odc = { nazwa: `O${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: k.px, os: k.os };
     stan.odcinki.push(odc);
     stan.poczatek = null;
+    const jak = odc.os === 'poziom' ? ' w poziomie' : odc.os === 'pion' ? ' w pionie' : '';
     pokazStatus('status-pomiar',
-      `${odc.nazwa}: ${fmt(dlugoscMm(odc.a, odc.b))} mm w linii prostej.`, 'ok');
+      `${odc.nazwa}: ${fmt(dlugoscMm(odc.a, odc.b))} mm${jak}.`, 'ok');
     odswiezListeOdcinkow();
   }
   odswiezOdcinek();
@@ -483,6 +547,8 @@ $('zero-reset').onclick = () => {
   pokazStatus('status-pomiar', 'Zero wróciło na róg markera.', 'ok');
   odswiezOpisZera(); odswiezListe(); rysuj();
 };
+
+$('ortho').addEventListener('change', () => rysuj());
 
 $('os-y-gora').addEventListener('change', () => {
   if (stan.sesja) { odswiezListe(); rysuj(); }

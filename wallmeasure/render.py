@@ -214,9 +214,12 @@ def draw_annotations(
                 )
         srodek = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
         if visible(srodek, 60 * scale):
+            # Odcinek poziomy albo pionowy opisujemy znakiem kata prostego
+            # zamiast liczby - tak jak na rysunku warsztatowym.
+            opis_kata = "|_" if segment.is_orthogonal else f"{segment.angle_deg:+.1f} st"
             draw_label(
                 canvas,
-                f"{segment.name}  {segment.length_mm:.1f} mm",
+                f"{segment.name}  {segment.length_mm:.1f} mm  {opis_kata}",
                 (srodek[0] + 12 * scale, srodek[1] - 10 * scale),
                 scale, COLOR_SEGMENT,
             )
@@ -253,11 +256,12 @@ def hud_lines(
     segments = session.segments
     if segments:
         lines.append("")
-        lines.append(f"ODCINKI ({len(segments)}):  ID    dlugosc      DX        DY")
+        lines.append(f"ODCINKI ({len(segments)}):  ID    dlugosc      DX        DY     kat")
         for segment in segments[-max_points:]:
+            kat = "  |_" if segment.is_orthogonal else f"{segment.angle_deg:+6.1f}"
             lines.append(
                 f"  {segment.name:>4}  {segment.length_mm:9.1f} {segment.dx_mm:+9.1f} "
-                f"{segment.dy_mm:+9.1f}"
+                f"{segment.dy_mm:+9.1f} {kat:>6}"
             )
 
     points = session.points

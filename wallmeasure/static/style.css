@@ -152,11 +152,21 @@ html, body {
 .lista .rozstaw { font-size: 12px; color: var(--tekst-przygaszony); }
 .lista .rozstaw b { color: var(--akcent); font-weight: 600; }
 
+.przelacznik.ortho {
+  display: flex; align-items: center; gap: 10px; margin: 0;
+  padding: 9px 12px; border-radius: var(--promien);
+  background: var(--panel-jasny); border: 1px solid var(--obramowanie);
+  font-size: 14px; cursor: pointer;
+}
+.przelacznik.ortho input { width: 20px; height: 20px; accent-color: var(--zielony); }
+
 .odczyt .skad {
   position: absolute; top: -7px; left: 12px; padding: 1px 7px; border-radius: 999px;
   background: var(--akcent); color: #06121f; font-size: 10px; font-weight: 700;
   letter-spacing: .04em; text-transform: uppercase;
 }
+/* Zlapanie poziomu albo pionu sygnalizowane kolorem - tak jak ORTHO w CAD-zie. */
+.odczyt .skad.zlapane { background: var(--zielony); color: #06210f; }
 .lista .wartosci { flex: 1; color: var(--tekst); display: flex; flex-direction: column; gap: 2px; }
 .lista .usun {
   min-height: 32px; padding: 4px 10px; background: transparent;

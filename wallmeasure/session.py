@@ -70,11 +70,35 @@ class MeasuredSegment:
     def length_mm(self) -> float:
         return math.hypot(self.dx_mm, self.dy_mm)
 
+    @property
+    def angle_deg(self) -> float:
+        """Nachylenie odcinka wzgledem poziomu, w stopniach.
+
+        Zakres (-90, 90]: 0 to linia pozioma, 90 pionowa, wartosc dodatnia
+        oznacza wznoszenie sie w prawo. Liczone z pikseli, niezaleznie od
+        ustawienia zwrotu osi Y, zeby kat zawsze znaczyl to samo.
+        """
+        dx = self.b_px[0] - self.a_px[0]
+        dy_w_gore = -(self.b_px[1] - self.a_px[1])
+        kat = math.degrees(math.atan2(dy_w_gore, dx))
+        if kat > 90:
+            kat -= 180
+        elif kat <= -90:
+            kat += 180
+        return 0.0 if kat == 0 else kat   # bez ujemnego zera w eksporcie
+
+    @property
+    def is_orthogonal(self) -> bool:
+        """Czy odcinek jest dokladnie poziomy albo pionowy."""
+        kat = abs(self.angle_deg)
+        return kat < 1e-6 or abs(kat - 90) < 1e-6
+
     def to_dict(self) -> dict:
         return {
             "id": self.segment_id,
             "nazwa": self.name,
             "dlugosc_mm": round(self.length_mm, 2),
+            "kat_stopnie": round(self.angle_deg, 2),
             "dx_mm": round(self.dx_mm, 2),
             "dy_mm": round(self.dy_mm, 2),
             "poczatek_px": [round(self.a_px[0], 2), round(self.a_px[1], 2)],
