@@ -1,141 +1,146 @@
-/* Pomiar na telefonie.
+/* Miarka ze zdjecia - warstwa interakcji.
  *
- * Zasada: celownik jest nieruchomy na srodku ekranu, a uzytkownik przesuwa pod
- * nim obraz. Palec nigdy nie zasłania mierzonego detalu - to jedyny sposob na
- * precyzyjne wskazanie punktu na dotykowym ekranie.
+ * Zalozenie prowadzace caly interfejs: uzytkownik nie czyta instrukcji.
+ * Na kazdym ekranie ma byc jedna oczywista rzecz do zrobienia, a program
+ * mowi wprost, co sie dzieje i co bedzie dalej.
  *
- * Wszystkie odczyty licza sie lokalnie z trzech liczb otrzymanych z serwera:
- * pozycji osnowy, skali mm/px i rozmiaru obrazu. Serwer odpytywany jest tylko
- * przy wysylce zdjecia i przy zapisie wyniku.
+ * Pomiar dziala na nieruchomym celowniku w srodku kadru - palec nigdy nie
+ * zaslania mierzonego detalu. Wszystkie odczyty licza sie lokalnie z trzech
+ * liczb otrzymanych z serwera (skala, osnowa, rozmiar obrazu), wiec
+ * przesuwanie i zoom nie generuja ruchu sieciowego.
  */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
 
+const ETYKIETY = ['Gniazdko', 'Włącznik', 'Woda', 'Odpływ', 'Wentylacja',
+                  'Narożnik', 'Krawędź', 'Wysokość', 'Szerokość'];
+const TOLERANCJA_ORTHO = 4;        // stopnie - przy tylu prostujemy do osi
+const ZOOM_MAX = 16;
+
 const stan = {
-  sesja: null,        // odpowiedz z /api/rectify
-  obraz: null,        // HTMLImageElement z wyprostowana sciana
-  skala: 1,           // powiekszenie obrazu na ekranie
+  sesja: null,
+  obraz: null,
+  skala: 1,
   skalaMin: 1,
-  srodek: { x: 0, y: 0 },   // punkt obrazu (px) pod celownikiem
-  osnowa: { x: 0, y: 0 },   // punkt (0,0) w px obrazu
-  zrodloX: 'marker',   // 'marker' albo 'wskazany' - osobno dla kazdej osi
+  dpr: 1,
+  srodek: { x: 0, y: 0 },
+  zero: { x: 0, y: 0 },
+  zrodloX: 'marker',
   zrodloY: 'marker',
-  tryb: 'miarka',      // 'miarka' (punkt-punkt) albo 'punkty' (tabela wspolrzednych)
   odcinki: [],
   nastepnyOdcinek: 1,
-  poczatek: null,      // pierwszy koniec odcinka, gdy pomiar jest w toku
+  poczatek: null,
   punkty: [],
-  nastepneId: 1,
-  odniesienie: null,   // nazwa punktu, od ktorego liczy zywy odczyt (null = od zera)
+  nastepnyPunkt: 1,
+  nazywany: null,
+  crop: null,
 };
+
+/* --- drobiazgi ------------------------------------------------------------ */
+
+const fmt = (v, znak) => {
+  const t = Math.abs(v).toFixed(1).replace('.', ',');
+  return znak ? (v < 0 ? '−' : '+') + t : t;
+};
+
+/* Polska odmiana liczebnikow - "2 wymiary", nie "2 wymiarow". */
+function odmiana(ile, jeden, dwa, wiele) {
+  const n = Math.abs(ile);
+  if (n === 1) return jeden;
+  const reszta = n % 10, setki = n % 100;
+  if (reszta >= 2 && reszta <= 4 && (setki < 12 || setki > 14)) return dwa;
+  return wiele;
+}
+
+function pamietaj(klucz, wartosc) {
+  try { localStorage.setItem(klucz, wartosc); } catch (e) { /* tryb prywatny */ }
+}
+function pamietane(klucz) {
+  try { return localStorage.getItem(klucz); } catch (e) { return null; }
+}
+
+function pokazEkran(nazwa) {
+  ['start', 'pomiar', 'wynik'].forEach((e) => { $('ekran-' + e).hidden = e !== nazwa; });
+  if (nazwa === 'pomiar') requestAnimationFrame(rysuj);
+}
+
+function status(id, tekst, klasa = '') {
+  const el = $(id);
+  el.textContent = tekst;
+  el.className = `status ${klasa}`;
+}
 
 /* --- przeliczenia --------------------------------------------------------- */
 
-function roznicaMm(od, do_) {
-  const mm = stan.sesja.mm_na_piksel;
-  const dx = (do_.x - od.x) * mm;
-  const dy = (do_.y - od.y) * mm * ($('os-y-gora').checked ? -1 : 1);
+function mmNaPiksel() { return stan.sesja.mm_na_piksel; }
+const wGore = () => $('os-y-gora').checked;
+
+function roznica(od, doP) {
+  const mm = mmNaPiksel();
+  const dx = (doP.x - od.x) * mm;
+  const dy = (doP.y - od.y) * mm * (wGore() ? -1 : 1);
   return { dx, dy, l: Math.hypot(dx, dy) };
 }
 
-/* Przyciaganie do poziomu i pionu, jak ORTHO w programach CAD: gdy odcinek
- * jest blisko kata prostego, prostujemy go dokladnie i mowimy o tym wprost.
- * Bez tego trafienie w rowne 0 albo 90 stopni palcem jest praktycznie
- * niemozliwe, a przy montazu to najczestszy przypadek. */
-const TOLERANCJA_ORTHO = 4;   // stopnie
+function odZera(px) { return roznica(stan.zero, px); }
 
 function katOdcinka(a, b) {
-  const kat = Math.atan2(-(b.y - a.y), b.x - a.x) * 180 / Math.PI;
-  if (kat > 90) return kat - 180;
-  if (kat <= -90) return kat + 180;
-  return kat;
+  const k = Math.atan2(-(b.y - a.y), b.x - a.x) * 180 / Math.PI;
+  return k > 90 ? k - 180 : k <= -90 ? k + 180 : k;
 }
 
+/* Prostowanie do poziomu i pionu, jak ORTHO w programach CAD. Trafienie
+ * palcem w rowne zero stopni jest nieosiagalne, a przy montazu to
+ * najczestszy przypadek. */
 function koniecOdcinka(od, kursor) {
   const dx = kursor.x - od.x, dy = kursor.y - od.y;
-  if (!$('ortho').checked || (dx === 0 && dy === 0)) {
-    return { px: { ...kursor }, os: null };
-  }
-  const kat = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);   // 0..180
-  if (kat <= TOLERANCJA_ORTHO || kat >= 180 - TOLERANCJA_ORTHO) {
-    return { px: { x: kursor.x, y: od.y }, os: 'poziom' };
-  }
-  if (Math.abs(kat - 90) <= TOLERANCJA_ORTHO) {
-    return { px: { x: od.x, y: kursor.y }, os: 'pion' };
-  }
+  if (!$('ortho').checked || (dx === 0 && dy === 0)) return { px: { ...kursor }, os: null };
+  const k = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
+  if (k <= TOLERANCJA_ORTHO || k >= 180 - TOLERANCJA_ORTHO) return { px: { x: kursor.x, y: od.y }, os: 'poziom' };
+  if (Math.abs(k - 90) <= TOLERANCJA_ORTHO) return { px: { x: od.x, y: kursor.y }, os: 'pion' };
   return { px: { ...kursor }, os: null };
 }
-
-function dlugoscMm(a, b) {
-  return Math.hypot(b.x - a.x, b.y - a.y) * stan.sesja.mm_na_piksel;
-}
-
-function punktOdniesienia() {
-  return stan.punkty.find((p) => p.nazwa === stan.odniesienie) || null;
-}
-
-function naMilimetry(px) {
-  const mm = stan.sesja.mm_na_piksel;
-  const dx = (px.x - stan.osnowa.x) * mm;
-  const dy = (px.y - stan.osnowa.y) * mm * ($('os-y-gora').checked ? -1 : 1);
-  return { dx, dy, l: Math.hypot(dx, dy) };
-}
-
-const fmt = (wartosc, znak) => {
-  const tekst = Math.abs(wartosc).toFixed(1).replace('.', ',');
-  if (!znak) return tekst;
-  return (wartosc < 0 ? '−' : '+') + tekst;
-};
 
 /* --- rysowanie ------------------------------------------------------------ */
 
 const plotno = $('plotno');
 const ctx = plotno.getContext('2d');
-let dpr = 1;
 
-/* Bufor rysowania musi nadazac za rozmiarem elementu. Panel z punktami rosnie
- * przy kazdym pomiarze i skraca plotno - gdyby bufor zostal wiekszy, dolna jego
- * czesc nigdy nie byłaby czyszczona i pokazywalaby duchy poprzedniej klatki. */
-function synchronizujRozmiar() {
-  const prostokat = plotno.getBoundingClientRect();
-  dpr = window.devicePixelRatio || 1;
-  const szerokosc = Math.max(1, Math.round(prostokat.width * dpr));
-  const wysokosc = Math.max(1, Math.round(prostokat.height * dpr));
-  if (plotno.width !== szerokosc || plotno.height !== wysokosc) {
-    plotno.width = szerokosc;
-    plotno.height = wysokosc;
-  }
+/* Bufor rysowania musi nadazac za rozmiarem elementu - panel z pomiarami
+ * rosnie i skraca plotno, a niedopasowany bufor zostawia duchy klatki. */
+function synchronizuj() {
+  const r = plotno.getBoundingClientRect();
+  stan.dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * stan.dpr));
+  const h = Math.max(1, Math.round(r.height * stan.dpr));
+  if (plotno.width !== w || plotno.height !== h) { plotno.width = w; plotno.height = h; }
   if (stan.sesja) {
-    stan.skalaMin = Math.min(
-      prostokat.width / stan.sesja.obraz.szerokosc,
-      prostokat.height / stan.sesja.obraz.wysokosc,
-    );
+    stan.skalaMin = Math.max(r.width / stan.sesja.obraz.szerokosc, r.height / stan.sesja.obraz.wysokosc);
     if (stan.skala < stan.skalaMin) stan.skala = stan.skalaMin;
   }
-  return prostokat;
+  return r;
 }
 
-function dopasujPlotno() {
-  if (stan.obraz) rysuj();
-}
-
-new ResizeObserver(() => { if (stan.obraz) rysuj(); }).observe(plotno);
-
-// Punkt obrazu -> wspolrzedne ekranu (CSS px, srodek plotna = stan.srodek).
-function naEkran(px) {
-  const prostokat = plotno.getBoundingClientRect();
+function naEkran(px, r) {
   return {
-    x: prostokat.width / 2 + (px.x - stan.srodek.x) * stan.skala,
-    y: prostokat.height / 2 + (px.y - stan.srodek.y) * stan.skala,
+    x: r.width / 2 + (px.x - stan.srodek.x) * stan.skala,
+    y: r.height / 2 + (px.y - stan.srodek.y) * stan.skala,
   };
 }
 
-function krzyzyk(punkt, kolor, promien, grubosc) {
-  const p = naEkran(punkt);
-  const luka = promien * 0.35;
-  ctx.strokeStyle = kolor;
-  ctx.lineWidth = grubosc;
+function etykieta(tekst, x, y, kolor) {
+  ctx.font = '700 13px -apple-system, "Segoe UI", Roboto, sans-serif';
+  const w = ctx.measureText(tekst).width;
+  ctx.fillStyle = 'rgba(10,13,18,.88)';
+  ctx.fillRect(x - 6, y - 15, w + 12, 21);
+  ctx.fillStyle = kolor;
+  ctx.fillText(tekst, x, y);
+}
+
+function krzyzyk(p, kolor, promien) {
+  const luka = promien * .38;
+  ctx.strokeStyle = kolor; ctx.lineWidth = 2; ctx.lineCap = 'round';
   ctx.beginPath();
   ctx.arc(p.x, p.y, promien, 0, Math.PI * 2);
   ctx.moveTo(p.x - promien - luka, p.y); ctx.lineTo(p.x - luka, p.y);
@@ -143,455 +148,387 @@ function krzyzyk(punkt, kolor, promien, grubosc) {
   ctx.moveTo(p.x, p.y - promien - luka); ctx.lineTo(p.x, p.y - luka);
   ctx.moveTo(p.x, p.y + luka); ctx.lineTo(p.x, p.y + promien + luka);
   ctx.stroke();
-  return p;
 }
 
-function etykieta(tekst, x, y, kolor) {
-  ctx.font = '600 13px system-ui, sans-serif';
-  const szerokosc = ctx.measureText(tekst).width;
-  ctx.fillStyle = 'rgba(20,23,28,.82)';
-  ctx.fillRect(x - 5, y - 15, szerokosc + 10, 20);
-  ctx.fillStyle = kolor;
-  ctx.fillText(tekst, x, y);
+function odcinekNaEkranie(a, b, kolor, tekst, r) {
+  const pa = naEkran(a, r), pb = naEkran(b, r);
+  ctx.strokeStyle = kolor; ctx.lineWidth = 3; ctx.lineCap = 'butt';
+  ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+  const dx = pb.x - pa.x, dy = pb.y - pa.y, dl = Math.hypot(dx, dy);
+  if (dl > 1) {
+    const nx = -dy / dl * 10, ny = dx / dl * 10;
+    ctx.beginPath();
+    ctx.moveTo(pa.x - nx, pa.y - ny); ctx.lineTo(pa.x + nx, pa.y + ny);
+    ctx.moveTo(pb.x - nx, pb.y - ny); ctx.lineTo(pb.x + nx, pb.y + ny);
+    ctx.stroke();
+  }
+  if (tekst) etykieta(tekst, (pa.x + pb.x) / 2 + 13, (pa.y + pb.y) / 2 - 9, kolor);
 }
 
 function rysuj() {
-  const prostokat = synchronizujRozmiar();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, prostokat.width, prostokat.height);
+  const r = synchronizuj();
+  ctx.setTransform(stan.dpr, 0, 0, stan.dpr, 0, 0);
+  ctx.clearRect(0, 0, r.width, r.height);
   if (!stan.obraz) return;
 
-  // Obraz sciany.
-  const lewo = prostokat.width / 2 - stan.srodek.x * stan.skala;
-  const gora = prostokat.height / 2 - stan.srodek.y * stan.skala;
   ctx.imageSmoothingEnabled = stan.skala < 1;
-  ctx.drawImage(
-    stan.obraz, lewo, gora,
+  ctx.drawImage(stan.obraz,
+    r.width / 2 - stan.srodek.x * stan.skala,
+    r.height / 2 - stan.srodek.y * stan.skala,
     stan.sesja.obraz.szerokosc * stan.skala,
-    stan.sesja.obraz.wysokosc * stan.skala,
-  );
+    stan.sesja.obraz.wysokosc * stan.skala);
 
-  // Marker referencyjny.
-  const rogi = stan.sesja.marker.narozniki_px;
-  ctx.strokeStyle = '#ffb020';
-  ctx.lineWidth = 2;
+  // marker referencyjny
+  ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2;
   ctx.beginPath();
-  rogi.forEach(([x, y], i) => {
-    const p = naEkran({ x, y });
+  stan.sesja.marker.narozniki_px.forEach(([x, y], i) => {
+    const p = naEkran({ x, y }, r);
     i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y);
   });
-  ctx.closePath();
-  ctx.stroke();
+  ctx.closePath(); ctx.stroke();
 
-  // Linie wymiarowe do ostatniego punktu.
-  const ostatni = stan.punkty[stan.punkty.length - 1];
-  if (ostatni) {
-    const o = naEkran(stan.osnowa);
-    const c = naEkran(ostatni.px);
-    ctx.strokeStyle = '#4ea1ff';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([7, 6]);
-    ctx.beginPath();
-    ctx.moveTo(o.x, o.y); ctx.lineTo(c.x, o.y); ctx.lineTo(c.x, c.y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(o.x, o.y); ctx.lineTo(c.x, c.y);
-    ctx.stroke();
-  }
-
-  // Odcinki mierzone od punktu do punktu.
-  const odcinekNaEkranie = (a, b, kolor, tekst) => {
-    const pa = naEkran(a), pb = naEkran(b);
-    ctx.strokeStyle = kolor;
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
-    const dx = pb.x - pa.x, dy = pb.y - pa.y;
-    const dl = Math.hypot(dx, dy);
-    if (dl > 1) {
-      const px = -dy / dl * 9, py = dx / dl * 9;
-      ctx.beginPath();
-      ctx.moveTo(pa.x - px, pa.y - py); ctx.lineTo(pa.x + px, pa.y + py);
-      ctx.moveTo(pb.x - px, pb.y - py); ctx.lineTo(pb.x + px, pb.y + py);
-      ctx.stroke();
-    }
-    if (tekst) etykieta(tekst, (pa.x + pb.x) / 2 + 12, (pa.y + pb.y) / 2 - 8, kolor);
-  };
-
-  stan.odcinki.forEach((odc) => {
-    odcinekNaEkranie(odc.a, odc.b, '#ff8a4e', `${odc.nazwa}  ${fmt(dlugoscMm(odc.a, odc.b))} mm`);
+  // zmierzone odcinki
+  stan.odcinki.forEach((o) => {
+    odcinekNaEkranie(o.a, o.b, '#ff8a4e', `${o.nazwa}  ${fmt(roznica(o.a, o.b).l)} mm`, r);
   });
 
-  // Odcinek w trakcie mierzenia - drugi koniec podaza za celownikiem.
+  // odcinek w trakcie mierzenia
   if (stan.poczatek) {
     const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const kolor = k.os ? '#4fd07a' : '#ffb020';
-    const kat = katOdcinka(stan.poczatek, k.px);
-    const opis = k.os
-      ? `${fmt(dlugoscMm(stan.poczatek, k.px))} mm  ${k.os === 'poziom' ? 'POZIOM' : 'PION'}`
-      : `${fmt(dlugoscMm(stan.poczatek, k.px))} mm  ${fmt(kat, true)}\u00B0`;
-
+    const dl = roznica(stan.poczatek, k.px).l;
     if (k.os) {
-      // Linia sledzaca przedluzona poza koniec - sygnal, ze os jest zlapana.
-      const a = naEkran(stan.poczatek), b = naEkran(k.px);
-      const dx = b.x - a.x, dy = b.y - a.y, dl = Math.hypot(dx, dy) || 1;
-      ctx.strokeStyle = 'rgba(79, 208, 122, .5)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 5]);
+      const a = naEkran(stan.poczatek, r), b = naEkran(k.px, r), c = naEkran(stan.srodek, r);
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+      ctx.strokeStyle = 'rgba(70,207,122,.45)'; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
       ctx.beginPath();
-      ctx.moveTo(a.x - dx / dl * 2000, a.y - dy / dl * 2000);
-      ctx.lineTo(b.x + dx / dl * 2000, b.y + dy / dl * 2000);
+      ctx.moveTo(a.x - dx / d * 3000, a.y - dy / d * 3000);
+      ctx.lineTo(b.x + dx / d * 3000, b.y + dy / d * 3000);
       ctx.stroke();
-      ctx.setLineDash([]);
-      // Cienka odnoga do celownika, zeby bylo widac, ze punkt zostal wyprostowany.
-      const c = naEkran(stan.srodek);
-      ctx.strokeStyle = 'rgba(79, 208, 122, .75)';
-      ctx.setLineDash([2, 4]);
+      ctx.strokeStyle = 'rgba(70,207,122,.8)'; ctx.setLineDash([2, 4]);
       ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
       ctx.setLineDash([]);
     }
-
-    ctx.setLineDash([8, 6]);
-    odcinekNaEkranie(stan.poczatek, k.px, kolor, opis);
+    ctx.setLineDash([9, 6]);
+    odcinekNaEkranie(stan.poczatek, k.px, k.os ? '#46cf7a' : '#ffb020',
+      k.os ? `${fmt(dl)} mm  ${k.os === 'poziom' ? 'POZIOM' : 'PION'}`
+           : `${fmt(dl)} mm  ${fmt(katOdcinka(stan.poczatek, k.px), true)}°`, r);
     ctx.setLineDash([]);
+    krzyzyk(naEkran(stan.poczatek, r), '#ffb020', 11);
   }
 
-  // Zmierzone punkty.
-  stan.punkty.forEach((punkt) => {
-    const p = krzyzyk(punkt.px, '#4fd07a', 13, 2);
-    etykieta(punkt.nazwa, p.x + 17, p.y - 9, '#4fd07a');
+  // punkty trybu wspolrzednych
+  stan.punkty.forEach((p) => {
+    const e = naEkran(p.px, r);
+    krzyzyk(e, '#46cf7a', 11);
+    etykieta(p.nazwa, e.x + 16, e.y - 9, '#46cf7a');
   });
+  if (stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker') {
+    krzyzyk(naEkran(stan.zero, r), '#ff6b6b', 14);
+  }
 
-  // Punkt bazowy.
-  krzyzyk(stan.osnowa, '#ff6b6b', 16, 2);
-
-  // Celownik - zawsze dokladnie na srodku ekranu. Rysowany dwukrotnie:
-  // ciemna obwodka pod spodem sprawia, ze jest czytelny i na jasnym tynku,
-  // i na ciemnej fudze.
-  const sx = prostokat.width / 2;
-  const sy = prostokat.height / 2;
-  // Celownik jest celowo maly (promien 20 px). Dluzsze ramiona zachodzilyby na
-  // obrys puszki gniazdka - czyli zaslanialyby to, w co uzytkownik celuje.
-  const ramiona = () => {
+  // celownik - zawsze na srodku kadru
+  const sx = r.width / 2, sy = r.height / 2;
+  const ramie = () => {
     ctx.beginPath();
-    ctx.moveTo(sx - 20, sy); ctx.lineTo(sx - 9, sy);
-    ctx.moveTo(sx + 9, sy); ctx.lineTo(sx + 20, sy);
-    ctx.moveTo(sx, sy - 20); ctx.lineTo(sx, sy - 9);
-    ctx.moveTo(sx, sy + 9); ctx.lineTo(sx, sy + 20);
+    ctx.moveTo(sx - 21, sy); ctx.lineTo(sx - 9, sy);
+    ctx.moveTo(sx + 9, sy); ctx.lineTo(sx + 21, sy);
+    ctx.moveTo(sx, sy - 21); ctx.lineTo(sx, sy - 9);
+    ctx.moveTo(sx, sy + 9); ctx.lineTo(sx, sy + 21);
     ctx.arc(sx, sy, 4, 0, Math.PI * 2);
     ctx.stroke();
   };
   ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(12,14,18,.85)';
-  ctx.lineWidth = 5;
-  ramiona();
-  ctx.strokeStyle = '#ffb020';
-  ctx.lineWidth = 2;
-  ramiona();
-  ctx.lineCap = 'butt';
+  ctx.strokeStyle = 'rgba(5,7,10,.85)'; ctx.lineWidth = 5.5; ramie();
+  ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2; ramie();
 
   odswiezOdczyt();
 }
 
 function odswiezOdczyt() {
+  const znacznik = $('znacznik');
+  znacznik.classList.remove('zlapane', 'mierzy');
+
   if (stan.poczatek) {
     const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const { dx, dy, l } = roznicaMm(stan.poczatek, k.px);
-    const znacznik = $('odczyt-skad');
-    znacznik.classList.toggle('zlapane', Boolean(k.os));
+    const { dx, dy, l } = roznica(stan.poczatek, k.px);
+    znacznik.classList.add(k.os ? 'zlapane' : 'mierzy');
     znacznik.textContent = k.os
       ? (k.os === 'poziom' ? 'poziom' : 'pion')
-      : `${fmt(katOdcinka(stan.poczatek, k.px), true)}\u00B0`;
-    $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
-    $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
-    $('odczyt-l').textContent = `L ${fmt(l)}`;
+      : `${fmt(katOdcinka(stan.poczatek, k.px), true)}°`;
+    $('odczyt-x').textContent = fmt(dx, true);
+    $('odczyt-y').textContent = fmt(dy, true);
+    $('odczyt-l').textContent = fmt(l);
+    $('wskazowka').classList.toggle('zlapane', Boolean(k.os));
+    $('wskazowka').innerHTML = k.os
+      ? `Odcinek wyrównany do ${k.os === 'poziom' ? 'poziomu' : 'pionu'}. Naciśnij <b>Wskaż drugi punkt</b>.`
+      : 'Naprowadź celownik na drugi punkt.';
     return;
   }
-  const odniesienie = punktOdniesienia();
-  const { dx, dy, l } = odniesienie
-    ? roznicaMm(odniesienie.px, stan.srodek)
-    : naMilimetry(stan.srodek);
-  $('odczyt-skad').classList.remove('zlapane');
-  $('odczyt-skad').textContent = odniesienie ? `od ${odniesienie.nazwa}` : 'od zera';
-  $('odczyt-x').textContent = `X ${fmt(dx, true)}`;
-  $('odczyt-y').textContent = `Y ${fmt(dy, true)}`;
-  $('odczyt-l').textContent = `L ${fmt(l)}`;
+
+  const m = odZera(stan.srodek);
+  znacznik.textContent = 'od markera';
+  if (stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker') znacznik.textContent = 'od zera';
+  $('odczyt-x').textContent = fmt(m.dx, true);
+  $('odczyt-y').textContent = fmt(m.dy, true);
+  $('odczyt-l').textContent = fmt(m.l);
 }
 
-/* --- gesty: przesuwanie i pinch zoom -------------------------------------- */
+/* --- gesty ---------------------------------------------------------------- */
 
 const dotyki = new Map();
 let bazaPinch = null;
 
 function ogranicz() {
-  const w = stan.sesja.obraz.szerokosc;
-  const h = stan.sesja.obraz.wysokosc;
-  stan.srodek.x = Math.min(Math.max(stan.srodek.x, 0), w);
-  stan.srodek.y = Math.min(Math.max(stan.srodek.y, 0), h);
+  stan.srodek.x = Math.min(Math.max(stan.srodek.x, 0), stan.sesja.obraz.szerokosc);
+  stan.srodek.y = Math.min(Math.max(stan.srodek.y, 0), stan.sesja.obraz.wysokosc);
 }
 
-plotno.addEventListener('pointerdown', (zdarzenie) => {
-  plotno.setPointerCapture(zdarzenie.pointerId);
-  dotyki.set(zdarzenie.pointerId, { x: zdarzenie.clientX, y: zdarzenie.clientY });
+function zoom(mnoznik) {
+  stan.skala = Math.min(Math.max(stan.skala * mnoznik, stan.skalaMin), stan.skalaMin * ZOOM_MAX);
+  rysuj();
+}
+
+plotno.addEventListener('pointerdown', (e) => {
+  plotno.setPointerCapture(e.pointerId);
+  dotyki.set(e.pointerId, { x: e.clientX, y: e.clientY });
   bazaPinch = null;
 });
-
-plotno.addEventListener('pointermove', (zdarzenie) => {
-  const poprzedni = dotyki.get(zdarzenie.pointerId);
-  if (!poprzedni || !stan.obraz) return;
-  const biezacy = { x: zdarzenie.clientX, y: zdarzenie.clientY };
-  dotyki.set(zdarzenie.pointerId, biezacy);
-
+plotno.addEventListener('pointermove', (e) => {
+  const prev = dotyki.get(e.pointerId);
+  if (!prev || !stan.obraz) return;
+  const teraz = { x: e.clientX, y: e.clientY };
+  dotyki.set(e.pointerId, teraz);
   if (dotyki.size === 1) {
-    // Przesuwanie: obraz jedzie za palcem, celownik stoi.
-    stan.srodek.x -= (biezacy.x - poprzedni.x) / stan.skala;
-    stan.srodek.y -= (biezacy.y - poprzedni.y) / stan.skala;
-    ogranicz();
-    rysuj();
-    return;
-  }
-
-  if (dotyki.size === 2) {
+    if (Math.abs(teraz.x - prev.x) + Math.abs(teraz.y - prev.y) > 2) schowajInstruktaz();
+    stan.srodek.x -= (teraz.x - prev.x) / stan.skala;
+    stan.srodek.y -= (teraz.y - prev.y) / stan.skala;
+    ogranicz(); rysuj();
+  } else if (dotyki.size === 2) {
     const [a, b] = [...dotyki.values()];
     const rozstaw = Math.hypot(a.x - b.x, a.y - b.y);
     if (bazaPinch === null) { bazaPinch = { rozstaw, skala: stan.skala }; return; }
     if (bazaPinch.rozstaw > 0) {
-      ustawSkale(bazaPinch.skala * (rozstaw / bazaPinch.rozstaw));
+      stan.skala = Math.min(Math.max(bazaPinch.skala * (rozstaw / bazaPinch.rozstaw),
+        stan.skalaMin), stan.skalaMin * ZOOM_MAX);
+      rysuj();
     }
   }
 });
-
-function koniecDotyku(zdarzenie) {
-  dotyki.delete(zdarzenie.pointerId);
-  if (dotyki.size < 2) bazaPinch = null;
-}
+const koniecDotyku = (e) => { dotyki.delete(e.pointerId); if (dotyki.size < 2) bazaPinch = null; };
 plotno.addEventListener('pointerup', koniecDotyku);
 plotno.addEventListener('pointercancel', koniecDotyku);
-
-plotno.addEventListener('wheel', (zdarzenie) => {
+plotno.addEventListener('wheel', (e) => {
   if (!stan.obraz) return;
-  zdarzenie.preventDefault();
-  ustawSkale(stan.skala * (zdarzenie.deltaY < 0 ? 1.15 : 1 / 1.15));
+  e.preventDefault(); zoom(e.deltaY < 0 ? 1.18 : 1 / 1.18);
 }, { passive: false });
 
-function ustawSkale(nowa) {
-  // Celownik jest w srodku ekranu, wiec zoom zawsze dziala wzgledem mierzonego
-  // punktu - stan.srodek nie wymaga korekty.
-  stan.skala = Math.min(Math.max(nowa, stan.skalaMin), stan.skalaMin * 40);
-  rysuj();
+$('zoom-plus').onclick = () => zoom(1.6);
+$('zoom-minus').onclick = () => zoom(1 / 1.6);
+
+/* --- instruktaz przy pierwszym uruchomieniu -------------------------------- */
+
+function schowajInstruktaz() {
+  if ($('instruktaz').hidden) return;
+  $('instruktaz').hidden = true;
+  pamietaj('instruktaz-widziany', '1');
 }
+$('instruktaz-ok').onclick = schowajInstruktaz;
 
-$('zoom-plus').onclick = () => ustawSkale(stan.skala * 1.6);
-$('zoom-minus').onclick = () => ustawSkale(stan.skala / 1.6);
+/* --- odcinki -------------------------------------------------------------- */
 
-/* --- punkty --------------------------------------------------------------- */
-
-function odswiezListe() {
-  const lista = $('lista-punktow');
-  lista.innerHTML = '';
-  stan.punkty.forEach((punkt, indeks) => {
-    const { dx, dy, l } = naMilimetry(punkt.px);
-    const poprzedni = indeks ? stan.punkty[indeks - 1] : null;
-    const rozstaw = poprzedni ? roznicaMm(poprzedni.px, punkt.px) : null;
-
-    const element = document.createElement('li');
-    if (punkt.nazwa === stan.odniesienie) element.classList.add('odniesienie');
-    element.innerHTML =
-      `<span class="nazwa">${punkt.nazwa}</span>` +
-      `<button class="tresc-punktu" type="button">` +
-        `<span class="wartosci">X ${fmt(dx, true)} &nbsp; Y ${fmt(dy, true)} &nbsp; L ${fmt(l)} mm</span>` +
-        (rozstaw
-          ? `<span class="rozstaw">od ${poprzedni.nazwa}: <b>${fmt(rozstaw.l)} mm</b>` +
-            ` &nbsp;(${fmt(rozstaw.dx, true)} / ${fmt(rozstaw.dy, true)})</span>`
-          : '') +
-      `</button>` +
-      `<button class="usun" aria-label="Usuń ${punkt.nazwa}">×</button>`;
-
-    // Klikniecie wiersza przelacza zywy odczyt na pomiar od tego punktu.
-    element.querySelector('.tresc-punktu').onclick = () => {
-      stan.odniesienie = stan.odniesienie === punkt.nazwa ? null : punkt.nazwa;
-      odswiezListe();
-      rysuj();
-    };
-    element.querySelector('.usun').onclick = () => {
-      if (stan.odniesienie === punkt.nazwa) stan.odniesienie = null;
-      stan.punkty.splice(indeks, 1);
-      odswiezListe();
-      rysuj();
-    };
-    lista.appendChild(element);
-  });
-  $('licznik').textContent = `Zmierzone punkty: ${stan.punkty.length}`;
-  $('cofnij').disabled = stan.punkty.length === 0;
-  odswiezZapis();
-}
-
-$('dodaj').onclick = () => {
-  stan.punkty.push({ nazwa: `P${stan.nastepneId++}`, px: { ...stan.srodek } });
-  odswiezListe();
-  rysuj();
-  pokazStatus('status-pomiar', `Dodano ${stan.punkty[stan.punkty.length - 1].nazwa}.`, 'ok');
-};
-
-$('cofnij').onclick = () => {
-  const usuniety = stan.punkty.pop();
-  if (usuniety) {
-    stan.nastepneId--;
-    if (stan.odniesienie === usuniety.nazwa) stan.odniesienie = null;
+function odswiezPrzyciskMierzenia() {
+  $('mierz').textContent = stan.poczatek ? 'Wskaż drugi punkt' : 'Wskaż pierwszy punkt';
+  $('mierz-anuluj').hidden = !stan.poczatek;
+  if (!stan.poczatek) {
+    $('wskazowka').classList.remove('zlapane');
+    $('wskazowka').textContent = stan.odcinki.length
+      ? 'Wyceluj w kolejny punkt, żeby zmierzyć następny wymiar.'
+      : 'Celownik na środku zdjęcia pokazuje mierzone miejsce.';
   }
-  odswiezListe();
-  rysuj();
-};
-
-/* --- tryb miarki: klikasz poczatek, klikasz koniec ------------------------ */
-
-function ustawTryb(tryb) {
-  stan.tryb = tryb;
-  stan.poczatek = null;
-  $('tryb-miarka').classList.toggle('aktywny', tryb === 'miarka');
-  $('tryb-punkty').classList.toggle('aktywny', tryb === 'punkty');
-  $('akcje-miarka').hidden = tryb !== 'miarka';
-  $('akcje-punkty').hidden = tryb === 'miarka';
-  $('panel-miarka').hidden = tryb !== 'miarka';
-  $('panel-punkty').hidden = tryb === 'miarka';
-  odswiezOdcinek();
-  rysuj();
 }
 
-function odswiezOdcinek() {
-  $('odcinek').textContent = stan.poczatek ? 'Koniec odcinka' : 'Początek odcinka';
-  $('odcinek-anuluj').disabled = !stan.poczatek;
-}
+function odswiezPomiary() {
+  const lista = $('lista-pomiarow');
+  lista.textContent = '';
+  stan.odcinki.forEach((o, i) => {
+    const m = roznica(o.a, o.b);
+    const li = document.createElement('li');
 
-function odswiezListeOdcinkow() {
-  const lista = $('lista-odcinkow');
-  lista.innerHTML = '';
-  stan.odcinki.forEach((odc, indeks) => {
-    const { dx, dy, l } = roznicaMm(odc.a, odc.b);
-    const element = document.createElement('li');
-    element.innerHTML =
-      `<span class="nazwa">${odc.nazwa}</span>` +
-      `<span class="wartosci"><b>${fmt(l)} mm</b>` +
-      `<span class="rozstaw">poziom ${fmt(dx, true)} &nbsp; pion ${fmt(dy, true)}` +
-      `&nbsp; ${odc.os ? (odc.os === 'poziom' ? '— poziomo' : '| pionowo')
-                       : fmt(katOdcinka(odc.a, odc.b), true) + '\u00B0'}</span></span>` +
-      `<button class="usun" aria-label="Usuń ${odc.nazwa}">×</button>`;
-    element.querySelector('.usun').onclick = () => {
-      stan.odcinki.splice(indeks, 1);
-      odswiezListeOdcinkow();
-      rysuj();
-    };
-    lista.appendChild(element);
+    const nazwa = document.createElement('button');
+    nazwa.type = 'button'; nazwa.className = 'nazwa'; nazwa.textContent = o.nazwa;
+    nazwa.onclick = () => otworzNazwe('odcinek', i);
+
+    const wymiar = document.createElement('span');
+    wymiar.className = 'wymiar'; wymiar.textContent = `${fmt(m.l)} mm`;
+
+    const szczegoly = document.createElement('span');
+    szczegoly.className = 'szczegoly';
+    szczegoly.textContent = `szer. ${fmt(m.dx, true)}   wys. ${fmt(m.dy, true)}   ` +
+      (o.os ? (o.os === 'poziom' ? 'poziomo' : 'pionowo') : `${fmt(katOdcinka(o.a, o.b), true)}°`);
+
+    const usun = document.createElement('button');
+    usun.className = 'usun'; usun.textContent = '✕';
+    usun.setAttribute('aria-label', 'Usuń ' + o.nazwa);
+    usun.onclick = () => { stan.odcinki.splice(i, 1); odswiezPomiary(); rysuj(); };
+
+    li.append(nazwa, wymiar, szczegoly, usun);
+    lista.appendChild(li);
   });
-  $('licznik-odcinkow').textContent = `Zmierzone odcinki: ${stan.odcinki.length}`;
-  odswiezZapis();
+  $('pusto').hidden = stan.odcinki.length > 0;
+  $('zakoncz').disabled = stan.odcinki.length === 0 && stan.punkty.length === 0;
+  odswiezPrzyciskMierzenia();
 }
 
-$('tryb-miarka').onclick = () => ustawTryb('miarka');
-$('tryb-punkty').onclick = () => ustawTryb('punkty');
-
-$('odcinek').onclick = () => {
+$('mierz').onclick = () => {
+  schowajInstruktaz();
   if (!stan.poczatek) {
     stan.poczatek = { ...stan.srodek };
-    pokazStatus('status-pomiar', 'Naprowadź celownik na drugi punkt.', '');
   } else {
     const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const odc = { nazwa: `O${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: k.px, os: k.os };
-    stan.odcinki.push(odc);
+    const nazwa = `Wymiar ${stan.nastepnyOdcinek++}`;
+    stan.odcinki.push({ nazwa, a: stan.poczatek, b: k.px, os: k.os });
     stan.poczatek = null;
-    const jak = odc.os === 'poziom' ? ' w poziomie' : odc.os === 'pion' ? ' w pionie' : '';
-    pokazStatus('status-pomiar',
-      `${odc.nazwa}: ${fmt(dlugoscMm(odc.a, odc.b))} mm${jak}.`, 'ok');
-    odswiezListeOdcinkow();
+    const dl = fmt(roznica(stan.odcinki[stan.odcinki.length - 1].a,
+                           stan.odcinki[stan.odcinki.length - 1].b).l);
+    status('status-pomiar', `Zapisano ${dl} mm. Dotknij nazwy, żeby ją zmienić.`, 'ok');
+    odswiezPomiary();
   }
-  odswiezOdcinek();
+  odswiezPrzyciskMierzenia();
   rysuj();
 };
 
-$('odcinek-anuluj').onclick = () => {
+$('mierz-anuluj').onclick = () => {
   stan.poczatek = null;
-  odswiezOdcinek();
+  odswiezPrzyciskMierzenia();
   rysuj();
 };
 
-function odswiezZapis() {
-  $('zapisz').disabled = stan.punkty.length === 0 && stan.odcinki.length === 0;
-  $('pobieranie').classList.add('ukryty');
+/* --- nazywanie pomiarow --------------------------------------------------- */
+
+function otworzNazwe(typ, indeks) {
+  stan.nazywany = { typ, indeks };
+  const biezaca = typ === 'odcinek' ? stan.odcinki[indeks].nazwa : stan.punkty[indeks].nazwa;
+  const pojemnik = $('etykietki');
+  pojemnik.textContent = '';
+  ETYKIETY.forEach((e) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = e;
+    if (e === biezaca) b.classList.add('wybrana');
+    b.onclick = () => { $('nazwa-wlasna').value = e; zapiszNazwe(); };
+    pojemnik.appendChild(b);
+  });
+  $('nazwa-wlasna').value = biezaca;
+  $('arkusz-nazwa').hidden = false;
 }
 
-function osnowaWlasna() {
-  return stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker';
+function zapiszNazwe() {
+  if (!stan.nazywany) return;
+  const nowa = $('nazwa-wlasna').value.trim();
+  if (nowa) {
+    const { typ, indeks } = stan.nazywany;
+    if (typ === 'odcinek') stan.odcinki[indeks].nazwa = nowa;
+    else stan.punkty[indeks].nazwa = nowa;
+  }
+  stan.nazywany = null;
+  $('arkusz-nazwa').hidden = true;
+  odswiezPomiary(); odswiezPunkty(); rysuj();
 }
+$('nazwa-zapisz').onclick = zapiszNazwe;
+$('nazwa-anuluj').onclick = () => { stan.nazywany = null; $('arkusz-nazwa').hidden = true; };
 
-function odswiezOpisZera() {
-  const opis = (zrodlo) => (zrodlo === 'marker' ? 'od markera' : 'wskazane');
-  $('info-baza').textContent =
-    `X ${opis(stan.zrodloX)}, Y ${opis(stan.zrodloY)}`;
-  $('zero-reset').disabled = !osnowaWlasna();
+/* --- arkusze pomocnicze --------------------------------------------------- */
+
+$('pomoc-otworz').onclick = () => { $('arkusz-pomoc').hidden = false; };
+$('pomoc-zamknij').onclick = () => { $('arkusz-pomoc').hidden = true; };
+$('tryb-punkty-otworz').onclick = () => { $('arkusz-punkty').hidden = false; odswiezPunkty(); };
+$('punkty-zamknij').onclick = () => { $('arkusz-punkty').hidden = true; };
+[...document.querySelectorAll('.naklada.dolna')].forEach((n) => {
+  n.addEventListener('click', (e) => { if (e.target === n) n.hidden = true; });
+});
+
+/* --- tryb wspolrzednych --------------------------------------------------- */
+
+function opisZera() {
+  const s = (z) => (z === 'marker' ? 'markera' : 'wskazanego miejsca');
+  $('info-baza').textContent = `szerokość od ${s(stan.zrodloX)}, wysokość od ${s(stan.zrodloY)}`;
+  $('zero-reset').disabled = stan.zrodloX === 'marker' && stan.zrodloY === 'marker';
 }
 
 function ustawZero(osie) {
-  if (osie.includes('x')) { stan.osnowa.x = stan.srodek.x; stan.zrodloX = 'wskazany'; }
-  if (osie.includes('y')) { stan.osnowa.y = stan.srodek.y; stan.zrodloY = 'wskazany'; }
-  const nazwy = { x: 'Poziom (X)', y: 'Pion (Y)', xy: 'Oba wymiary' };
-  pokazStatus('status-pomiar', `${nazwy[osie]} liczony od wskazanego miejsca.`, 'ok');
-  odswiezOpisZera(); odswiezListe(); rysuj();
+  if (osie.includes('x')) { stan.zero.x = stan.srodek.x; stan.zrodloX = 'wskazany'; }
+  if (osie.includes('y')) { stan.zero.y = stan.srodek.y; stan.zrodloY = 'wskazany'; }
+  opisZera(); odswiezPunkty(); rysuj();
 }
-
 $('zero-xy').onclick = () => ustawZero('xy');
 $('zero-x').onclick = () => ustawZero('x');
 $('zero-y').onclick = () => ustawZero('y');
 $('zero-reset').onclick = () => {
-  stan.osnowa = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
+  stan.zero = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
   stan.zrodloX = 'marker'; stan.zrodloY = 'marker';
-  pokazStatus('status-pomiar', 'Zero wróciło na róg markera.', 'ok');
-  odswiezOpisZera(); odswiezListe(); rysuj();
+  opisZera(); odswiezPunkty(); rysuj();
+};
+$('os-y-gora').onchange = () => { odswiezPomiary(); odswiezPunkty(); rysuj(); };
+$('ortho').onchange = rysuj;
+
+$('dodaj-punkt').onclick = () => {
+  stan.punkty.push({ nazwa: `Punkt ${stan.nastepnyPunkt++}`, px: { ...stan.srodek } });
+  odswiezPunkty(); odswiezPomiary(); rysuj();
 };
 
-$('ortho').addEventListener('change', () => rysuj());
-
-$('os-y-gora').addEventListener('change', () => {
-  if (stan.sesja) { odswiezListe(); rysuj(); }
-});
-
-/* --- komunikacja z serwerem ----------------------------------------------- */
-
-function pokazStatus(id, tekst, klasa = '') {
-  const element = $(id);
-  element.textContent = tekst;
-  element.className = `status ${klasa}`;
+function odswiezPunkty() {
+  const lista = $('lista-punktow');
+  lista.textContent = '';
+  stan.punkty.forEach((p, i) => {
+    const m = odZera(p.px);
+    const li = document.createElement('li');
+    const nazwa = document.createElement('button');
+    nazwa.type = 'button'; nazwa.className = 'nazwa'; nazwa.textContent = p.nazwa;
+    nazwa.onclick = () => otworzNazwe('punkt', i);
+    const wymiar = document.createElement('span');
+    wymiar.className = 'wymiar';
+    wymiar.textContent = `${fmt(m.dx, true)} × ${fmt(m.dy, true)} mm`;
+    const usun = document.createElement('button');
+    usun.className = 'usun'; usun.textContent = '✕';
+    usun.setAttribute('aria-label', 'Usuń ' + p.nazwa);
+    usun.onclick = () => { stan.punkty.splice(i, 1); odswiezPunkty(); odswiezPomiary(); rysuj(); };
+    li.append(nazwa, wymiar, usun);
+    lista.appendChild(li);
+  });
+  $('zakoncz').disabled = stan.odcinki.length === 0 && stan.punkty.length === 0;
 }
 
-$('plik').addEventListener('change', (zdarzenie) => {
-  const plik = zdarzenie.target.files[0];
-  $('nazwa-pliku').textContent = plik ? `${plik.name} (${(plik.size / 1048576).toFixed(1)} MB)` : '';
-  $('wyslij').disabled = !plik;
-  pokazStatus('status-start', '');
-});
+/* --- wysylka zdjecia ------------------------------------------------------ */
 
-$('wyslij').onclick = async () => {
-  const plik = $('plik').files[0];
+function wybranoPlik(plik) {
   if (!plik) return;
+  $('nazwa-pliku').textContent = `${plik.name} · ${(plik.size / 1048576).toFixed(1)} MB`;
+  status('status-start', '');
+  wyslij(plik);
+}
+$('plik-aparat').onchange = (e) => wybranoPlik(e.target.files[0]);
+$('plik-galeria').onchange = (e) => wybranoPlik(e.target.files[0]);
 
+async function wyslij(plik) {
   const dane = new FormData();
   dane.append('image', plik);
   dane.append('marker_size_mm', $('marker-mm').value);
   dane.append('marker_id', $('marker-id').value);
   dane.append('mm_per_px', $('mm-px').value);
 
-  $('wyslij').disabled = true;
-  pokazStatus('status-start', 'Szukam markera i prostuję perspektywę…');
+  $('postep').hidden = false;
+  $('postep-tekst').textContent = 'Szukam markera na zdjęciu…';
   try {
     const odpowiedz = await fetch('/api/rectify', { method: 'POST', body: dane });
+    $('postep-tekst').textContent = 'Prostuję perspektywę ściany…';
     const wynik = await odpowiedz.json();
     if (!odpowiedz.ok) throw new Error(wynik.blad || `Błąd serwera (${odpowiedz.status}).`);
     await uruchomPomiar(wynik);
   } catch (blad) {
-    pokazStatus('status-start', blad.message, 'blad');
+    status('status-start', blad.message, 'blad');
   } finally {
-    $('wyslij').disabled = false;
+    $('postep').hidden = true;
   }
-};
+}
 
 function uruchomPomiar(sesja) {
   return new Promise((gotowe, blad) => {
@@ -599,92 +536,104 @@ function uruchomPomiar(sesja) {
     obraz.onload = () => {
       stan.sesja = sesja;
       stan.obraz = obraz;
-      stan.osnowa = { x: sesja.marker.osnowa_px[0], y: sesja.marker.osnowa_px[1] };
-      stan.zrodloX = 'marker';
-      stan.zrodloY = 'marker';
+      stan.zero = { x: sesja.marker.osnowa_px[0], y: sesja.marker.osnowa_px[1] };
+      stan.zrodloX = 'marker'; stan.zrodloY = 'marker';
       stan.srodek = { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 };
-      stan.punkty = [];
-      stan.nastepneId = 1;
-      stan.odniesienie = null;
-      stan.odcinki = [];
-      stan.nastepnyOdcinek = 1;
-      stan.poczatek = null;
-      stan.skala = 1;
+      stan.odcinki = []; stan.nastepnyOdcinek = 1; stan.poczatek = null;
+      stan.punkty = []; stan.nastepnyPunkt = 1;
 
-      $('raport').textContent = sesja.raport;
-      odswiezOpisZera();
-      $('ekran-start').classList.add('ukryty');
-      $('ekran-pomiar').classList.remove('ukryty');
-
+      pokazEkran('pomiar');
       requestAnimationFrame(() => {
-        dopasujPlotno();
-        stan.skala = stan.skalaMin;
-        rysuj();
-        odswiezListe();
-        odswiezListeOdcinkow();
-        ustawTryb('miarka');
+        synchronizuj();
+        stan.skala = stan.skalaMin * 1.4;
+        opisZera(); odswiezPomiary(); odswiezPunkty(); rysuj();
+        $('instruktaz').hidden = pamietane('instruktaz-widziany') === '1';
         const ostrzezenia = sesja.ostrzezenia || [];
-        pokazStatus(
-          'status-pomiar',
-          ostrzezenia.length
-            ? ostrzezenia.join(' ')
-            : 'Celownik na pierwszy punkt, potem "Początek odcinka".',
-          ostrzezenia.length ? 'ostrzezenie' : '',
-        );
+        status('status-pomiar', ostrzezenia.join(' '), ostrzezenia.length ? 'ostrzezenie' : '');
         gotowe();
       });
     };
-    obraz.onerror = () => blad(new Error('Nie udało się pobrać wyprostowanego obrazu.'));
+    obraz.onerror = () => blad(new Error('Nie udało się pobrać wyprostowanego zdjęcia.'));
     obraz.src = sesja.obraz.url;
   });
 }
 
-$('zapisz').onclick = async () => {
-  if (!stan.punkty.length && !stan.odcinki.length) return;
-  $('zapisz').disabled = true;
-  pokazStatus('status-pomiar', 'Zapisuję w pełnej rozdzielczości…');
+/* --- zapis i ekran wyniku ------------------------------------------------- */
+
+$('zakoncz').onclick = async () => {
+  if (!stan.odcinki.length && !stan.punkty.length) return;
+  $('zakoncz').disabled = true;
+  $('postep').hidden = false;
+  $('postep-tekst').textContent = 'Rysuję wymiary w pełnej rozdzielczości…';
   try {
+    const wlasneZero = stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker';
     const odpowiedz = await fetch(`/api/session/${stan.sesja.session_id}/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        osnowa_px: osnowaWlasna() ? [stan.osnowa.x, stan.osnowa.y] : null,
-        os_y_w_gore: $('os-y-gora').checked,
-        punkty: stan.punkty.map((punkt) => ({ nazwa: punkt.nazwa, px: [punkt.px.x, punkt.px.y] })),
-        odcinki: stan.odcinki.map((odc) => ({
-          nazwa: odc.nazwa, a: [odc.a.x, odc.a.y], b: [odc.b.x, odc.b.y],
-        })),
+        osnowa_px: wlasneZero ? [stan.zero.x, stan.zero.y] : null,
+        os_y_w_gore: wGore(),
+        punkty: stan.punkty.map((p) => ({ nazwa: p.nazwa, px: [p.px.x, p.px.y] })),
+        odcinki: stan.odcinki.map((o) => ({ nazwa: o.nazwa, a: [o.a.x, o.a.y], b: [o.b.x, o.b.y] })),
       }),
     });
     const wynik = await odpowiedz.json();
     if (!odpowiedz.ok) throw new Error(wynik.blad || `Błąd serwera (${odpowiedz.status}).`);
-    $('link-png').href = wynik.png;
-    $('link-json').href = wynik.json;
-    $('pobieranie').classList.remove('ukryty');
-    pokazStatus(
-      'status-pomiar',
-      `Zapisano ${wynik.liczba_odcinkow} odcinków i ${wynik.liczba_punktow} punktów ` +
-      `(PNG ${(wynik.rozmiar_png / 1048576).toFixed(1)} MB).`,
-      'ok',
-    );
-    // Przy dluzszej liscie punktow przyciski pobierania sa ponizej krawedzi
-    // panelu - bez tego uzytkownik klika "Zapisz" i nie widzi zadnej reakcji.
-    $('pobieranie').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    pokazWynik(wynik);
   } catch (blad) {
-    pokazStatus('status-pomiar', blad.message, 'blad');
+    status('status-pomiar', blad.message, 'blad');
   } finally {
-    $('zapisz').disabled = false;
+    $('postep').hidden = true;
+    $('zakoncz').disabled = false;
   }
 };
 
-$('nowe').onclick = () => {
-  $('ekran-pomiar').classList.add('ukryty');
-  $('ekran-start').classList.remove('ukryty');
-  $('plik').value = '';
-  $('nazwa-pliku').textContent = '';
-  $('wyslij').disabled = true;
-  pokazStatus('status-start', '');
-};
+function pokazWynik(wynik) {
+  $('link-png').href = wynik.png;
+  $('link-json').href = wynik.json;
+  const czesci = [];
+  if (wynik.liczba_odcinkow) {
+    czesci.push(`${wynik.liczba_odcinkow} ` +
+      odmiana(wynik.liczba_odcinkow, 'wymiar', 'wymiary', 'wymiarów'));
+  }
+  if (wynik.liczba_punktow) {
+    czesci.push(`${wynik.liczba_punktow} ` +
+      odmiana(wynik.liczba_punktow, 'punkt', 'punkty', 'punktów'));
+  }
+  $('wynik-podsumowanie').textContent =
+    `${czesci.join(' i ')} · rysunek ${(wynik.rozmiar_png / 1048576).toFixed(1)} MB`;
 
-window.addEventListener('resize', dopasujPlotno);
-window.addEventListener('orientationchange', () => setTimeout(dopasujPlotno, 250));
+  const lista = $('wynik-lista');
+  lista.textContent = '';
+  (wynik.odcinki || []).forEach((o) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="nazwa stala">${o.nazwa}</span>` +
+      `<span class="wymiar">${fmt(o.dlugosc_mm)} mm</span>` +
+      `<span class="szczegoly">szer. ${fmt(o.dx_mm, true)}   wys. ${fmt(o.dy_mm, true)}</span>`;
+    lista.appendChild(li);
+  });
+  (wynik.punkty || []).forEach((p) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="nazwa stala">${p.nazwa}</span>` +
+      `<span class="wymiar">${fmt(p.x_mm, true)} × ${fmt(p.y_mm, true)} mm</span>`;
+    lista.appendChild(li);
+  });
+  pokazEkran('wynik');
+}
+
+$('wroc').onclick = () => pokazEkran('pomiar');
+
+function nowePomiary() {
+  stan.sesja = null; stan.obraz = null;
+  $('plik-aparat').value = ''; $('plik-galeria').value = '';
+  $('nazwa-pliku').textContent = '';
+  status('status-start', '');
+  pokazEkran('start');
+}
+$('nowe').onclick = nowePomiary;
+$('nowe-2').onclick = nowePomiary;
+
+new ResizeObserver(() => { if (stan.obraz) rysuj(); }).observe(plotno);
+window.addEventListener('orientationchange', () => setTimeout(rysuj, 260));
+
+odswiezPomiary();

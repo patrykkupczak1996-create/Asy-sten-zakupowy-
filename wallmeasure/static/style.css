@@ -1,198 +1,293 @@
-/* Mobile-first: interfejs obslugiwany kciukiem, celownik na stale w srodku ekranu. */
+/* Miarka ze zdjecia - interfejs dotykowy.
+ *
+ * Czcionki wylacznie systemowe: serwer stoi na laptopie w sieci lokalnej,
+ * ktora na budowie czesto nie ma internetu, wiec nic nie moze byc pobierane
+ * z zewnatrz. Cele dotykowe maja minimum 48 px - obsluga kciukiem w rekawicy.
+ */
+
 :root {
-  --tlo: #14171c;
-  --panel: #1d2128;
-  --panel-jasny: #262b33;
-  --tekst: #eef1f5;
-  --tekst-przygaszony: #9aa4b2;
+  --tlo: #0e1116;
+  --panel: #171b22;
+  --panel-2: #1f242d;
+  --panel-3: #272d38;
+  --kreska: #2f3742;
+  --tekst: #f0f3f7;
+  --cichy: #98a2b0;
   --akcent: #4ea1ff;
-  --zielony: #4fd07a;
+  --akcent-ciemny: #1b3a63;
+  --zielony: #46cf7a;
+  --bursztyn: #ffb020;
   --czerwony: #ff6b6b;
-  --obramowanie: #333b46;
-  --promien: 12px;
+  --r: 14px;
+  --r-mal: 10px;
+  --gora: env(safe-area-inset-top, 0px);
+  --dol: env(safe-area-inset-bottom, 0px);
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
-html, body {
-  margin: 0;
-  height: 100%;
-  background: var(--tlo);
-  color: var(--tekst);
-  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  overscroll-behavior: none;
-}
-
-.ekran { display: flex; flex-direction: column; min-height: 100dvh; }
-.ekran.ukryty { display: none; }
-
-/* --- Ekran startowy --- */
-#ekran-start { padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); gap: 16px; }
-.naglowek h1 { margin: 0 0 6px; font-size: 22px; }
-.naglowek p { margin: 0; color: var(--tekst-przygaszony); font-size: 14px; }
-
-.pola { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.pola label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--tekst-przygaszony); }
-.pola input[type="number"] {
-  padding: 12px; font-size: 17px; color: var(--tekst);
-  background: var(--panel); border: 1px solid var(--obramowanie);
-  border-radius: var(--promien);
-}
-.pola .przelacznik {
-  grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;
-  font-size: 15px; color: var(--tekst);
-}
-.pola .przelacznik input { width: 22px; height: 22px; accent-color: var(--akcent); }
-
-/* --- Przyciski --- */
-.przycisk {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-height: 48px; padding: 12px 18px;
-  background: var(--panel-jasny); color: var(--tekst);
-  border: 1px solid var(--obramowanie); border-radius: var(--promien);
-  font-size: 16px; font-weight: 500; text-decoration: none; cursor: pointer;
-}
-.przycisk:active { background: #323945; }
-.przycisk[disabled] { opacity: .45; }
-.przycisk.glowny { background: var(--akcent); border-color: var(--akcent); color: #06121f; font-weight: 600; }
-.przycisk.glowny:active { background: #3d8ce0; }
-.przycisk.plik { position: relative; overflow: hidden; }
-.przycisk.plik input { position: absolute; inset: 0; opacity: 0; }
-
-.przycisk.okragly {
-  position: absolute; right: 12px; width: 48px; height: 48px; padding: 0;
-  border-radius: 50%; font-size: 24px; background: rgba(29,33,40,.85);
-}
-.przycisk.okragly.gora { bottom: 76px; }
-.przycisk.okragly.dol { bottom: 16px; }
-
-/* --- Obszar pomiaru --- */
-#plotno-obudowa { position: relative; flex: 1 1 auto; min-height: 45dvh; background: #0c0e12; overflow: hidden; }
-/* Pozycjonowanie bezwzgledne, bo procentowa wysokosc canvasa nie rozwiazuje sie
-   wzgledem elastycznego rodzica - element wracalby do domyslnych proporcji 2:1. */
-#plotno { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
-
-.odczyt {
-  position: absolute; top: 10px; left: 10px; right: 10px;
-  display: flex; gap: 14px; justify-content: space-between;
-  padding: 10px 14px; border-radius: var(--promien);
-  background: rgba(20,23,28,.82); border: 1px solid var(--obramowanie);
-  font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600;
-  pointer-events: none;
-}
-
-/* --- Panel z punktami --- */
-.panel {
-  /* Bez gornego paddingu - dostarcza go przyklejony pasek akcji, inaczej
-     przewijana lista przeswitywalaby nad nim. */
-  flex: 0 0 auto; padding: 0 16px calc(16px + env(safe-area-inset-bottom));
-  background: var(--panel); border-top: 1px solid var(--obramowanie);
-  display: flex; flex-direction: column; gap: 10px;
-  max-height: 55dvh; overflow-y: auto;
-}
-.pasek-akcji { display: flex; gap: 8px; }
-
-/* Zerowanie osobno dla kazdej osi: stolarz mierzy X od krawedzi sciany,
-   a Y od posadzki, i te dwa odniesienia rzadko spotykaja sie w jednym
-   widocznym naroznku. */
-.zerowanie {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px; border: 1px solid var(--obramowanie); border-radius: var(--promien);
-  background: var(--panel-jasny);
-}
-.zerowanie .tytul { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--tekst-przygaszony); }
-.zerowanie .pasek-akcji .przycisk { flex: 1 1 0; }
-.przycisk.maly { min-height: 40px; padding: 8px 6px; font-size: 13.5px; }
-.zerowanie .przelacznik {
-  display: flex; align-items: center; gap: 10px; margin: 0;
-  font-size: 13.5px; color: var(--tekst); cursor: pointer;
-}
-.zerowanie .przelacznik input { width: 20px; height: 20px; accent-color: var(--akcent); }
-
-/* Glowne akcje musza byc widoczne zawsze. Panel sie przewija, wiec bez
-   przyklejenia przycisk "Dodaj punkt" znika, gdy tylko lista punktow urosnie. */
+/* Selektory z identyfikatorem bija zwykle klasy, wiec bez !important atrybut
+   hidden przegrywa z regulami w rodzaju "#ekran-wynik { display: flex }"
+   i ukryty ekran nadal by sie wyswietlal. */
 [hidden] { display: none !important; }
 
-.przyklejony {
-  position: sticky; top: 0; z-index: 2;
-  margin: 0 -16px; padding: 12px 16px;
-  background: var(--panel); border-bottom: 1px solid var(--obramowanie);
-  display: flex; flex-direction: column; gap: 8px;
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--tlo); color: var(--tekst);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overscroll-behavior: none;
 }
+h1, h2, h3 { margin: 0; line-height: 1.25; }
+p { margin: 0; }
 
-/* Przelacznik trybow: miarka (punkt-punkt) albo tabela wspolrzednych. */
-.tryby { display: flex; gap: 4px; padding: 3px; border-radius: var(--promien);
-  background: var(--panel-jasny); border: 1px solid var(--obramowanie); }
-.tryby .tryb {
-  flex: 1 1 0; min-height: 38px; padding: 6px 10px; cursor: pointer;
-  background: transparent; border: 0; border-radius: 9px;
-  color: var(--tekst-przygaszony); font: inherit; font-size: 14px; font-weight: 500;
-}
-.tryby .tryb.aktywny { background: var(--akcent); color: #06121f; font-weight: 600; }
-
-.wskazowka {
-  margin: 0; padding: 10px 12px; border-radius: 10px;
-  background: rgba(78, 161, 255, .12); border: 1px solid rgba(78, 161, 255, .35);
-  font-size: 13px; color: var(--tekst);
-}
-.wskazowka b { color: var(--akcent); }
-.pasek-akcji .przycisk { flex: 1 1 0; }
-.pasek-akcji .przycisk.glowny { flex: 1.4 1 0; }
-
-.lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.lista li {
+/* --- belka --- */
+.belka {
+  position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: 10px; background: var(--panel-jasny);
-  font-variant-numeric: tabular-nums; font-size: 14px;
+  padding: calc(10px + var(--gora)) 16px 10px;
+  background: rgba(14, 17, 22, .92); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--kreska);
 }
-.lista .nazwa { font-weight: 700; color: var(--zielony); min-width: 32px; }
-.lista li.odniesienie { border: 1px solid var(--akcent); background: rgba(78, 161, 255, .13); }
-.lista .tresc-punktu { flex: 1; display: flex; flex-direction: column; gap: 2px; text-align: left;
-  background: none; border: 0; color: inherit; font: inherit; padding: 0; min-height: 0; cursor: pointer; }
-.lista .rozstaw { font-size: 12px; color: var(--tekst-przygaszony); }
-.lista .rozstaw b { color: var(--akcent); font-weight: 600; }
-
-.przelacznik.ortho {
-  display: flex; align-items: center; gap: 10px; margin: 0;
-  padding: 9px 12px; border-radius: var(--promien);
-  background: var(--panel-jasny); border: 1px solid var(--obramowanie);
-  font-size: 14px; cursor: pointer;
-}
-.przelacznik.ortho input { width: 20px; height: 20px; accent-color: var(--zielony); }
-
-.odczyt .skad {
-  position: absolute; top: -7px; left: 12px; padding: 1px 7px; border-radius: 999px;
-  background: var(--akcent); color: #06121f; font-size: 10px; font-weight: 700;
-  letter-spacing: .04em; text-transform: uppercase;
-}
-/* Zlapanie poziomu albo pionu sygnalizowane kolorem - tak jak ORTHO w CAD-zie. */
-.odczyt .skad.zlapane { background: var(--zielony); color: #06210f; }
-.lista .wartosci { flex: 1; color: var(--tekst); display: flex; flex-direction: column; gap: 2px; }
-.lista .usun {
-  min-height: 32px; padding: 4px 10px; background: transparent;
-  border: 1px solid var(--obramowanie); border-radius: 8px;
-  color: var(--tekst-przygaszony); font-size: 18px; line-height: 1; cursor: pointer;
+.belka .logo { display: flex; color: var(--bursztyn); }
+.belka h1 { flex: 1; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.belka .ikona {
+  width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--kreska); color: var(--cichy);
+  font-size: 16px; font-weight: 700;
 }
 
-.podpis { margin: 0; font-size: 13px; color: var(--tekst-przygaszony); }
-.status { margin: 0; font-size: 14px; min-height: 20px; }
+.ekran { display: block; }
+
+/* --- ekran startowy --- */
+#ekran-start { padding: 20px 16px calc(24px + var(--dol)); display: flex; flex-direction: column; gap: 20px; }
+
+.kroki { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.kroki li { display: flex; gap: 14px; align-items: flex-start; }
+.kroki .numer {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--akcent-ciemny); color: var(--akcent);
+  font-size: 15px; font-weight: 700;
+}
+.kroki h2 { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+.kroki p { font-size: 14px; color: var(--cichy); }
+
+.start-akcje { display: flex; flex-direction: column; gap: 10px; }
+
+/* --- przyciski --- */
+.przycisk, button.przycisk {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  min-height: 50px; padding: 12px 18px; cursor: pointer; text-decoration: none;
+  background: var(--panel-2); color: var(--tekst);
+  border: 1px solid var(--kreska); border-radius: var(--r);
+  font: inherit; font-weight: 500; text-align: center;
+}
+.przycisk:active { background: var(--panel-3); }
+.przycisk:disabled, .przycisk[disabled] { opacity: .4; cursor: default; }
+.przycisk.glowny { background: var(--akcent); border-color: var(--akcent); color: #07172b; font-weight: 700; }
+.przycisk.glowny:active { background: #3e8ae0; }
+.przycisk.duzy { min-height: 58px; font-size: 17px; width: 100%; }
+.przycisk.maly { min-height: 42px; padding: 8px 12px; font-size: 14px; }
+.przycisk:focus-visible { outline: 3px solid var(--akcent); outline-offset: 2px; }
+label.przycisk { position: relative; overflow: hidden; }
+label.przycisk input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+.link {
+  background: none; border: 0; padding: 6px 0; cursor: pointer;
+  color: var(--akcent); font: inherit; font-size: 14px; font-weight: 500;
+}
+
+.podpis { font-size: 13px; color: var(--cichy); }
+.podpis.srodek { text-align: center; }
+.status { font-size: 14px; min-height: 21px; }
 .status.blad { color: var(--czerwony); }
 .status.ok { color: var(--zielony); }
-.status.ostrzezenie { color: #ffc861; }
+.status.ostrzezenie { color: var(--bursztyn); }
 
-.pobieranie { display: flex; gap: 8px; }
-.pobieranie.ukryty { display: none; }
-.pobieranie .przycisk { flex: 1; }
+.ustawienia { border: 1px solid var(--kreska); border-radius: var(--r); background: var(--panel); }
+.ustawienia summary { padding: 14px 16px; cursor: pointer; font-size: 15px; color: var(--cichy); }
+.ustawienia > *:not(summary) { padding: 0 16px; }
+.ustawienia > *:last-child { padding-bottom: 14px; }
+.pola { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+.pola label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--cichy); }
+.pola input {
+  padding: 11px; font: inherit; font-size: 16px; color: var(--tekst);
+  background: var(--panel-2); border: 1px solid var(--kreska); border-radius: var(--r-mal);
+}
 
-.pomoc { font-size: 14px; color: var(--tekst-przygaszony); }
-.pomoc summary { padding: 8px 0; cursor: pointer; }
-.pomoc ul { margin: 4px 0 0; padding-left: 20px; }
-.pomoc li { margin-bottom: 4px; }
-.pomoc pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
+/* --- ekran pomiaru --- */
+#ekran-pomiar { display: flex; flex-direction: column; height: calc(100% - 55px - var(--gora)); }
 
-/* Na szerokim ekranie obraz obok panelu. */
+.scena { position: relative; flex: 1 1 auto; min-height: 220px; background: #05070a; overflow: hidden; }
+#plotno { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+.odczyt {
+  position: absolute; top: 12px; left: 12px; right: 12px; z-index: 5;
+  padding: 10px 14px 11px; border-radius: var(--r); pointer-events: none;
+  background: rgba(10, 13, 18, .88); border: 1px solid var(--kreska);
+}
+.odczyt .znacznik {
+  position: absolute; top: -9px; left: 14px; padding: 2px 9px; border-radius: 999px;
+  background: var(--panel-3); color: var(--cichy);
+  font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+}
+.odczyt .znacznik.zlapane { background: var(--zielony); color: #062012; }
+.odczyt .znacznik.mierzy { background: var(--bursztyn); color: #241600; }
+.odczyt .liczby { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 10px; align-items: end; }
+.odczyt small {
+  display: block; font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--cichy); margin-bottom: 1px;
+}
+.odczyt b { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.odczyt .duza { text-align: right; }
+.odczyt .duza b { font-size: 22px; color: var(--bursztyn); }
+
+.lupa { position: absolute; right: 12px; bottom: 12px; z-index: 5; display: flex; flex-direction: column; gap: 9px; }
+.lupa button {
+  width: 50px; height: 50px; border-radius: 50%; cursor: pointer;
+  background: rgba(10, 13, 18, .88); border: 1px solid var(--kreska);
+  color: var(--tekst); font-size: 25px; line-height: 1;
+}
+
+.instruktaz {
+  position: absolute; inset: 0; z-index: 10; display: grid; place-items: center;
+  padding: 24px; background: rgba(5, 7, 10, .78);
+}
+.instruktaz .dymek {
+  max-width: 330px; padding: 20px; border-radius: var(--r); text-align: center;
+  background: var(--panel); border: 1px solid var(--kreska);
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.instruktaz svg { color: var(--bursztyn); }
+.instruktaz p { font-size: 15px; }
+
+/* --- panel --- */
+.panel {
+  flex: 0 0 auto; max-height: 56dvh; overflow-y: auto;
+  padding: 0 16px calc(16px + var(--dol));
+  background: var(--panel); border-top: 1px solid var(--kreska);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.glowna-akcja {
+  position: sticky; top: 0; z-index: 6; display: flex; gap: 8px;
+  margin: 0 -16px; padding: 14px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--kreska);
+}
+.przycisk.ikona-duza { min-width: 58px; width: 58px; padding: 0; font-size: 19px; }
+
+.wskazowka {
+  padding: 11px 13px; border-radius: var(--r-mal); font-size: 14px;
+  background: rgba(78, 161, 255, .1); border: 1px solid rgba(78, 161, 255, .3);
+}
+.wskazowka.zlapane { background: rgba(70, 207, 122, .12); border-color: rgba(70, 207, 122, .35); }
+.wskazowka b { color: var(--akcent); }
+
+.opcje { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.przelacznik { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
+.przelacznik input { width: 22px; height: 22px; accent-color: var(--zielony); flex: 0 0 auto; }
+
+/* --- lista pomiarow --- */
+.pomiary { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.pomiary li {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center;
+  padding: 11px 12px; border-radius: var(--r-mal);
+  background: var(--panel-2); border: 1px solid var(--kreska);
+}
+.pomiary .nazwa {
+  grid-column: 1; display: flex; align-items: center; gap: 6px; cursor: pointer;
+  background: none; border: 0; padding: 0; color: var(--akcent);
+  font: inherit; font-size: 13px; font-weight: 600; text-align: left;
+}
+.pomiary .nazwa::after { content: "✎"; font-size: 11px; opacity: .65; }
+.pomiary .nazwa.stala { cursor: default; color: var(--cichy); }
+.pomiary .nazwa.stala::after { content: none; }
+.pomiary .wymiar {
+  grid-column: 1; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.pomiary .szczegoly { grid-column: 1; font-size: 12.5px; color: var(--cichy); font-variant-numeric: tabular-nums; }
+.pomiary .usun {
+  grid-column: 2; grid-row: 1 / span 3; align-self: center;
+  width: 38px; height: 38px; border-radius: var(--r-mal); cursor: pointer;
+  background: transparent; border: 1px solid var(--kreska); color: var(--cichy); font-size: 17px;
+}
+.pusto {
+  padding: 18px 14px; text-align: center; font-size: 14px; color: var(--cichy);
+  border: 1px dashed var(--kreska); border-radius: var(--r-mal);
+}
+
+.stopka-panelu { display: flex; gap: 8px; }
+.stopka-panelu .przycisk { flex: 1 1 0; }
+.stopka-panelu .przycisk.glowny { flex: 1.5 1 0; }
+
+/* --- ekran wyniku --- */
+#ekran-wynik { padding: 20px 16px calc(24px + var(--dol)); display: flex; flex-direction: column; gap: 18px; }
+.wynik-naglowek { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.ptaszek {
+  width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center;
+  background: rgba(70, 207, 122, .14); color: var(--zielony);
+}
+.wynik-naglowek h2 { font-size: 21px; }
+.wynik-pliki, .wynik-dalej { display: flex; flex-direction: column; gap: 10px; }
+.wynik-dalej { flex-direction: row; }
+.wynik-dalej .przycisk { flex: 1 1 0; }
+
+/* --- nakladki --- */
+.naklada { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px;
+  background: rgba(5, 7, 10, .8); }
+.naklada.dolna { place-items: end stretch; padding: 0; }
+
+.karta-postepu {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  padding: 28px 24px; border-radius: var(--r); max-width: 330px;
+  background: var(--panel); border: 1px solid var(--kreska);
+}
+.kolo {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 4px solid var(--panel-3); border-top-color: var(--akcent);
+  animation: obrot 1s linear infinite;
+}
+@keyframes obrot { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .kolo { animation-duration: 3s; } }
+
+.arkusz {
+  width: 100%; max-height: 88dvh; overflow-y: auto;
+  padding: 20px 16px calc(20px + var(--dol));
+  background: var(--panel); border-top: 1px solid var(--kreska);
+  border-radius: var(--r) var(--r) 0 0;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.arkusz h3 { font-size: 18px; }
+.arkusz input[type="text"] {
+  padding: 13px; font: inherit; font-size: 16px; color: var(--tekst);
+  background: var(--panel-2); border: 1px solid var(--kreska); border-radius: var(--r-mal);
+}
+.arkusz-akcje { display: flex; gap: 8px; }
+.arkusz-akcje .przycisk { flex: 1 1 0; }
+
+.etykietki { display: flex; flex-wrap: wrap; gap: 8px; }
+.etykietki button {
+  padding: 10px 14px; min-height: 44px; border-radius: 999px; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--kreska); color: var(--tekst); font: inherit; font-size: 14px;
+}
+.etykietki button.wybrana { background: var(--akcent); border-color: var(--akcent); color: #07172b; font-weight: 600; }
+
+.pomoc-lista { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.pomoc-lista dt { font-size: 14px; font-weight: 700; color: var(--bursztyn); }
+.pomoc-lista dd { margin: 2px 0 0; font-size: 14px; color: var(--cichy); }
+
+.zerowanie {
+  display: flex; flex-direction: column; gap: 10px; padding: 12px;
+  border: 1px solid var(--kreska); border-radius: var(--r); background: var(--panel-2);
+}
+.zerowanie .tytul { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--cichy); }
+.zerowanie .rzad { display: flex; gap: 6px; }
+.zerowanie .rzad .przycisk { flex: 1 1 0; padding: 8px 4px; font-size: 13px; }
+
+/* --- szeroki ekran: zdjecie obok panelu --- */
 @media (min-width: 900px) {
   #ekran-pomiar { flex-direction: row; }
-  .panel { max-height: 100dvh; width: 380px; border-top: none; border-left: 1px solid var(--obramowanie); }
-  .przycisk.okragly.gora { bottom: 76px; }
+  .panel { width: 400px; max-height: none; border-top: none; border-left: 1px solid var(--kreska); }
+  #ekran-start, #ekran-wynik { max-width: 620px; margin: 0 auto; }
+  .naklada.dolna { place-items: center; padding: 20px; }
+  .arkusz { max-width: 520px; border-radius: var(--r); border: 1px solid var(--kreska); }
 }

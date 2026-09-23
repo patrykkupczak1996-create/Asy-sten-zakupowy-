@@ -137,14 +137,16 @@ Serwer wypisze adres, kod QR do zeskanowania aparatem telefonu i podpowiedzi:
 **Telefon i komputer muszą być w tej samej sieci Wi-Fi.** Nie trzeba niczego instalować na telefonie
 ani konfigurować HTTPS. Adres `127.0.0.1` działa **tylko na komputerze** — telefon nigdy tam nie dotrze.
 
-Przebieg pracy:
+Interfejs prowadzi krok po kroku — nie wymaga czytania instrukcji:
 
-1. **Zrób zdjęcie lub wybierz plik** — na telefonie otworzy się aparat (`capture="environment"`).
-2. Podaj bok markera (domyślnie 180 mm) i naciśnij **Wyprostuj perspektywę**. Zdjęcie leci na serwer,
-   wraca wyprostowany obraz ściany wraz ze skalą mm/px.
-3. **Celownik stoi nieruchomo na środku ekranu**, a ty przesuwasz pod nim obraz palcem — dzięki temu palec
-   nigdy nie zasłania mierzonego detalu. Pinch dwoma palcami przybliża, przyciski `+` / `−` też.
-   Pasek u góry pokazuje na żywo X, Y i odległość od punktu bazowego.
+1. **Ekran startowy** tłumaczy trzy kroki (naklej marker → zrób zdjęcie → mierz palcem)
+   i ma dwa duże przyciski: **Zrób zdjęcie** (otwiera aparat) oraz wybór pliku z galerii.
+   Ustawienia markera są zwinięte — domyślne wartości pasują do markera z generatora.
+2. Zdjęcie leci na serwer od razu po wybraniu. Nakładka mówi, co się dzieje
+   („Szukam markera…", „Prostuję perspektywę…"), a błąd tłumaczy, co poprawić.
+3. Przy pierwszym uruchomieniu pojawia się podpowiedź z dłonią: **przesuń zdjęcie palcem**,
+   żeby celownik trafił w mierzony punkt. Znika po pierwszym przesunięciu i nie wraca.
+   Pasek u góry pokazuje na żywo szerokość, wysokość i odległość.
 4. **Tryb Miarka (domyślny)** — zwykły pomiar od punktu do punktu. Naprowadź celownik na pierwszy punkt,
    naciśnij **Początek odcinka**, naprowadź na drugi i naciśnij **Koniec odcinka**. Odległość i kąt liczą się
    na żywo w trakcie celowania. Żadnej bazy, żadnych współrzędnych — od gniazdka do narożnika i tyle.

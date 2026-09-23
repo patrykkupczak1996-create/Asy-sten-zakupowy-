@@ -3,130 +3,224 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<meta name="theme-color" content="#14171c">
-<title>Wymiarowanie ściany</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314171c'/%3E%3Cg stroke='%23ffb020' stroke-width='2' fill='none'%3E%3Ccircle cx='16' cy='16' r='6'/%3E%3Cpath d='M16 2v6M16 24v6M2 16h6M24 16h6'/%3E%3C/g%3E%3C/svg%3E">
+<meta name="theme-color" content="#101319">
+<title>Miarka ze zdjęcia</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101319'/%3E%3Cg stroke='%23ffb020' stroke-width='2.2' fill='none' stroke-linecap='round'%3E%3Ccircle cx='16' cy='16' r='5'/%3E%3Cpath d='M16 3v5M16 24v5M3 16h5M24 16h5'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- Ekran 1: wybór zdjęcia i parametrów markera -->
-<section id="ekran-start" class="ekran">
-  <header class="naglowek">
-    <h1>Wymiarowanie ściany</h1>
-    <p>Zrób zdjęcie ściany z markerem ArUco. Punkty zmierzysz palcem na wyprostowanym obrazie.</p>
-  </header>
+<header class="belka">
+  <span class="logo" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="22" height="22"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></g></svg>
+  </span>
+  <h1>Miarka ze zdjęcia</h1>
+  <button id="pomoc-otworz" class="ikona" aria-label="Pomoc">?</button>
+</header>
 
-  <label class="przycisk glowny plik">
-    <span>Zrób zdjęcie lub wybierz plik</span>
-    <input type="file" id="plik" accept="image/*" capture="environment">
-  </label>
-  <p id="nazwa-pliku" class="podpis"></p>
+<!-- ======================= 1. START ======================= -->
+<main id="ekran-start" class="ekran">
+  <ol class="kroki">
+    <li>
+      <span class="numer">1</span>
+      <div>
+        <h2>Naklej marker na ścianę</h2>
+        <p>Kwadrat 180 mm na sztywnej płycie, płasko. To on nadaje skalę.</p>
+      </div>
+    </li>
+    <li>
+      <span class="numer">2</span>
+      <div>
+        <h2>Zrób zdjęcie</h2>
+        <p>Z 2 metrów, może być pod kątem. Marker i mierzone miejsca w jednym kadrze.</p>
+      </div>
+    </li>
+    <li>
+      <span class="numer">3</span>
+      <div>
+        <h2>Mierz palcem</h2>
+        <p>Dotykasz dwóch punktów, dostajesz wymiar w milimetrach.</p>
+      </div>
+    </li>
+  </ol>
 
-  <div class="pola">
-    <label>Bok markera [mm]
-      <input type="number" id="marker-mm" value="180" min="10" step="1" inputmode="decimal">
+  <div class="start-akcje">
+    <label class="przycisk duzy glowny">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 8h4l2-3h6l2 3h4v12H3z"/><circle cx="12" cy="13" r="3.5"/></g></svg>
+      <span>Zrób zdjęcie</span>
+      <input type="file" id="plik-aparat" accept="image/*" capture="environment">
     </label>
-    <label>ID markera
-      <input type="number" id="marker-id" value="0" min="-1" step="1" inputmode="numeric">
-    </label>
-    <label>Skala [mm/px]
-      <input type="number" id="mm-px" value="0.5" min="0.1" step="0.05" inputmode="decimal">
+    <label class="przycisk duzy">
+      <span>Wybierz zdjęcie z telefonu</span>
+      <input type="file" id="plik-galeria" accept="image/*">
     </label>
   </div>
 
-  <button id="wyslij" class="przycisk glowny" disabled>Wyprostuj perspektywę</button>
+  <p id="nazwa-pliku" class="podpis srodek"></p>
   <p id="status-start" class="status"></p>
 
-  <details class="pomoc">
-    <summary>Jak zrobić dobre zdjęcie</summary>
-    <ul>
-      <li>Marker naklejony na sztywną płytę, płasko na ścianie.</li>
-      <li>Kąt 15–30° od prostopadłej, z odległości ok. 2 m.</li>
-      <li>Marker ma zajmować minimum 150–200 px boku — nie używaj zoomu cyfrowego.</li>
-      <li>Mierzone punkty muszą leżeć w płaszczyźnie ściany.</li>
-    </ul>
-  </details>
-</section>
-
-<!-- Ekran 2: pomiar na wyprostowanym obrazie -->
-<section id="ekran-pomiar" class="ekran ukryty">
-  <div id="plotno-obudowa">
-    <canvas id="plotno"></canvas>
-    <div id="odczyt" class="odczyt">
-      <span id="odczyt-skad" class="skad">od zera</span>
-      <span id="odczyt-x">X 0,0</span>
-      <span id="odczyt-y">Y 0,0</span>
-      <span id="odczyt-l">L 0,0</span>
+  <details class="ustawienia">
+    <summary>Ustawienia markera</summary>
+    <div class="pola">
+      <label>Bok markera [mm]
+        <input type="number" id="marker-mm" value="180" min="10" step="1" inputmode="decimal">
+      </label>
+      <label>ID markera
+        <input type="number" id="marker-id" value="0" min="-1" step="1" inputmode="numeric">
+      </label>
+      <label>Dokładność [mm/px]
+        <input type="number" id="mm-px" value="0.5" min="0.1" step="0.05" inputmode="decimal">
+      </label>
     </div>
-    <button id="zoom-plus" class="przycisk okragly gora">+</button>
-    <button id="zoom-minus" class="przycisk okragly dol">−</button>
+    <p class="podpis">Zmieniaj tylko wtedy, gdy Twój marker ma inny rozmiar niż wydrukowany z generatora.</p>
+  </details>
+</main>
+
+<!-- ======================= 2. POMIAR ======================= -->
+<main id="ekran-pomiar" class="ekran" hidden>
+  <div class="scena" id="scena">
+    <canvas id="plotno"></canvas>
+
+    <div class="odczyt" id="odczyt">
+      <span class="znacznik" id="znacznik">wyceluj</span>
+      <div class="liczby">
+        <span><small>szer.</small><b id="odczyt-x">—</b></span>
+        <span><small>wys.</small><b id="odczyt-y">—</b></span>
+        <span class="duza"><small>odległość</small><b id="odczyt-l">—</b></span>
+      </div>
+    </div>
+
+    <div class="lupa">
+      <button id="zoom-plus" aria-label="Przybliż">+</button>
+      <button id="zoom-minus" aria-label="Oddal">−</button>
+    </div>
+
+    <div class="instruktaz" id="instruktaz" hidden>
+      <div class="dymek">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v5a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5v-3.5a1.5 1.5 0 0 1 3 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <p><b>Przesuń zdjęcie palcem</b>, żeby celownik trafił w mierzony punkt.
+          Dwoma palcami przybliżysz.</p>
+        <button id="instruktaz-ok" class="przycisk maly">Rozumiem</button>
+      </div>
+    </div>
   </div>
 
   <div class="panel">
-    <div class="przyklejony">
-      <div class="tryby">
-        <button id="tryb-miarka" class="tryb aktywny" type="button">Miarka</button>
-        <button id="tryb-punkty" class="tryb" type="button">Punkty</button>
-      </div>
-      <div class="pasek-akcji" id="akcje-miarka">
-        <button id="odcinek" class="przycisk glowny">Początek odcinka</button>
-        <button id="odcinek-anuluj" class="przycisk" disabled>Anuluj</button>
-      </div>
-      <div class="pasek-akcji" id="akcje-punkty" hidden>
-        <button id="dodaj" class="przycisk glowny">Dodaj punkt</button>
-        <button id="cofnij" class="przycisk">Cofnij</button>
-      </div>
+    <div class="glowna-akcja">
+      <button id="mierz" class="przycisk duzy glowny">Wskaż pierwszy punkt</button>
+      <button id="mierz-anuluj" class="przycisk ikona-duza" aria-label="Anuluj odcinek" hidden>✕</button>
     </div>
 
-    <div id="panel-miarka">
-      <p class="wskazowka">Naprowadź celownik na pierwszy punkt i naciśnij <b>Początek odcinka</b>,
-        potem na drugi — <b>Koniec odcinka</b>. Odległość liczy się na żywo, bez żadnej bazy.</p>
-      <label class="przelacznik ortho">
-        <input type="checkbox" id="ortho" checked> Prostuj do poziomu i pionu
-      </label>
-      <p id="licznik-odcinkow" class="podpis">Zmierzone odcinki: 0</p>
-      <ul id="lista-odcinkow" class="lista"></ul>
+    <p id="wskazowka" class="wskazowka">Celownik na środku zdjęcia pokazuje mierzone miejsce.</p>
+
+    <div class="opcje">
+      <label class="przelacznik"><input type="checkbox" id="ortho" checked>
+        <span>Prostuj do poziomu i pionu</span></label>
+      <button id="tryb-punkty-otworz" class="link">Tryb współrzędnych →</button>
     </div>
 
-    <div id="panel-punkty" hidden>
-    <p class="wskazowka">Celownik na środku obrazu wyznacza mierzony punkt —
-      ustaw go i naciśnij <b>Dodaj punkt</b>. Ten tryb buduje tabelę współrzędnych do trasowania.</p>
+    <ul class="pomiary" id="lista-pomiarow"></ul>
+    <p class="pusto" id="pusto">Nie ma jeszcze żadnego wymiaru.</p>
 
-    <div class="zerowanie">
-      <span class="tytul">Skąd liczyć wymiary</span>
-      <div class="pasek-akcji">
-        <button id="zero-xy" class="przycisk maly">Zeruj X i Y</button>
-        <button id="zero-x" class="przycisk maly">Tylko X</button>
-        <button id="zero-y" class="przycisk maly">Tylko Y</button>
-        <button id="zero-reset" class="przycisk maly" disabled>Marker</button>
-      </div>
-      <p id="info-baza" class="podpis">X i Y liczone od rogu markera</p>
-      <label class="przelacznik">
-        <input type="checkbox" id="os-y-gora"> Y rośnie w górę (wysokość nad posadzką)
-      </label>
-    </div>
-
-    <p id="licznik" class="podpis">Zmierzone punkty: 0</p>
-    <ul id="lista-punktow" class="lista"></ul>
-    </div>
-
-    <div class="pasek-akcji">
-      <button id="zapisz" class="przycisk glowny">Zapisz wynik</button>
+    <div class="stopka-panelu">
+      <button id="zakoncz" class="przycisk glowny" disabled>Zapisz wymiary</button>
       <button id="nowe" class="przycisk">Nowe zdjęcie</button>
     </div>
     <p id="status-pomiar" class="status"></p>
-    <div id="pobieranie" class="pobieranie ukryty">
-      <a id="link-png" class="przycisk" download>Pobierz PNG</a>
-      <a id="link-json" class="przycisk" download>Pobierz JSON</a>
-    </div>
-
-    <details class="pomoc">
-      <summary>Szczegóły detekcji</summary>
-      <pre id="raport"></pre>
-    </details>
   </div>
-</section>
+</main>
+
+<!-- ======================= 3. WYNIK ======================= -->
+<main id="ekran-wynik" class="ekran" hidden>
+  <div class="wynik-naglowek">
+    <span class="ptaszek" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="30" height="30"><path d="M4 12.5l5.5 5.5L20 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </span>
+    <h2>Wymiary zapisane</h2>
+    <p id="wynik-podsumowanie" class="podpis"></p>
+  </div>
+
+  <ul class="pomiary" id="wynik-lista"></ul>
+
+  <div class="wynik-pliki">
+    <a id="link-png" class="przycisk duzy glowny" download>Pobierz rysunek PNG</a>
+    <a id="link-json" class="przycisk duzy" download>Pobierz dane JSON</a>
+  </div>
+
+  <div class="wynik-dalej">
+    <button id="wroc" class="przycisk">Wróć do pomiaru</button>
+    <button id="nowe-2" class="przycisk">Nowe zdjęcie</button>
+  </div>
+</main>
+
+<!-- ======================= NAKŁADKI ======================= -->
+<div id="postep" class="naklada" hidden>
+  <div class="karta-postepu">
+    <div class="kolo"></div>
+    <p id="postep-tekst">Szukam markera na zdjęciu…</p>
+    <p class="podpis">Duże zdjęcie potrafi zająć kilkanaście sekund.</p>
+  </div>
+</div>
+
+<div id="arkusz-nazwa" class="naklada dolna" hidden>
+  <div class="arkusz">
+    <h3>Co to za wymiar?</h3>
+    <div class="etykietki" id="etykietki"></div>
+    <input type="text" id="nazwa-wlasna" placeholder="albo wpisz własną nazwę" maxlength="28">
+    <div class="arkusz-akcje">
+      <button id="nazwa-anuluj" class="przycisk">Anuluj</button>
+      <button id="nazwa-zapisz" class="przycisk glowny">Zapisz nazwę</button>
+    </div>
+  </div>
+</div>
+
+<div id="arkusz-pomoc" class="naklada dolna" hidden>
+  <div class="arkusz">
+    <h3>Jak mierzyć</h3>
+    <dl class="pomoc-lista">
+      <dt>Zdjęcie</dt>
+      <dd>Z około 2 metrów, kąt do 30°. Marker ma zajmować co najmniej kciuk szerokości na ekranie.
+        Nie przybliżaj aparatem — podejdź bliżej.</dd>
+      <dt>Pomiar</dt>
+      <dd>Przesuwasz zdjęcie palcem pod nieruchomym celownikiem. Dwoma palcami przybliżasz —
+        przy większym powiększeniu trafisz dokładniej.</dd>
+      <dt>Prostowanie</dt>
+      <dd>Gdy odcinek jest prawie poziomy lub pionowy, program go wyrównuje i zapala zielony znacznik.
+        Wyłącz, jeśli chcesz zmierzyć wiernie skośny wymiar.</dd>
+      <dt>Płaszczyzna</dt>
+      <dd>Mierzone punkty muszą leżeć na tej samej ścianie co marker. Rura wystająca przed tynk
+        da błąd.</dd>
+      <dt>Dokładność</dt>
+      <dd>Około 1–2 mm przy poprawnym zdjęciu. Rozstaw dwóch punktów jest dokładniejszy
+        niż ich położenie względem markera.</dd>
+    </dl>
+    <button id="pomoc-zamknij" class="przycisk glowny">Zamknij</button>
+  </div>
+</div>
+
+<div id="arkusz-punkty" class="naklada dolna" hidden>
+  <div class="arkusz">
+    <h3>Tryb współrzędnych</h3>
+    <p class="podpis">Do trasowania: wszystkie punkty liczone od jednej krawędzi, żeby błędy się nie sumowały.</p>
+    <div class="zerowanie">
+      <span class="tytul">Skąd liczyć</span>
+      <div class="rzad">
+        <button id="zero-xy" class="przycisk maly">Narożnik</button>
+        <button id="zero-x" class="przycisk maly">Krawędź ↔</button>
+        <button id="zero-y" class="przycisk maly">Posadzka ↕</button>
+        <button id="zero-reset" class="przycisk maly" disabled>Marker</button>
+      </div>
+      <p id="info-baza" class="podpis">szerokość i wysokość liczone od rogu markera</p>
+      <label class="przelacznik"><input type="checkbox" id="os-y-gora" checked>
+        <span>Wysokość nad posadzką (w górę)</span></label>
+    </div>
+    <div class="arkusz-akcje">
+      <button id="punkty-zamknij" class="przycisk">Zamknij</button>
+      <button id="dodaj-punkt" class="przycisk glowny">Zapisz punkt</button>
+    </div>
+    <ul class="pomiary" id="lista-punktow"></ul>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>
