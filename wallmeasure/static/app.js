@@ -129,9 +129,14 @@ function naEkran(px, r) {
   };
 }
 
+/* Etykieta trzymana w kadrze - przy krawedzi zdjecia opis wymiaru
+ * wyjezdzal poza plotno i stawal sie nieczytelny. */
 function etykieta(tekst, x, y, kolor) {
   ctx.font = '700 13px -apple-system, "Segoe UI", Roboto, sans-serif';
   const w = ctx.measureText(tekst).width;
+  const r = plotno.getBoundingClientRect();
+  x = Math.min(Math.max(x, 8), Math.max(8, r.width - w - 8));
+  y = Math.min(Math.max(y, 19), r.height - 8);
   ctx.fillStyle = 'rgba(10,13,18,.88)';
   ctx.fillRect(x - 6, y - 15, w + 12, 21);
   ctx.fillStyle = kolor;
@@ -278,13 +283,23 @@ function odswiezOdczyt() {
 const dotyki = new Map();
 let bazaPinch = null;
 
+/* Kadr nie moze wyjechac poza zdjecie - inaczej przy krawedzi polowa ekranu
+ * robi sie czarna i wyglada na usterke. Ograniczamy srodek tak, by widoczny
+ * wycinek zawsze lezal w obrazie. */
 function ogranicz() {
-  stan.srodek.x = Math.min(Math.max(stan.srodek.x, 0), stan.sesja.obraz.szerokosc);
-  stan.srodek.y = Math.min(Math.max(stan.srodek.y, 0), stan.sesja.obraz.wysokosc);
+  const r = plotno.getBoundingClientRect();
+  const polSzer = (r.width / 2) / stan.skala;
+  const polWys = (r.height / 2) / stan.skala;
+  const W = stan.sesja.obraz.szerokosc, H = stan.sesja.obraz.wysokosc;
+  stan.srodek.x = W <= 2 * polSzer ? W / 2
+    : Math.min(Math.max(stan.srodek.x, polSzer), W - polSzer);
+  stan.srodek.y = H <= 2 * polWys ? H / 2
+    : Math.min(Math.max(stan.srodek.y, polWys), H - polWys);
 }
 
 function zoom(mnoznik) {
   stan.skala = Math.min(Math.max(stan.skala * mnoznik, stan.skalaMin), stan.skalaMin * ZOOM_MAX);
+  ogranicz();
   rysuj();
 }
 
@@ -310,7 +325,7 @@ plotno.addEventListener('pointermove', (e) => {
     if (bazaPinch.rozstaw > 0) {
       stan.skala = Math.min(Math.max(bazaPinch.skala * (rozstaw / bazaPinch.rozstaw),
         stan.skalaMin), stan.skalaMin * ZOOM_MAX);
-      rysuj();
+      ogranicz(); rysuj();
     }
   }
 });
@@ -546,6 +561,7 @@ function uruchomPomiar(sesja) {
       requestAnimationFrame(() => {
         synchronizuj();
         stan.skala = stan.skalaMin * 1.4;
+        ogranicz();
         opisZera(); odswiezPomiary(); odswiezPunkty(); rysuj();
         $('instruktaz').hidden = pamietane('instruktaz-widziany') === '1';
         const ostrzezenia = sesja.ostrzezenia || [];
