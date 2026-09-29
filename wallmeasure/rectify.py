@@ -15,6 +15,9 @@ import numpy as np
 from .detect import MarkerDetection
 
 
+BORDER_BGR = (227, 221, 217)
+
+
 @dataclass(frozen=True)
 class Rectification:
     """Wyprostowany obraz sciany wraz z pelnym opisem ukladu wspolrzednych."""
@@ -177,7 +180,10 @@ def rectify_wall(
         (out_w, out_h),
         flags=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(32, 32, 32),
+        # Obszar poza oryginalnym kadrem w kolorze tla interfejsu (#D9DDE3):
+        # neutralny i jasny, wyraznie "tu nie ma zdjecia", zamiast ciemnej
+        # plamy, ktora na rysunku i w podgladzie wygladala jak usterka.
+        borderValue=BORDER_BGR,
     )
 
     origin = (-min_x, -min_y)

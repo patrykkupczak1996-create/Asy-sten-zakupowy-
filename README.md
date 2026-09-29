@@ -137,33 +137,31 @@ Serwer wypisze adres, kod QR do zeskanowania aparatem telefonu i podpowiedzi:
 **Telefon i komputer muszą być w tej samej sieci Wi-Fi.** Nie trzeba niczego instalować na telefonie
 ani konfigurować HTTPS. Adres `127.0.0.1` działa **tylko na komputerze** — telefon nigdy tam nie dotrze.
 
-Interfejs prowadzi krok po kroku — nie wymaga czytania instrukcji:
+Interfejs wzorowany jest na systemowych aplikacjach pomiarowych, które użytkownik zna już z telefonu —
+jasny, zdjęcie na cały ekran, jeden duży przycisk działania:
 
-1. **Ekran startowy** tłumaczy trzy kroki (naklej marker → zrób zdjęcie → mierz palcem)
-   i ma dwa duże przyciski: **Zrób zdjęcie** (otwiera aparat) oraz wybór pliku z galerii.
-   Ustawienia markera są zwinięte — domyślne wartości pasują do markera z generatora.
-2. Zdjęcie leci na serwer od razu po wybraniu. Nakładka mówi, co się dzieje
-   („Szukam markera…", „Prostuję perspektywę…"), a błąd tłumaczy, co poprawić.
-3. Przy pierwszym uruchomieniu pojawia się podpowiedź z dłonią: **przesuń zdjęcie palcem**,
-   żeby celownik trafił w mierzony punkt. Znika po pierwszym przesunięciu i nie wraca.
-   Pasek u góry pokazuje na żywo szerokość, wysokość i odległość.
-4. **Tryb Miarka (domyślny)** — zwykły pomiar od punktu do punktu. Naprowadź celownik na pierwszy punkt,
-   naciśnij **Początek odcinka**, naprowadź na drugi i naciśnij **Koniec odcinka**. Odległość i kąt liczą się
-   na żywo w trakcie celowania. Żadnej bazy, żadnych współrzędnych — od gniazdka do narożnika i tyle.
-   **Prostuj do poziomu i pionu** (odpowiednik ORTHO z CAD-a, domyślnie włączone) przyciąga odcinek do
-   równego kąta, gdy zabraknie do niego mniej niż 4° — znacznik zmienia się wtedy na zielone `POZIOM`
-   albo `PION`, a przez kadr biegnie linia śledząca. Trafienie palcem w równe 0° jest praktycznie
-   niemożliwe, a przy montażu to najczęstszy przypadek.
-5. **Tryb Punkty** — tabela współrzędnych do trasowania, gdy potrzebujesz wszystkiego od jednej bazy.
-   Marker nadaje skalę, ale nie musi być punktem odniesienia.
-   Naprowadź celownik i naciśnij **Zeruj X i Y** (narożnik), albo zeruj osie osobno: **Tylko X** od krawędzi
-   ściany, **Tylko Y** od posadzki — te dwa odniesienia rzadko spotykają się w jednym widocznym punkcie.
-   Przełącznik **Y rośnie w górę** zamienia wartości na wysokość nad posadzką. **Marker** wraca do stanu wyjściowego.
-6. **Dodaj punkt** zapisuje pozycję celownika. Pod każdym punktem widnieje **rozstaw względem poprzedniego**,
-   a kliknięcie wiersza przełącza górny odczyt na pomiar **od tego punktu** — tak sprawdzisz odległość
-   między gniazdkami, nie licząc w głowie.
-7. **Zapisz wynik** — serwer renderuje PNG w **pełnej rozdzielczości** (nie w tej pomniejszonej, którą
-   widzi telefon) i generuje `wymiary.json`. Oba pliki pobierzesz jednym kliknięciem.
+1. **Ekran startowy** tłumaczy metodę w trzech krokach i ma dwa przyciski: **Zrób zdjęcie** (otwiera
+   aparat) oraz **Wybierz z galerii**. Zdjęcie wysyła się od razu, a nakładka mówi, co się dzieje
+   („Szukam markera…", „Prostuję perspektywę…"). Błąd tłumaczy, co poprawić.
+2. **Celownik stoi na środku ekranu**, a pod nim przesuwasz zdjęcie palcem — palec nie zasłania mierzonego
+   miejsca. Rozsunięcie dwóch palców przybliża. Celownik sięga każdego punktu zdjęcia, także narożników.
+3. **Duży okrągły przycisk +** na dole: pierwsze stuknięcie zaczyna wymiar, drugie go kończy.
+   Przycisk zmienia kolor — biały (gotowy), żółty jak taśma miernicza (pomiar w toku),
+   zielony (linia wyrównana do poziomu albo pionu). Wymiar na żywo pokazuje pastylka u góry.
+4. **Prostowanie do poziomu i pionu** (odpowiednik ORTHO z CAD-a, domyślnie włączone) przyciąga linię,
+   gdy do równego kąta brakuje mniej niż 4°. Przez kadr biegnie wtedy zielona linia śledząca.
+5. **Cofnij** u góry usuwa ostatni krok. **Wymiary** na dole otwierają listę: dotknięcie nazwy pozwala
+   ją zmienić (gotowe etykiety: gniazdko, woda, odpływ, wentylacja, narożnik…), dotknięcie wiersza
+   pokazuje wymiar na zdjęciu.
+6. **Gotowe** zapisuje wynik: serwer renderuje PNG w pełnej rozdzielczości i tabelę `wymiary.json`,
+   oba do pobrania na ekranie wyniku.
+
+Wymiary na ekranie są w pełnych milimetrach — przy dokładności metody 1–2 mm dziesiąte części
+sugerowałyby precyzję, której nie ma. Pełna precyzja trafia do pliku JSON.
+
+**Tryb współrzędnych** (przełącznik na liście wymiarów) służy do trasowania, gdy każdy otwór ma być
+odmierzony od jednej krawędzi. Zero ustawia się w miejscu celownika — jako narożnik, sama krawędź ściany
+albo sama posadzka, bo te odniesienia rzadko spotykają się w jednym widocznym punkcie.
 
 Argumenty: `--host`, `--port` (domyślnie 8000), `--max-sessions` (ile zdjęć trzymać w pamięci naraz), `--debug`.
 

@@ -1,50 +1,66 @@
 /* Miarka ze zdjecia - warstwa interakcji.
  *
- * Zalozenie prowadzace caly interfejs: uzytkownik nie czyta instrukcji.
- * Na kazdym ekranie ma byc jedna oczywista rzecz do zrobienia, a program
- * mowi wprost, co sie dzieje i co bedzie dalej.
+ * Zalozenia:
+ *  - uzytkownik nie czyta instrukcji; na kazdym ekranie jest jedna oczywista
+ *    rzecz do zrobienia, a program mowi wprost, co sie dzieje,
+ *  - celownik stoi nieruchomo na srodku, pod nim przesuwa sie zdjecie, wiec
+ *    palec nigdy nie zaslania mierzonego miejsca,
+ *  - wymiary pokazujemy w pelnych milimetrach; dokladnosc metody to 1-2 mm,
+ *    wiec dziesiate czesci sugerowalyby precyzje, ktorej nie ma. Pelna
+ *    precyzja trafia do eksportu JSON.
  *
- * Pomiar dziala na nieruchomym celowniku w srodku kadru - palec nigdy nie
- * zaslania mierzonego detalu. Wszystkie odczyty licza sie lokalnie z trzech
- * liczb otrzymanych z serwera (skala, osnowa, rozmiar obrazu), wiec
- * przesuwanie i zoom nie generuja ruchu sieciowego.
+ * Odczyty licza sie lokalnie z trzech liczb otrzymanych z serwera (skala,
+ * osnowa, rozmiar obrazu), wiec przesuwanie i zoom nie obciazaja sieci.
+ *
+ * window.MIARKA_DEMO uruchamia podglad bez serwera: gotowe, wyprostowane
+ * zdjecie i wynik liczony w przegladarce.
  */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+const DEMO = window.MIARKA_DEMO || null;
 
 const ETYKIETY = ['Gniazdko', 'Włącznik', 'Woda', 'Odpływ', 'Wentylacja',
-                  'Narożnik', 'Krawędź', 'Wysokość', 'Szerokość'];
-const TOLERANCJA_ORTHO = 4;        // stopnie - przy tylu prostujemy do osi
+                  'Narożnik', 'Krawędź', 'Wysokość', 'Szerokość', 'Wnęka'];
+const TOLERANCJA_ORTHO = 4;   // stopnie
 const ZOOM_MAX = 16;
+const CZCIONKA = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+const KOLOR = {
+  linia: '#FFFFFF',
+  obwodka: 'rgba(15, 23, 42, .5)',
+  tasma: '#FFC53D',
+  ok: '#16A34A',
+  tekst: '#0F172A',
+};
+const IKONA = {
+  usun: '<svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  olowek: '<svg viewBox="0 0 24 24"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
+};
 
 const stan = {
-  sesja: null,
-  obraz: null,
-  skala: 1,
-  skalaMin: 1,
-  dpr: 1,
+  sesja: null, obraz: null,
+  skala: 1, skalaMin: 1, dpr: 1,
   srodek: { x: 0, y: 0 },
-  zero: { x: 0, y: 0 },
-  zrodloX: 'marker',
-  zrodloY: 'marker',
-  odcinki: [],
-  nastepnyOdcinek: 1,
-  poczatek: null,
-  punkty: [],
-  nastepnyPunkt: 1,
+  tryb: 'miarka',                 // 'miarka' albo 'wspolrzedne'
+  zero: { x: 0, y: 0 }, zrodloX: 'marker', zrodloY: 'marker',
+  odcinki: [], nastepnyOdcinek: 1, poczatek: null,
+  punkty: [], nastepnyPunkt: 1,
   nazywany: null,
-  crop: null,
+  wyrozniony: null,
 };
 
-/* --- drobiazgi ------------------------------------------------------------ */
+/* ================================================================ formaty */
 
-const fmt = (v, znak) => {
-  const t = Math.abs(v).toFixed(1).replace('.', ',');
-  return znak ? (v < 0 ? '−' : '+') + t : t;
-};
+const liczba = new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 0 });
+const mm = (v) => liczba.format(Math.round(Math.abs(v)));
+function mmZnak(v) {
+  const r = Math.round(v);
+  if (r === 0) return '0';
+  return (r < 0 ? '−' : '+') + liczba.format(Math.abs(r));
+}
+const stopnie = (v) => `${v < 0 ? '−' : ''}${Math.abs(v).toFixed(1).replace('.', ',')}°`;
 
-/* Polska odmiana liczebnikow - "2 wymiary", nie "2 wymiarow". */
+/* Polska odmiana liczebnikow: 1 wymiar, 2 wymiary, 5 wymiarow. */
 function odmiana(ile, jeden, dwa, wiele) {
   const n = Math.abs(ile);
   if (n === 1) return jeden;
@@ -60,30 +76,52 @@ function pamietane(klucz) {
   try { return localStorage.getItem(klucz); } catch (e) { return null; }
 }
 
+/* ================================================================ nawigacja */
+
 function pokazEkran(nazwa) {
   ['start', 'pomiar', 'wynik'].forEach((e) => { $('ekran-' + e).hidden = e !== nazwa; });
+  window.scrollTo(0, 0);
   if (nazwa === 'pomiar') requestAnimationFrame(rysuj);
 }
 
-function status(id, tekst, klasa = '') {
+function otworz(id) { $(id).hidden = false; }
+function zamknij(id) { $(id).hidden = true; }
+
+document.querySelectorAll('.arkusz-tlo').forEach((tlo) => {
+  tlo.addEventListener('click', (e) => { if (e.target === tlo) tlo.hidden = true; });
+});
+document.querySelectorAll('[data-zamknij]').forEach((b) => {
+  b.addEventListener('click', () => { b.closest('.arkusz-tlo').hidden = true; });
+});
+const arkuszOtwarty = () => [...document.querySelectorAll('.arkusz-tlo')].some((a) => !a.hidden);
+
+function komunikat(id, tekst, klasa = '') {
   const el = $(id);
   el.textContent = tekst;
-  el.className = `status ${klasa}`;
+  el.className = `komunikat ${klasa}`;
 }
 
-/* --- przeliczenia --------------------------------------------------------- */
+/* Chwilowy komunikat w miejscu podpowiedzi - potwierdzenie albo ostrzezenie. */
+let toastDo = 0;
+function toast(tekst, klasa = 'ok', ms = 1800) {
+  const p = $('podpowiedz');
+  p.textContent = tekst;
+  p.className = `podpowiedz ${klasa}`;
+  toastDo = Date.now() + ms;
+  setTimeout(() => { if (Date.now() >= toastDo) odswiezOdczyt(); }, ms + 20);
+}
 
-function mmNaPiksel() { return stan.sesja.mm_na_piksel; }
+/* ================================================================ geometria */
+
+const mmNaPiksel = () => stan.sesja.mm_na_piksel;
 const wGore = () => $('os-y-gora').checked;
 
 function roznica(od, doP) {
-  const mm = mmNaPiksel();
-  const dx = (doP.x - od.x) * mm;
-  const dy = (doP.y - od.y) * mm * (wGore() ? -1 : 1);
+  const k = mmNaPiksel();
+  const dx = (doP.x - od.x) * k;
+  const dy = (doP.y - od.y) * k * (wGore() ? -1 : 1);
   return { dx, dy, l: Math.hypot(dx, dy) };
 }
-
-function odZera(px) { return roznica(stan.zero, px); }
 
 function katOdcinka(a, b) {
   const k = Math.atan2(-(b.y - a.y), b.x - a.x) * 180 / Math.PI;
@@ -102,13 +140,15 @@ function koniecOdcinka(od, kursor) {
   return { px: { ...kursor }, os: null };
 }
 
-/* --- rysowanie ------------------------------------------------------------ */
+const opisOsi = (os) => (os === 'poziom' ? 'poziomo' : 'pionowo');
+
+/* ================================================================ rysowanie */
 
 const plotno = $('plotno');
 const ctx = plotno.getContext('2d');
 
-/* Bufor rysowania musi nadazac za rozmiarem elementu - panel z pomiarami
- * rosnie i skraca plotno, a niedopasowany bufor zostawia duchy klatki. */
+/* Bufor rysowania musi nadazac za rozmiarem elementu, inaczej po zmianie
+ * rozmiaru zostaja duchy poprzedniej klatki. */
 function synchronizuj() {
   const r = plotno.getBoundingClientRect();
   stan.dpr = window.devicePixelRatio || 1;
@@ -122,52 +162,70 @@ function synchronizuj() {
   return r;
 }
 
-function naEkran(px, r) {
-  return {
-    x: r.width / 2 + (px.x - stan.srodek.x) * stan.skala,
-    y: r.height / 2 + (px.y - stan.srodek.y) * stan.skala,
-  };
-}
+const naEkran = (px, r) => ({
+  x: r.width / 2 + (px.x - stan.srodek.x) * stan.skala,
+  y: r.height / 2 + (px.y - stan.srodek.y) * stan.skala,
+});
 
-/* Etykieta trzymana w kadrze - przy krawedzi zdjecia opis wymiaru
- * wyjezdzal poza plotno i stawal sie nieczytelny. */
-function etykieta(tekst, x, y, kolor) {
-  ctx.font = '700 13px -apple-system, "Segoe UI", Roboto, sans-serif';
-  const w = ctx.measureText(tekst).width;
-  const r = plotno.getBoundingClientRect();
-  x = Math.min(Math.max(x, 8), Math.max(8, r.width - w - 8));
-  y = Math.min(Math.max(y, 19), r.height - 8);
-  ctx.fillStyle = 'rgba(10,13,18,.88)';
-  ctx.fillRect(x - 6, y - 15, w + 12, 21);
-  ctx.fillStyle = kolor;
-  ctx.fillText(tekst, x, y);
-}
-
-function krzyzyk(p, kolor, promien) {
-  const luka = promien * .38;
-  ctx.strokeStyle = kolor; ctx.lineWidth = 2; ctx.lineCap = 'round';
+function sciezkaZaokraglona(x, y, w, h, promien) {
   ctx.beginPath();
-  ctx.arc(p.x, p.y, promien, 0, Math.PI * 2);
-  ctx.moveTo(p.x - promien - luka, p.y); ctx.lineTo(p.x - luka, p.y);
-  ctx.moveTo(p.x + luka, p.y); ctx.lineTo(p.x + promien + luka, p.y);
-  ctx.moveTo(p.x, p.y - promien - luka); ctx.lineTo(p.x, p.y - luka);
-  ctx.moveTo(p.x, p.y + luka); ctx.lineTo(p.x, p.y + promien + luka);
-  ctx.stroke();
+  ctx.moveTo(x + promien, y);
+  ctx.arcTo(x + w, y, x + w, y + h, promien);
+  ctx.arcTo(x + w, y + h, x, y + h, promien);
+  ctx.arcTo(x, y + h, x, y, promien);
+  ctx.arcTo(x, y, x + w, y, promien);
+  ctx.closePath();
 }
 
-function odcinekNaEkranie(a, b, kolor, tekst, r) {
-  const pa = naEkran(a, r), pb = naEkran(b, r);
-  ctx.strokeStyle = kolor; ctx.lineWidth = 3; ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
-  const dx = pb.x - pa.x, dy = pb.y - pa.y, dl = Math.hypot(dx, dy);
-  if (dl > 1) {
-    const nx = -dy / dl * 10, ny = dx / dl * 10;
-    ctx.beginPath();
-    ctx.moveTo(pa.x - nx, pa.y - ny); ctx.lineTo(pa.x + nx, pa.y + ny);
-    ctx.moveTo(pb.x - nx, pb.y - ny); ctx.lineTo(pb.x + nx, pb.y + ny);
-    ctx.stroke();
-  }
-  if (tekst) etykieta(tekst, (pa.x + pb.x) / 2 + 13, (pa.y + pb.y) / 2 - 9, kolor);
+/* Etykieta w bialej pastylce, trzymana w granicach kadru. */
+function pastylka(tekst, cx, cy, r, tlo = '#fff', kolor = KOLOR.tekst) {
+  ctx.font = `700 14px ${CZCIONKA}`;
+  const w = ctx.measureText(tekst).width + 22, h = 28;
+  const x = Math.min(Math.max(cx - w / 2, 8), r.width - w - 8);
+  const y = Math.min(Math.max(cy - h / 2, 8), r.height - h - 8);
+  ctx.save();
+  ctx.shadowColor = 'rgba(15, 23, 42, .28)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 2;
+  ctx.fillStyle = tlo;
+  sciezkaZaokraglona(x, y, w, h, h / 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = kolor;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(tekst, x + w / 2, y + h / 2 + 1);
+  ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+}
+
+/* Linia z ciemna obwodka - czytelna na jasnym tynku i na ciemnej fudze. */
+function linia(a, b, kolor, grubosc) {
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = grubosc + 3;
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.strokeStyle = kolor; ctx.lineWidth = grubosc;
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+}
+
+function kropka(p, kolor, promien = 5) {
+  ctx.beginPath(); ctx.arc(p.x, p.y, promien + 1.8, 0, Math.PI * 2);
+  ctx.fillStyle = KOLOR.obwodka; ctx.fill();
+  ctx.beginPath(); ctx.arc(p.x, p.y, promien, 0, Math.PI * 2);
+  ctx.fillStyle = kolor; ctx.fill();
+}
+
+/* Pastylka odsunieta prostopadle od odcinka, zeby go nie zaslaniala. */
+function opisOdcinka(a, b, tekst, r, tlo, kolor) {
+  const dx = b.x - a.x, dy = b.y - a.y, dl = Math.hypot(dx, dy) || 1;
+  let nx = -dy / dl, ny = dx / dl;
+  if (ny > 0 || (ny === 0 && nx > 0)) { nx = -nx; ny = -ny; }
+  pastylka(tekst, (a.x + b.x) / 2 + nx * 22, (a.y + b.y) / 2 + ny * 22, r, tlo, kolor);
+}
+
+function celownik(r, kolor) {
+  const x = r.width / 2, y = r.height / 2;
+  const okrag = (promien) => { ctx.beginPath(); ctx.arc(x, y, promien, 0, Math.PI * 2); ctx.stroke(); };
+  ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = 5; okrag(17);
+  ctx.strokeStyle = kolor; ctx.lineWidth = 2.5; okrag(17);
+  ctx.beginPath(); ctx.arc(x, y, 4.2, 0, Math.PI * 2); ctx.fillStyle = KOLOR.obwodka; ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y, 2.6, 0, Math.PI * 2); ctx.fillStyle = kolor; ctx.fill();
 }
 
 function rysuj() {
@@ -176,131 +234,157 @@ function rysuj() {
   ctx.clearRect(0, 0, r.width, r.height);
   if (!stan.obraz) return;
 
-  ctx.imageSmoothingEnabled = stan.skala < 1;
-  ctx.drawImage(stan.obraz,
-    r.width / 2 - stan.srodek.x * stan.skala,
-    r.height / 2 - stan.srodek.y * stan.skala,
-    stan.sesja.obraz.szerokosc * stan.skala,
-    stan.sesja.obraz.wysokosc * stan.skala);
+  // tlo poza zdjeciem - jasne i neutralne, wyraznie "nie zdjecie"
+  ctx.fillStyle = '#D9DDE3';
+  ctx.fillRect(0, 0, r.width, r.height);
 
-  // marker referencyjny
-  ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2;
+  const ox = r.width / 2 - stan.srodek.x * stan.skala;
+  const oy = r.height / 2 - stan.srodek.y * stan.skala;
+  const ow = stan.sesja.obraz.szerokosc * stan.skala;
+  const oh = stan.sesja.obraz.wysokosc * stan.skala;
+  ctx.imageSmoothingEnabled = stan.skala < 1.5;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(stan.obraz, ox, oy, ow, oh);
+  ctx.strokeStyle = 'rgba(15, 23, 42, .35)'; ctx.lineWidth = 1;
+  ctx.strokeRect(Math.round(ox) - .5, Math.round(oy) - .5, Math.round(ow) + 1, Math.round(oh) + 1);
+
+  // marker referencyjny - dyskretny obrys
+  ctx.save();
+  ctx.setLineDash([6, 5]); ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255, 255, 255, .9)';
   ctx.beginPath();
   stan.sesja.marker.narozniki_px.forEach(([x, y], i) => {
     const p = naEkran({ x, y }, r);
     i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y);
   });
   ctx.closePath(); ctx.stroke();
+  ctx.restore();
 
   // zmierzone odcinki
-  stan.odcinki.forEach((o) => {
-    odcinekNaEkranie(o.a, o.b, '#ff8a4e', `${o.nazwa}  ${fmt(roznica(o.a, o.b).l)} mm`, r);
+  stan.odcinki.forEach((o, i) => {
+    const a = naEkran(o.a, r), b = naEkran(o.b, r);
+    const wyrozniony = stan.wyrozniony && stan.wyrozniony.typ === 'odcinek' && stan.wyrozniony.i === i;
+    const kolor = wyrozniony ? KOLOR.tasma : KOLOR.linia;
+    linia(a, b, kolor, 3);
+    kropka(a, kolor); kropka(b, kolor);
+    opisOdcinka(a, b, `${mm(roznica(o.a, o.b).l)} mm`, r, wyrozniony ? KOLOR.tasma : '#fff');
   });
-
-  // odcinek w trakcie mierzenia
-  if (stan.poczatek) {
-    const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const dl = roznica(stan.poczatek, k.px).l;
-    if (k.os) {
-      const a = naEkran(stan.poczatek, r), b = naEkran(k.px, r), c = naEkran(stan.srodek, r);
-      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
-      ctx.strokeStyle = 'rgba(70,207,122,.45)'; ctx.lineWidth = 1; ctx.setLineDash([5, 6]);
-      ctx.beginPath();
-      ctx.moveTo(a.x - dx / d * 3000, a.y - dy / d * 3000);
-      ctx.lineTo(b.x + dx / d * 3000, b.y + dy / d * 3000);
-      ctx.stroke();
-      ctx.strokeStyle = 'rgba(70,207,122,.8)'; ctx.setLineDash([2, 4]);
-      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    ctx.setLineDash([9, 6]);
-    odcinekNaEkranie(stan.poczatek, k.px, k.os ? '#46cf7a' : '#ffb020',
-      k.os ? `${fmt(dl)} mm  ${k.os === 'poziom' ? 'POZIOM' : 'PION'}`
-           : `${fmt(dl)} mm  ${fmt(katOdcinka(stan.poczatek, k.px), true)}°`, r);
-    ctx.setLineDash([]);
-    krzyzyk(naEkran(stan.poczatek, r), '#ffb020', 11);
-  }
 
   // punkty trybu wspolrzednych
-  stan.punkty.forEach((p) => {
+  stan.punkty.forEach((p, i) => {
     const e = naEkran(p.px, r);
-    krzyzyk(e, '#46cf7a', 11);
-    etykieta(p.nazwa, e.x + 16, e.y - 9, '#46cf7a');
+    const m = roznica(stan.zero, p.px);
+    const wyrozniony = stan.wyrozniony && stan.wyrozniony.typ === 'punkt' && stan.wyrozniony.i === i;
+    kropka(e, wyrozniony ? KOLOR.tasma : '#fff', 6);
+    pastylka(`${mmZnak(m.dx)} × ${mmZnak(m.dy)}`, e.x, e.y - 26, r, wyrozniony ? KOLOR.tasma : '#fff');
   });
-  if (stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker') {
-    krzyzyk(naEkran(stan.zero, r), '#ff6b6b', 14);
+  if (stan.tryb === 'wspolrzedne') {
+    const z = naEkran(stan.zero, r);
+    ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(z.x - 12, z.y); ctx.lineTo(z.x + 12, z.y);
+    ctx.moveTo(z.x, z.y - 12); ctx.lineTo(z.x, z.y + 12); ctx.stroke();
+    ctx.strokeStyle = KOLOR.tasma; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(z.x - 12, z.y); ctx.lineTo(z.x + 12, z.y);
+    ctx.moveTo(z.x, z.y - 12); ctx.lineTo(z.x, z.y + 12); ctx.stroke();
   }
 
-  // celownik - zawsze na srodku kadru
-  const sx = r.width / 2, sy = r.height / 2;
-  const ramie = () => {
-    ctx.beginPath();
-    ctx.moveTo(sx - 21, sy); ctx.lineTo(sx - 9, sy);
-    ctx.moveTo(sx + 9, sy); ctx.lineTo(sx + 21, sy);
-    ctx.moveTo(sx, sy - 21); ctx.lineTo(sx, sy - 9);
-    ctx.moveTo(sx, sy + 9); ctx.lineTo(sx, sy + 21);
-    ctx.arc(sx, sy, 4, 0, Math.PI * 2);
-    ctx.stroke();
-  };
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(5,7,10,.85)'; ctx.lineWidth = 5.5; ramie();
-  ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2; ramie();
+  // odcinek w trakcie mierzenia
+  let kolorCelownika = '#fff';
+  if (stan.poczatek) {
+    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const kolor = k.os ? KOLOR.ok : KOLOR.tasma;
+    const a = naEkran(stan.poczatek, r), b = naEkran(k.px, r);
+    if (k.os) {
+      // linia sledzaca wzdluz zlapanej osi
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+      ctx.save();
+      ctx.setLineDash([4, 6]); ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(22, 163, 74, .75)';
+      ctx.beginPath();
+      ctx.moveTo(a.x - dx / d * 4000, a.y - dy / d * 4000);
+      ctx.lineTo(b.x + dx / d * 4000, b.y + dy / d * 4000);
+      ctx.stroke();
+      ctx.restore();
+    }
+    linia(a, b, kolor, 4);
+    kropka(a, kolor, 6);
+    kolorCelownika = kolor;
+  }
 
+  celownik(r, kolorCelownika);
   odswiezOdczyt();
 }
 
-function odswiezOdczyt() {
-  const znacznik = $('znacznik');
-  znacznik.classList.remove('zlapane', 'mierzy');
+/* ================================================================ odczyt */
 
-  if (stan.poczatek) {
-    const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const { dx, dy, l } = roznica(stan.poczatek, k.px);
-    znacznik.classList.add(k.os ? 'zlapane' : 'mierzy');
-    znacznik.textContent = k.os
-      ? (k.os === 'poziom' ? 'poziom' : 'pion')
-      : `${fmt(katOdcinka(stan.poczatek, k.px), true)}°`;
-    $('odczyt-x').textContent = fmt(dx, true);
-    $('odczyt-y').textContent = fmt(dy, true);
-    $('odczyt-l').textContent = fmt(l);
-    $('wskazowka').classList.toggle('zlapane', Boolean(k.os));
-    $('wskazowka').innerHTML = k.os
-      ? `Odcinek wyrównany do ${k.os === 'poziom' ? 'poziomu' : 'pionu'}. Naciśnij <b>Wskaż drugi punkt</b>.`
-      : 'Naprowadź celownik na drugi punkt.';
+function odswiezOdczyt() {
+  const odczyt = $('odczyt'), fab = $('mierz'), podpowiedz = $('podpowiedz');
+  const toastTrwa = Date.now() < toastDo;
+  fab.classList.remove('w-toku', 'zlapane');
+  odczyt.classList.remove('zlapane');
+  if (!toastTrwa) podpowiedz.className = 'podpowiedz';
+
+  if (stan.tryb === 'wspolrzedne') {
+    const m = roznica(stan.zero, stan.srodek);
+    odczyt.hidden = false;
+    $('odczyt-wartosc').textContent = `${mmZnak(m.dx)} × ${mmZnak(m.dy)}`;
+    $('odczyt-opis').textContent = 'szerokość × wysokość [mm]';
+    fab.setAttribute('aria-label', 'Zapisz punkt');
+    if (!toastTrwa) podpowiedz.textContent = 'Wyceluj i stuknij +, aby zapisać punkt';
     return;
   }
 
-  const m = odZera(stan.srodek);
-  znacznik.textContent = 'od markera';
-  if (stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker') znacznik.textContent = 'od zera';
-  $('odczyt-x').textContent = fmt(m.dx, true);
-  $('odczyt-y').textContent = fmt(m.dy, true);
-  $('odczyt-l').textContent = fmt(m.l);
+  fab.setAttribute('aria-label', stan.poczatek ? 'Zakończ wymiar' : 'Zacznij wymiar');
+  if (stan.poczatek) {
+    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const m = roznica(stan.poczatek, k.px);
+    odczyt.hidden = false;
+    odczyt.classList.toggle('zlapane', Boolean(k.os));
+    fab.classList.add(k.os ? 'zlapane' : 'w-toku');
+    $('odczyt-wartosc').textContent = `${mm(m.l)} mm`;
+    $('odczyt-opis').textContent = k.os ? opisOsi(k.os) : `pod kątem ${stopnie(katOdcinka(stan.poczatek, k.px))}`;
+    if (!toastTrwa) {
+      podpowiedz.textContent = k.os
+        ? `Wyrównano ${k.os === 'poziom' ? 'do poziomu' : 'do pionu'} — stuknij +`
+        : 'Wyceluj w drugi punkt i stuknij +';
+      podpowiedz.classList.toggle('zlapane', Boolean(k.os));
+    }
+    return;
+  }
+
+  odczyt.hidden = true;
+  if (!toastTrwa) {
+    podpowiedz.textContent = stan.odcinki.length
+      ? 'Wyceluj w kolejny punkt, aby dodać wymiar'
+      : 'Wyceluj w pierwszy punkt i stuknij +';
+  }
 }
 
-/* --- gesty ---------------------------------------------------------------- */
+function odswiezPrzyciski() {
+  const ile = stan.odcinki.length + stan.punkty.length;
+  $('licznik').hidden = ile === 0;
+  $('licznik').textContent = ile;
+  $('zakoncz').disabled = ile === 0;
+  $('zapisz-z-listy').disabled = ile === 0;
+  $('cofnij').disabled = !stan.poczatek && ile === 0;
+}
+
+/* ================================================================ gesty */
 
 const dotyki = new Map();
 let bazaPinch = null;
 
-/* Kadr nie moze wyjechac poza zdjecie - inaczej przy krawedzi polowa ekranu
- * robi sie czarna i wyglada na usterke. Ograniczamy srodek tak, by widoczny
- * wycinek zawsze lezal w obrazie. */
+/* Celownik stoi na srodku ekranu, wiec musi dac sie doprowadzic do kazdego
+ * piksela zdjecia - rowniez do narozy i krawedzi, bo wlasnie do nich
+ * najczesciej sie mierzy. Srodek ograniczamy wiec do granic obrazu, a nie
+ * do granic widocznego wycinka; obszar poza zdjeciem rysujemy jako
+ * neutralne tlo z wyrazna krawedzia. */
 function ogranicz() {
-  const r = plotno.getBoundingClientRect();
-  const polSzer = (r.width / 2) / stan.skala;
-  const polWys = (r.height / 2) / stan.skala;
-  const W = stan.sesja.obraz.szerokosc, H = stan.sesja.obraz.wysokosc;
-  stan.srodek.x = W <= 2 * polSzer ? W / 2
-    : Math.min(Math.max(stan.srodek.x, polSzer), W - polSzer);
-  stan.srodek.y = H <= 2 * polWys ? H / 2
-    : Math.min(Math.max(stan.srodek.y, polWys), H - polWys);
+  stan.srodek.x = Math.min(Math.max(stan.srodek.x, 0), stan.sesja.obraz.szerokosc);
+  stan.srodek.y = Math.min(Math.max(stan.srodek.y, 0), stan.sesja.obraz.wysokosc);
 }
 
 function zoom(mnoznik) {
   stan.skala = Math.min(Math.max(stan.skala * mnoznik, stan.skalaMin), stan.skalaMin * ZOOM_MAX);
-  ogranicz();
-  rysuj();
+  ogranicz(); rysuj();
 }
 
 plotno.addEventListener('pointerdown', (e) => {
@@ -314,7 +398,6 @@ plotno.addEventListener('pointermove', (e) => {
   const teraz = { x: e.clientX, y: e.clientY };
   dotyki.set(e.pointerId, teraz);
   if (dotyki.size === 1) {
-    if (Math.abs(teraz.x - prev.x) + Math.abs(teraz.y - prev.y) > 2) schowajInstruktaz();
     stan.srodek.x -= (teraz.x - prev.x) / stan.skala;
     stan.srodek.y -= (teraz.y - prev.y) / stan.skala;
     ogranicz(); rysuj();
@@ -334,145 +417,212 @@ plotno.addEventListener('pointerup', koniecDotyku);
 plotno.addEventListener('pointercancel', koniecDotyku);
 plotno.addEventListener('wheel', (e) => {
   if (!stan.obraz) return;
-  e.preventDefault(); zoom(e.deltaY < 0 ? 1.18 : 1 / 1.18);
+  e.preventDefault();
+  zoom(e.deltaY < 0 ? 1.18 : 1 / 1.18);
 }, { passive: false });
 
 $('zoom-plus').onclick = () => zoom(1.6);
 $('zoom-minus').onclick = () => zoom(1 / 1.6);
 
-/* --- instruktaz przy pierwszym uruchomieniu -------------------------------- */
+/* Klawiatura na komputerze: Enter lub spacja mierzy, Ctrl+Z cofa. */
+document.addEventListener('keydown', (e) => {
+  if ($('ekran-pomiar').hidden || arkuszOtwarty() || !$('instruktaz').hidden) return;
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('mierz').click(); }
+  else if ((e.key === 'z' && (e.ctrlKey || e.metaKey)) || e.key === 'Backspace') { e.preventDefault(); cofnij(); }
+  else if (e.key === '+' || e.key === '=') zoom(1.3);
+  else if (e.key === '-') zoom(1 / 1.3);
+});
 
-function schowajInstruktaz() {
-  if ($('instruktaz').hidden) return;
-  $('instruktaz').hidden = true;
-  pamietaj('instruktaz-widziany', '1');
-}
-$('instruktaz-ok').onclick = schowajInstruktaz;
+/* ================================================================ pomiar */
 
-/* --- odcinki -------------------------------------------------------------- */
-
-function odswiezPrzyciskMierzenia() {
-  $('mierz').textContent = stan.poczatek ? 'Wskaż drugi punkt' : 'Wskaż pierwszy punkt';
-  $('mierz-anuluj').hidden = !stan.poczatek;
-  if (!stan.poczatek) {
-    $('wskazowka').classList.remove('zlapane');
-    $('wskazowka').textContent = stan.odcinki.length
-      ? 'Wyceluj w kolejny punkt, żeby zmierzyć następny wymiar.'
-      : 'Celownik na środku zdjęcia pokazuje mierzone miejsce.';
-  }
-}
-
-function odswiezPomiary() {
-  const lista = $('lista-pomiarow');
-  lista.textContent = '';
-  stan.odcinki.forEach((o, i) => {
-    const m = roznica(o.a, o.b);
-    const li = document.createElement('li');
-
-    const nazwa = document.createElement('button');
-    nazwa.type = 'button'; nazwa.className = 'nazwa'; nazwa.textContent = o.nazwa;
-    nazwa.onclick = () => otworzNazwe('odcinek', i);
-
-    const wymiar = document.createElement('span');
-    wymiar.className = 'wymiar'; wymiar.textContent = `${fmt(m.l)} mm`;
-
-    const szczegoly = document.createElement('span');
-    szczegoly.className = 'szczegoly';
-    szczegoly.textContent = `szer. ${fmt(m.dx, true)}   wys. ${fmt(m.dy, true)}   ` +
-      (o.os ? (o.os === 'poziom' ? 'poziomo' : 'pionowo') : `${fmt(katOdcinka(o.a, o.b), true)}°`);
-
-    const usun = document.createElement('button');
-    usun.className = 'usun'; usun.textContent = '✕';
-    usun.setAttribute('aria-label', 'Usuń ' + o.nazwa);
-    usun.onclick = () => { stan.odcinki.splice(i, 1); odswiezPomiary(); rysuj(); };
-
-    li.append(nazwa, wymiar, szczegoly, usun);
-    lista.appendChild(li);
-  });
-  $('pusto').hidden = stan.odcinki.length > 0;
-  $('zakoncz').disabled = stan.odcinki.length === 0 && stan.punkty.length === 0;
-  odswiezPrzyciskMierzenia();
-}
+$('instruktaz-ok').onclick = () => { zamknij('instruktaz'); pamietaj('miarka-instruktaz', '1'); };
 
 $('mierz').onclick = () => {
-  schowajInstruktaz();
-  if (!stan.poczatek) {
+  stan.wyrozniony = null;
+  if (stan.tryb === 'wspolrzedne') {
+    stan.punkty.push({ nazwa: `Punkt ${stan.nastepnyPunkt++}`, px: { ...stan.srodek } });
+    const m = roznica(stan.zero, stan.srodek);
+    toast(`Zapisano punkt ${mmZnak(m.dx)} × ${mmZnak(m.dy)} mm`);
+  } else if (!stan.poczatek) {
     stan.poczatek = { ...stan.srodek };
   } else {
     const k = koniecOdcinka(stan.poczatek, stan.srodek);
-    const nazwa = `Wymiar ${stan.nastepnyOdcinek++}`;
-    stan.odcinki.push({ nazwa, a: stan.poczatek, b: k.px, os: k.os });
+    const odcinek = { nazwa: `Wymiar ${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: k.px, os: k.os };
+    stan.odcinki.push(odcinek);
     stan.poczatek = null;
-    const dl = fmt(roznica(stan.odcinki[stan.odcinki.length - 1].a,
-                           stan.odcinki[stan.odcinki.length - 1].b).l);
-    status('status-pomiar', `Zapisano ${dl} mm. Dotknij nazwy, żeby ją zmienić.`, 'ok');
-    odswiezPomiary();
+    toast(`Dodano ${mm(roznica(odcinek.a, odcinek.b).l)} mm`);
   }
-  odswiezPrzyciskMierzenia();
-  rysuj();
+  if (navigator.vibrate) navigator.vibrate(12);
+  odswiezPrzyciski(); rysuj();
 };
 
-$('mierz-anuluj').onclick = () => {
-  stan.poczatek = null;
-  odswiezPrzyciskMierzenia();
-  rysuj();
-};
+function cofnij() {
+  if (stan.poczatek) {
+    stan.poczatek = null;
+  } else if (stan.tryb === 'wspolrzedne' && stan.punkty.length) {
+    stan.punkty.pop(); stan.nastepnyPunkt--;
+    toast('Usunięto ostatni punkt', '');
+  } else if (stan.odcinki.length) {
+    stan.odcinki.pop(); stan.nastepnyOdcinek--;
+    toast('Usunięto ostatni wymiar', '');
+  } else if (stan.punkty.length) {
+    stan.punkty.pop(); stan.nastepnyPunkt--;
+  }
+  stan.wyrozniony = null;
+  odswiezPrzyciski(); odswiezListe(); rysuj();
+}
+$('cofnij').onclick = cofnij;
 
-/* --- nazywanie pomiarow --------------------------------------------------- */
+/* ================================================================ lista */
 
-function otworzNazwe(typ, indeks) {
-  stan.nazywany = { typ, indeks };
-  const biezaca = typ === 'odcinek' ? stan.odcinki[indeks].nazwa : stan.punkty[indeks].nazwa;
+function wiersz({ nazwa, wartosc, szczegoly, znak, onNazwa, onPokaz, onUsun }) {
+  const li = document.createElement('li');
+  li.className = 'wymiar-wiersz';
+
+  const kropkaZnak = document.createElement('span');
+  kropkaZnak.className = `wymiar-znak ${znak || ''}`;
+
+  const tresc = document.createElement('div');
+  tresc.className = 'wymiar-tresc';
+  tresc.onclick = (e) => { if (!e.target.closest('.wymiar-nazwa')) onPokaz(); };
+
+  const przyciskNazwy = document.createElement('button');
+  przyciskNazwy.type = 'button'; przyciskNazwy.className = 'wymiar-nazwa';
+  przyciskNazwy.innerHTML = IKONA.olowek;
+  przyciskNazwy.prepend(document.createTextNode(nazwa));
+  przyciskNazwy.setAttribute('aria-label', `Zmień nazwę: ${nazwa}`);
+  przyciskNazwy.onclick = onNazwa;
+
+  const opis = document.createElement('span');
+  opis.className = 'wymiar-szczegoly'; opis.textContent = szczegoly;
+  tresc.append(przyciskNazwy, opis);
+
+  const w = document.createElement('span');
+  w.className = 'wymiar-wartosc'; w.textContent = wartosc;
+
+  const usun = document.createElement('button');
+  usun.type = 'button'; usun.className = 'ikona-btn'; usun.innerHTML = IKONA.usun;
+  usun.setAttribute('aria-label', `Usuń: ${nazwa}`);
+  usun.onclick = onUsun;
+
+  li.append(kropkaZnak, tresc, w, usun);
+  return li;
+}
+
+function odswiezListe() {
+  const lista = $('lista-pomiarow');
+  lista.textContent = '';
+
+  stan.odcinki.forEach((o, i) => {
+    const m = roznica(o.a, o.b);
+    lista.appendChild(wiersz({
+      nazwa: o.nazwa,
+      wartosc: `${mm(m.l)} mm`,
+      szczegoly: o.os
+        ? `${opisOsi(o.os)}`
+        : `szer. ${mm(m.dx)} · wys. ${mm(m.dy)} · ${stopnie(katOdcinka(o.a, o.b))}`,
+      znak: o.os,
+      onNazwa: () => otworzNazwe('odcinek', i),
+      onPokaz: () => pokazNaZdjeciu('odcinek', i),
+      onUsun: () => { stan.odcinki.splice(i, 1); stan.wyrozniony = null; odswiezListe(); odswiezPrzyciski(); rysuj(); },
+    }));
+  });
+
+  stan.punkty.forEach((p, i) => {
+    const m = roznica(stan.zero, p.px);
+    lista.appendChild(wiersz({
+      nazwa: p.nazwa,
+      wartosc: `${mmZnak(m.dx)} × ${mmZnak(m.dy)}`,
+      szczegoly: 'współrzędne od zera [mm]',
+      onNazwa: () => otworzNazwe('punkt', i),
+      onPokaz: () => pokazNaZdjeciu('punkt', i),
+      onUsun: () => { stan.punkty.splice(i, 1); stan.wyrozniony = null; odswiezListe(); odswiezPrzyciski(); rysuj(); },
+    }));
+  });
+
+  $('pusto').hidden = stan.odcinki.length + stan.punkty.length > 0;
+}
+
+/* Dotkniecie wiersza pokazuje ten wymiar na zdjeciu. */
+function pokazNaZdjeciu(typ, i) {
+  const cel = typ === 'odcinek'
+    ? { x: (stan.odcinki[i].a.x + stan.odcinki[i].b.x) / 2, y: (stan.odcinki[i].a.y + stan.odcinki[i].b.y) / 2 }
+    : stan.punkty[i].px;
+  stan.srodek = { ...cel };
+  stan.wyrozniony = { typ, i };
+  zamknij('arkusz-lista');
+  ogranicz(); rysuj();
+  setTimeout(() => { stan.wyrozniony = null; rysuj(); }, 2200);
+}
+
+$('lista-otworz').onclick = () => { odswiezListe(); otworz('arkusz-lista'); };
+$('ortho').onchange = rysuj;
+
+/* ================================================================ nazwy */
+
+function otworzNazwe(typ, i) {
+  stan.nazywany = { typ, i };
+  const biezaca = typ === 'odcinek' ? stan.odcinki[i].nazwa : stan.punkty[i].nazwa;
   const pojemnik = $('etykietki');
   pojemnik.textContent = '';
   ETYKIETY.forEach((e) => {
     const b = document.createElement('button');
-    b.type = 'button'; b.textContent = e;
-    if (e === biezaca) b.classList.add('wybrana');
+    b.type = 'button'; b.className = 'chip'; b.textContent = e;
+    if (e === biezaca) b.classList.add('wybrany');
     b.onclick = () => { $('nazwa-wlasna').value = e; zapiszNazwe(); };
     pojemnik.appendChild(b);
   });
-  $('nazwa-wlasna').value = biezaca;
-  $('arkusz-nazwa').hidden = false;
+  $('nazwa-wlasna').value = /^(Wymiar|Punkt) \d+$/.test(biezaca) ? '' : biezaca;
+  $('nazwa-wlasna').placeholder = biezaca;
+  otworz('arkusz-nazwa');
 }
 
 function zapiszNazwe() {
   if (!stan.nazywany) return;
   const nowa = $('nazwa-wlasna').value.trim();
   if (nowa) {
-    const { typ, indeks } = stan.nazywany;
-    if (typ === 'odcinek') stan.odcinki[indeks].nazwa = nowa;
-    else stan.punkty[indeks].nazwa = nowa;
+    const { typ, i } = stan.nazywany;
+    (typ === 'odcinek' ? stan.odcinki : stan.punkty)[i].nazwa = nowa;
   }
   stan.nazywany = null;
-  $('arkusz-nazwa').hidden = true;
-  odswiezPomiary(); odswiezPunkty(); rysuj();
+  zamknij('arkusz-nazwa');
+  odswiezListe(); rysuj();
 }
 $('nazwa-zapisz').onclick = zapiszNazwe;
-$('nazwa-anuluj').onclick = () => { stan.nazywany = null; $('arkusz-nazwa').hidden = true; };
+$('nazwa-wlasna').addEventListener('keydown', (e) => { if (e.key === 'Enter') zapiszNazwe(); });
 
-/* --- arkusze pomocnicze --------------------------------------------------- */
-
-$('pomoc-otworz').onclick = () => { $('arkusz-pomoc').hidden = false; };
-$('pomoc-zamknij').onclick = () => { $('arkusz-pomoc').hidden = true; };
-$('tryb-punkty-otworz').onclick = () => { $('arkusz-punkty').hidden = false; odswiezPunkty(); };
-$('punkty-zamknij').onclick = () => { $('arkusz-punkty').hidden = true; };
-[...document.querySelectorAll('.naklada.dolna')].forEach((n) => {
-  n.addEventListener('click', (e) => { if (e.target === n) n.hidden = true; });
-});
-
-/* --- tryb wspolrzednych --------------------------------------------------- */
+/* ================================================================ wspolrzedne */
 
 function opisZera() {
-  const s = (z) => (z === 'marker' ? 'markera' : 'wskazanego miejsca');
-  $('info-baza').textContent = `szerokość od ${s(stan.zrodloX)}, wysokość od ${s(stan.zrodloY)}`;
-  $('zero-reset').disabled = stan.zrodloX === 'marker' && stan.zrodloY === 'marker';
+  const oba = stan.zrodloX !== 'marker' && stan.zrodloY !== 'marker';
+  const tekst = stan.zrodloX === 'marker' && stan.zrodloY === 'marker' ? 'zero: marker'
+    : oba ? 'zero: narożnik'
+    : stan.zrodloX !== 'marker' ? 'zero: krawędź' : 'zero: posadzka';
+  $('tryb-chip-zero').textContent = tekst;
 }
+
+function ustawTryb(tryb) {
+  stan.tryb = tryb;
+  stan.poczatek = null;
+  $('tryb-wsp').checked = tryb === 'wspolrzedne';
+  $('tryb-chip').hidden = tryb !== 'wspolrzedne';
+  opisZera(); odswiezPrzyciski(); rysuj();
+}
+
+$('tryb-wsp').onchange = (e) => {
+  ustawTryb(e.target.checked ? 'wspolrzedne' : 'miarka');
+  zamknij('arkusz-lista');
+  toast(e.target.checked ? 'Tryb współrzędnych — ustaw zero u góry' : 'Tryb zwykłej miarki', '');
+};
+$('tryb-chip').onclick = () => otworz('arkusz-zero');
 
 function ustawZero(osie) {
   if (osie.includes('x')) { stan.zero.x = stan.srodek.x; stan.zrodloX = 'wskazany'; }
   if (osie.includes('y')) { stan.zero.y = stan.srodek.y; stan.zrodloY = 'wskazany'; }
-  opisZera(); odswiezPunkty(); rysuj();
+  zamknij('arkusz-zero');
+  opisZera(); odswiezListe(); rysuj();
+  toast('Ustawiono zero w miejscu celownika');
 }
 $('zero-xy').onclick = () => ustawZero('xy');
 $('zero-x').onclick = () => ustawZero('x');
@@ -480,48 +630,23 @@ $('zero-y').onclick = () => ustawZero('y');
 $('zero-reset').onclick = () => {
   stan.zero = { x: stan.sesja.marker.osnowa_px[0], y: stan.sesja.marker.osnowa_px[1] };
   stan.zrodloX = 'marker'; stan.zrodloY = 'marker';
-  opisZera(); odswiezPunkty(); rysuj();
+  zamknij('arkusz-zero');
+  opisZera(); odswiezListe(); rysuj();
 };
-$('os-y-gora').onchange = () => { odswiezPomiary(); odswiezPunkty(); rysuj(); };
-$('ortho').onchange = rysuj;
+$('os-y-gora').onchange = () => { odswiezListe(); rysuj(); };
 
-$('dodaj-punkt').onclick = () => {
-  stan.punkty.push({ nazwa: `Punkt ${stan.nastepnyPunkt++}`, px: { ...stan.srodek } });
-  odswiezPunkty(); odswiezPomiary(); rysuj();
-};
+/* ================================================================ zdjecie */
 
-function odswiezPunkty() {
-  const lista = $('lista-punktow');
-  lista.textContent = '';
-  stan.punkty.forEach((p, i) => {
-    const m = odZera(p.px);
-    const li = document.createElement('li');
-    const nazwa = document.createElement('button');
-    nazwa.type = 'button'; nazwa.className = 'nazwa'; nazwa.textContent = p.nazwa;
-    nazwa.onclick = () => otworzNazwe('punkt', i);
-    const wymiar = document.createElement('span');
-    wymiar.className = 'wymiar';
-    wymiar.textContent = `${fmt(m.dx, true)} × ${fmt(m.dy, true)} mm`;
-    const usun = document.createElement('button');
-    usun.className = 'usun'; usun.textContent = '✕';
-    usun.setAttribute('aria-label', 'Usuń ' + p.nazwa);
-    usun.onclick = () => { stan.punkty.splice(i, 1); odswiezPunkty(); odswiezPomiary(); rysuj(); };
-    li.append(nazwa, wymiar, usun);
-    lista.appendChild(li);
-  });
-  $('zakoncz').disabled = stan.odcinki.length === 0 && stan.punkty.length === 0;
-}
+$('ustawienia-otworz').onclick = () => otworz('arkusz-ustawienia');
+$('pomoc-otworz').onclick = () => otworz('arkusz-pomoc');
 
-/* --- wysylka zdjecia ------------------------------------------------------ */
-
-function wybranoPlik(plik) {
+function wybranoPlik(plik, input) {
   if (!plik) return;
-  $('nazwa-pliku').textContent = `${plik.name} · ${(plik.size / 1048576).toFixed(1)} MB`;
-  status('status-start', '');
-  wyslij(plik);
+  komunikat('status-start', '');
+  wyslij(plik).finally(() => { input.value = ''; });
 }
-$('plik-aparat').onchange = (e) => wybranoPlik(e.target.files[0]);
-$('plik-galeria').onchange = (e) => wybranoPlik(e.target.files[0]);
+$('plik-aparat').onchange = (e) => wybranoPlik(e.target.files[0], e.target);
+$('plik-galeria').onchange = (e) => wybranoPlik(e.target.files[0], e.target);
 
 async function wyslij(plik) {
   const dane = new FormData();
@@ -530,8 +655,8 @@ async function wyslij(plik) {
   dane.append('marker_id', $('marker-id').value);
   dane.append('mm_per_px', $('mm-px').value);
 
-  $('postep').hidden = false;
   $('postep-tekst').textContent = 'Szukam markera na zdjęciu…';
+  otworz('postep');
   try {
     const odpowiedz = await fetch('/api/rectify', { method: 'POST', body: dane });
     $('postep-tekst').textContent = 'Prostuję perspektywę ściany…';
@@ -539,9 +664,9 @@ async function wyslij(plik) {
     if (!odpowiedz.ok) throw new Error(wynik.blad || `Błąd serwera (${odpowiedz.status}).`);
     await uruchomPomiar(wynik);
   } catch (blad) {
-    status('status-start', blad.message, 'blad');
+    komunikat('status-start', blad.message, 'blad');
   } finally {
-    $('postep').hidden = true;
+    zamknij('postep');
   }
 }
 
@@ -549,38 +674,57 @@ function uruchomPomiar(sesja) {
   return new Promise((gotowe, blad) => {
     const obraz = new Image();
     obraz.onload = () => {
-      stan.sesja = sesja;
-      stan.obraz = obraz;
-      stan.zero = { x: sesja.marker.osnowa_px[0], y: sesja.marker.osnowa_px[1] };
-      stan.zrodloX = 'marker'; stan.zrodloY = 'marker';
-      stan.srodek = { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 };
-      stan.odcinki = []; stan.nastepnyOdcinek = 1; stan.poczatek = null;
-      stan.punkty = []; stan.nastepnyPunkt = 1;
-
+      Object.assign(stan, {
+        sesja, obraz,
+        zero: { x: sesja.marker.osnowa_px[0], y: sesja.marker.osnowa_px[1] },
+        zrodloX: 'marker', zrodloY: 'marker',
+        srodek: { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 },
+        odcinki: [], nastepnyOdcinek: 1, poczatek: null,
+        punkty: [], nastepnyPunkt: 1, wyrozniony: null,
+      });
       pokazEkran('pomiar');
       requestAnimationFrame(() => {
         synchronizuj();
-        stan.skala = stan.skalaMin * 1.4;
+        stan.skala = stan.skalaMin * (sesja.powiekszenie_startowe || 1.4);
+        if (sesja.srodek_startowy) stan.srodek = { x: sesja.srodek_startowy[0], y: sesja.srodek_startowy[1] };
         ogranicz();
-        opisZera(); odswiezPomiary(); odswiezPunkty(); rysuj();
-        $('instruktaz').hidden = pamietane('instruktaz-widziany') === '1';
+        ustawTryb('miarka');
+        odswiezListe();
+        $('instruktaz').hidden = pamietane('miarka-instruktaz') === '1';
         const ostrzezenia = sesja.ostrzezenia || [];
-        status('status-pomiar', ostrzezenia.join(' '), ostrzezenia.length ? 'ostrzezenie' : '');
+        if (ostrzezenia.length) toast(ostrzezenia[0], 'uwaga', 6000);
         gotowe();
       });
     };
-    obraz.onerror = () => blad(new Error('Nie udało się pobrać wyprostowanego zdjęcia.'));
+    obraz.onerror = () => blad(new Error('Nie udało się wczytać wyprostowanego zdjęcia.'));
     obraz.src = sesja.obraz.url;
   });
 }
 
-/* --- zapis i ekran wyniku ------------------------------------------------- */
+/* ================================================================ zapis */
 
-$('zakoncz').onclick = async () => {
+function wynikLokalny() {
+  return {
+    liczba_odcinkow: stan.odcinki.length,
+    liczba_punktow: stan.punkty.length,
+    odcinki: stan.odcinki.map((o) => {
+      const m = roznica(o.a, o.b);
+      return { nazwa: o.nazwa, dlugosc_mm: m.l, dx_mm: m.dx, dy_mm: m.dy, kat_stopnie: katOdcinka(o.a, o.b) };
+    }),
+    punkty: stan.punkty.map((p) => {
+      const m = roznica(stan.zero, p.px);
+      return { nazwa: p.nazwa, x_mm: m.dx, y_mm: m.dy };
+    }),
+  };
+}
+
+async function zapisz() {
   if (!stan.odcinki.length && !stan.punkty.length) return;
-  $('zakoncz').disabled = true;
-  $('postep').hidden = false;
+  zamknij('arkusz-lista');
+  if (DEMO) { pokazWynik(wynikLokalny()); return; }
+
   $('postep-tekst').textContent = 'Rysuję wymiary w pełnej rozdzielczości…';
+  otworz('postep');
   try {
     const wlasneZero = stan.zrodloX !== 'marker' || stan.zrodloY !== 'marker';
     const odpowiedz = await fetch(`/api/session/${stan.sesja.session_id}/export`, {
@@ -597,59 +741,92 @@ $('zakoncz').onclick = async () => {
     if (!odpowiedz.ok) throw new Error(wynik.blad || `Błąd serwera (${odpowiedz.status}).`);
     pokazWynik(wynik);
   } catch (blad) {
-    status('status-pomiar', blad.message, 'blad');
+    toast(blad.message, 'uwaga', 5000);
   } finally {
-    $('postep').hidden = true;
-    $('zakoncz').disabled = false;
+    zamknij('postep');
   }
-};
+}
+$('zakoncz').onclick = zapisz;
+$('zapisz-z-listy').onclick = zapisz;
 
 function pokazWynik(wynik) {
-  $('link-png').href = wynik.png;
-  $('link-json').href = wynik.json;
   const czesci = [];
   if (wynik.liczba_odcinkow) {
-    czesci.push(`${wynik.liczba_odcinkow} ` +
-      odmiana(wynik.liczba_odcinkow, 'wymiar', 'wymiary', 'wymiarów'));
+    czesci.push(`${wynik.liczba_odcinkow} ${odmiana(wynik.liczba_odcinkow, 'wymiar', 'wymiary', 'wymiarów')}`);
   }
   if (wynik.liczba_punktow) {
-    czesci.push(`${wynik.liczba_punktow} ` +
-      odmiana(wynik.liczba_punktow, 'punkt', 'punkty', 'punktów'));
+    czesci.push(`${wynik.liczba_punktow} ${odmiana(wynik.liczba_punktow, 'punkt', 'punkty', 'punktów')}`);
   }
-  $('wynik-podsumowanie').textContent =
-    `${czesci.join(' i ')} · rysunek ${(wynik.rozmiar_png / 1048576).toFixed(1)} MB`;
+  const plik = wynik.rozmiar_png ? ` · rysunek ${(wynik.rozmiar_png / 1048576).toFixed(1).replace('.', ',')} MB` : '';
+  $('wynik-podsumowanie').textContent = czesci.join(' i ') + plik;
 
   const lista = $('wynik-lista');
   lista.textContent = '';
+  const dodaj = (nazwa, wartosc, szczegoly) => {
+    const li = document.createElement('li');
+    li.className = 'wymiar-wiersz';
+    li.innerHTML = '<div class="wymiar-tresc"><span class="wymiar-nazwa"></span>' +
+      '<span class="wymiar-szczegoly"></span></div><span class="wymiar-wartosc"></span>';
+    li.querySelector('.wymiar-nazwa').textContent = nazwa;
+    li.querySelector('.wymiar-szczegoly').textContent = szczegoly;
+    li.querySelector('.wymiar-wartosc').textContent = wartosc;
+    lista.appendChild(li);
+  };
   (wynik.odcinki || []).forEach((o) => {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="nazwa stala">${o.nazwa}</span>` +
-      `<span class="wymiar">${fmt(o.dlugosc_mm)} mm</span>` +
-      `<span class="szczegoly">szer. ${fmt(o.dx_mm, true)}   wys. ${fmt(o.dy_mm, true)}</span>`;
-    lista.appendChild(li);
+    const prosty = Math.abs(o.kat_stopnie) < 1e-6 || Math.abs(Math.abs(o.kat_stopnie) - 90) < 1e-6;
+    dodaj(o.nazwa, `${mm(o.dlugosc_mm)} mm`,
+      prosty ? opisOsi(Math.abs(o.kat_stopnie) < 1e-6 ? 'poziom' : 'pion')
+             : `szer. ${mm(o.dx_mm)} · wys. ${mm(o.dy_mm)}`);
   });
-  (wynik.punkty || []).forEach((p) => {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="nazwa stala">${p.nazwa}</span>` +
-      `<span class="wymiar">${fmt(p.x_mm, true)} × ${fmt(p.y_mm, true)} mm</span>`;
-    lista.appendChild(li);
-  });
+  (wynik.punkty || []).forEach((p) => dodaj(p.nazwa, `${mmZnak(p.x_mm)} × ${mmZnak(p.y_mm)}`, 'współrzędne [mm]'));
+
+  $('wynik-pliki').hidden = Boolean(DEMO);
+  $('wynik-demo').hidden = !DEMO;
+  if (!DEMO) { $('link-png').href = wynik.png; $('link-json').href = wynik.json; }
   pokazEkran('wynik');
 }
 
 $('wroc').onclick = () => pokazEkran('pomiar');
 
-function nowePomiary() {
+function noweZdjecie() {
+  zamknij('arkusz-wyjscie');
   stan.sesja = null; stan.obraz = null;
-  $('plik-aparat').value = ''; $('plik-galeria').value = '';
-  $('nazwa-pliku').textContent = '';
-  status('status-start', '');
+  komunikat('status-start', '');
   pokazEkran('start');
 }
-$('nowe').onclick = nowePomiary;
-$('nowe-2').onclick = nowePomiary;
+$('nowe').onclick = noweZdjecie;
+$('wyjdz').onclick = () => {
+  if (stan.odcinki.length || stan.punkty.length) otworz('arkusz-wyjscie');
+  else noweZdjecie();
+};
+$('wyjdz-potwierdz').onclick = noweZdjecie;
 
-new ResizeObserver(() => { if (stan.obraz) rysuj(); }).observe(plotno);
-window.addEventListener('orientationchange', () => setTimeout(rysuj, 260));
+/* ================================================================ start */
 
-odswiezPomiary();
+new ResizeObserver(() => { if (stan.obraz && !$('ekran-pomiar').hidden) { ogranicz(); rysuj(); } }).observe(plotno);
+
+if (DEMO) {
+  $('akcje-plik').hidden = true;
+  $('ustawienia-otworz').hidden = true;
+  $('akcje-demo').hidden = false;
+  $('pomoc-demo').hidden = false;
+  const lista = $('pomoc-demo-lista');
+  (DEMO.znane || []).forEach(([opis, wartosc]) => {
+    const w = document.createElement('div');
+    w.className = 'wiersz-dystans';
+    w.innerHTML = '<span></span><b></b>';
+    w.querySelector('span').textContent = opis;
+    w.querySelector('b').textContent = `${mm(wartosc)} mm`;
+    lista.appendChild(w);
+  });
+  $('demo-start').onclick = () => {
+    $('postep-tekst').textContent = 'Prostuję perspektywę ściany…';
+    otworz('postep');
+    setTimeout(() => {
+      uruchomPomiar({ ...DEMO.sesja, obraz: { ...DEMO.sesja.obraz, url: DEMO.obraz } })
+        .finally(() => zamknij('postep'));
+    }, 450);
+  };
+}
+
+odswiezPrzyciski();
