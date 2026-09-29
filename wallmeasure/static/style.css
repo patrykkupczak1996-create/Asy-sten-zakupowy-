@@ -181,6 +181,24 @@ h1 { font-size: 28px; font-weight: 750; letter-spacing: -.022em; line-height: 1.
 .tryb-chip b { font-weight: 650; color: var(--tasma); }
 .tryb-chip svg { width: 16px; height: 16px; }
 
+/* Szybkie przelaczniki wspomagania - odpowiedniki F3 i F8 z AutoCAD-a. */
+.wspomaganie { position: absolute; z-index: 5; left: 14px; top: calc(70px + var(--gora));
+  display: flex; flex-direction: column; gap: 10px; }
+.przelacz {
+  width: 52px; height: 52px; border-radius: 14px; border: 0; cursor: pointer; padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  background: rgba(255, 255, 255, .94); color: var(--tekst-3); box-shadow: var(--cien);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4); backdrop-filter: blur(12px) saturate(1.4);
+  transition: background-color .15s, color .15s, transform .1s;
+}
+.przelacz svg { width: 20px; height: 20px; }
+.przelacz span { font-size: 9.5px; font-weight: 750; letter-spacing: .06em; }
+.przelacz:active { transform: scale(.94); }
+.przelacz[aria-pressed="true"] { background: var(--glowny); color: #fff; }
+.przelacz[aria-pressed="true"] svg { color: #38BDF8; }
+#ortho-szybki[aria-pressed="true"] svg { color: #4ADE80; }
+.przelacz:focus-visible { outline: 3px solid var(--akcent); outline-offset: 2px; }
+
 .lupa { position: absolute; z-index: 5; right: 14px; top: 50%; transform: translateY(-50%);
   display: flex; flex-direction: column; gap: 10px; }
 
@@ -197,6 +215,7 @@ h1 { font-size: 28px; font-weight: 750; letter-spacing: -.022em; line-height: 1.
   transition: background-color .15s;
 }
 .podpowiedz.zlapane, .podpowiedz.ok { background: var(--ok); }
+.podpowiedz.osnap { background: #0369A1; }
 .podpowiedz.uwaga { background: #B45309; }
 
 .dol-przyciski { width: 100%; max-width: 440px;

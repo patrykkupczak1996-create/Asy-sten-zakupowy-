@@ -28,6 +28,7 @@ from .detect import MarkerNotFoundError, detect_marker, format_detection_report,
 from .export import export_results
 from .rectify import Rectification, rectify_wall, reprojection_error_mm
 from .session import MeasurementSession
+from .snap import obrys_kadru, punkty_charakterystyczne
 
 # Telefon nie potrzebuje pelnej rozdzielczosci obrazu wyprostowanego - wystarczy
 # tyle, by zoom byl ostry. Pomiar i tak przelicza sie na pelna skale przy zapisie.
@@ -53,6 +54,7 @@ class ServerSession:
     report: str
     warnings: list[str]
     export_dir: Path
+    snap_points: list[list[float]] = field(default_factory=list)  # w pikselach wyswietlanych
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -87,6 +89,7 @@ class ServerSession:
                     self.display_point(corner) for corner in self.rect.marker_corners_px
                 ],
             },
+            "przyciaganie_px": self.snap_points,
             "sciana_mm": [round(self.rect.width_mm, 1), round(self.rect.height_mm, 1)],
             "raport": self.report,
             "ostrzezenia": self.warnings,
@@ -134,7 +137,7 @@ def _decode_upload(data: bytes) -> np.ndarray:
     return image
 
 
-def _build_display(rect: Rectification) -> tuple[bytes, float]:
+def _build_display(rect: Rectification) -> tuple[bytes, float, np.ndarray]:
     width, height = rect.size
     scale = min(1.0, MAX_DISPLAY_PX / max(width, height))
     image = rect.image
@@ -146,7 +149,20 @@ def _build_display(rect: Rectification) -> tuple[bytes, float]:
     ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
     if not ok:
         raise RuntimeError("Nie udalo sie zakodowac obrazu wyprostowanego.")
-    return encoded.tobytes(), scale
+    return encoded.tobytes(), scale, image
+
+
+def _snap_points(rect: Rectification, display: np.ndarray, scale: float) -> list[list[float]]:
+    """Narozniki ze zdjecia do przyciagania celownika; to udogodnienie, wiec
+    jego blad nie moze zablokowac pomiaru."""
+    try:
+        return punkty_charakterystyczne(
+            display,
+            obrys_kadru(rect.homography, rect.source_size, scale),
+            rect.marker_corners_px * scale,
+        )
+    except cv2.error:
+        return []
 
 
 def _float_arg(form, name: str, default: float) -> float:
@@ -194,7 +210,7 @@ def create_app(store: SessionStore | None = None) -> Flask:
             rect = rectify_wall(
                 image, detection, marker_size_mm=marker_size_mm, mm_per_px=mm_per_px
             )
-            jpeg, view_scale = _build_display(rect)
+            jpeg, view_scale, display = _build_display(rect)
         except (ValueError, RuntimeError) as error:
             return jsonify(blad=str(error)), 400
 
@@ -212,6 +228,7 @@ def create_app(store: SessionStore | None = None) -> Flask:
             report=report,
             warnings=quality_warnings(detection, marker_size_mm),
             export_dir=Path(mkdtemp(prefix="wallmeasure-")),
+            snap_points=_snap_points(rect, display, view_scale),
         )
         app.config["SESSION_STORE"].add(session)
         return jsonify(session.describe())

@@ -12,6 +12,10 @@
  * Odczyty licza sie lokalnie z trzech liczb otrzymanych z serwera (skala,
  * osnowa, rozmiar obrazu), wiec przesuwanie i zoom nie obciazaja sieci.
  *
+ * Celownik moze przyciagac do punktow charakterystycznych (jak OSNAP w CAD):
+ * koncow i srodkow narysowanych wymiarow, ich przeciec, spodka prostopadlej
+ * oraz naroznikow wykrytych na zdjeciu przez serwer.
+ *
  * window.MIARKA_DEMO uruchamia podglad bez serwera: gotowe, wyprostowane
  * zdjecie i wynik liczony w przegladarce.
  */
@@ -23,6 +27,7 @@ const DEMO = window.MIARKA_DEMO || null;
 const ETYKIETY = ['Gniazdko', 'Włącznik', 'Woda', 'Odpływ', 'Wentylacja',
                   'Narożnik', 'Krawędź', 'Wysokość', 'Szerokość', 'Wnęka'];
 const TOLERANCJA_ORTHO = 4;   // stopnie
+const ZASIEG_OSNAP = 26;      // px ekranu - jak daleko od celownika siega przyciaganie
 const ZOOM_MAX = 16;
 const CZCIONKA = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
 const KOLOR = {
@@ -31,6 +36,12 @@ const KOLOR = {
   tasma: '#FFC53D',
   ok: '#16A34A',
   tekst: '#0F172A',
+  osnap: '#0EA5E9',
+};
+/* Nazwy jak w podpowiedziach AutoCAD-a; kolejnosc nie ma znaczenia. */
+const OSNAP = {
+  koniec: 'Koniec', srodek: 'Środek', przeciecie: 'Przecięcie', prostopadle: 'Prostopadle',
+  punkt: 'Punkt', marker: 'Róg markera', naroznik: 'Narożnik',
 };
 const IKONA = {
   usun: '<svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
@@ -47,6 +58,7 @@ const stan = {
   punkty: [], nastepnyPunkt: 1,
   nazywany: null,
   wyrozniony: null,
+  zlapany: null,                  // punkt, do ktorego przyciagnal celownik
 };
 
 /* ================================================================ formaty */
@@ -128,10 +140,17 @@ function katOdcinka(a, b) {
   return k > 90 ? k - 180 : k <= -90 ? k + 180 : k;
 }
 
+/* Punkt, ktory zostanie zapisany po stuknieciu +: przyciagniety albo srodek celownika. */
+const cel = () => (stan.zlapany ? stan.zlapany.px : stan.srodek);
+
 /* Prostowanie do poziomu i pionu, jak ORTHO w programach CAD. Trafienie
  * palcem w rowne zero stopni jest nieosiagalne, a przy montazu to
- * najczestszy przypadek. */
-function koniecOdcinka(od, kursor) {
+ * najczestszy przypadek. Dziala tez razem z przyciaganiem: gdy celownik
+ * zlapal np. naroznik prawie na wysokosci poczatku, wymiar idzie dokladnie
+ * poziomo az do pionu przez ten naroznik - czyli "ile w poziomie do rogu",
+ * jak sledzenie obiektow w AutoCAD-zie. */
+function koniecOdcinka(od) {
+  const kursor = cel();
   const dx = kursor.x - od.x, dy = kursor.y - od.y;
   if (!$('ortho').checked || (dx === 0 && dy === 0)) return { px: { ...kursor }, os: null };
   const k = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
@@ -141,6 +160,81 @@ function koniecOdcinka(od, kursor) {
 }
 
 const opisOsi = (os) => (os === 'poziom' ? 'poziomo' : 'pionowo');
+
+/* ================================================================ przyciaganie */
+
+function przeciecie(a, b, c, d) {
+  const r = { x: b.x - a.x, y: b.y - a.y }, q = { x: d.x - c.x, y: d.y - c.y };
+  const mianownik = r.x * q.y - r.y * q.x;
+  if (Math.abs(mianownik) < 1e-9) return null;
+  const t = ((c.x - a.x) * q.y - (c.y - a.y) * q.x) / mianownik;
+  const u = ((c.x - a.x) * r.y - (c.y - a.y) * r.x) / mianownik;
+  // konce odcinkow sa juz kandydatami typu "koniec"
+  if (t <= 1e-6 || t >= 1 - 1e-6 || u <= 1e-6 || u >= 1 - 1e-6) return null;
+  return { x: a.x + t * r.x, y: a.y + t * r.y };
+}
+
+/* Spodek prostopadlej z punktu p na odcinek ab - "najkrotsza droga do krawedzi". */
+function spodek(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, dl2 = dx * dx + dy * dy;
+  if (dl2 < 1e-9) return null;
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / dl2;
+  if (t <= 0 || t >= 1) return null;
+  const s = { x: a.x + t * dx, y: a.y + t * dy };
+  return Math.hypot(s.x - p.x, s.y - p.y) < 1e-6 ? null : s;
+}
+
+function kandydaciOsnap() {
+  const k = [];
+  const dodaj = (typ, x, y) => k.push({ typ, px: { x, y } });
+  const o = stan.odcinki;
+  o.forEach(({ a, b }) => {
+    dodaj('koniec', a.x, a.y); dodaj('koniec', b.x, b.y);
+    dodaj('srodek', (a.x + b.x) / 2, (a.y + b.y) / 2);
+  });
+  for (let i = 0; i < o.length; i++) {
+    for (let j = i + 1; j < o.length; j++) {
+      const p = przeciecie(o[i].a, o[i].b, o[j].a, o[j].b);
+      if (p) dodaj('przeciecie', p.x, p.y);
+    }
+  }
+  if (stan.poczatek) {
+    o.forEach(({ a, b }) => {
+      const p = spodek(stan.poczatek, a, b);
+      if (p) dodaj('prostopadle', p.x, p.y);
+    });
+  }
+  stan.punkty.forEach(({ px }) => dodaj('punkt', px.x, px.y));
+  stan.sesja.marker.narozniki_px.forEach(([x, y]) => dodaj('marker', x, y));
+  (stan.sesja.przyciaganie_px || []).forEach(([x, y]) => dodaj('naroznik', x, y));
+  return k;
+}
+
+/* Najblizszy kandydat w zasiegu celownika. Zasieg liczy sie w pikselach
+ * ekranu, wiec po przyblizeniu przyciaganie robi sie "wezsze" i nie
+ * przeszkadza w celowaniu tuz obok punktu. */
+function znajdzOsnap() {
+  if (!$('osnap').checked || !stan.sesja) return null;
+  const zasieg = ZASIEG_OSNAP / stan.skala;
+  let najlepszy = null, ocena = Infinity;
+  for (const c of kandydaciOsnap()) {
+    if (stan.poczatek && c.px.x === stan.poczatek.x && c.px.y === stan.poczatek.y) continue;
+    const d = Math.hypot(c.px.x - stan.srodek.x, c.px.y - stan.srodek.y);
+    if (d > zasieg) continue;
+    // wlasne wymiary uzytkownika wygrywaja z rogami wykrytymi na zdjeciu
+    const w = c.typ === 'naroznik' ? d * 1.5 : d;
+    if (w < ocena) { ocena = w; najlepszy = c; }
+  }
+  return najlepszy;
+}
+
+function aktualizujOsnap() {
+  const poprzedni = stan.zlapany;
+  stan.zlapany = znajdzOsnap();
+  const z = stan.zlapany;
+  const zmiana = z && (!poprzedni || poprzedni.px.x !== z.px.x || poprzedni.px.y !== z.px.y);
+  if (zmiana && dotyki.size && navigator.vibrate) navigator.vibrate(6);  // "klik" magnesu pod palcem
+}
 
 /* ================================================================ rysowanie */
 
@@ -219,13 +313,76 @@ function opisOdcinka(a, b, tekst, r, tlo, kolor) {
   pastylka(tekst, (a.x + b.x) / 2 + nx * 22, (a.y + b.y) / 2 + ny * 22, r, tlo, kolor);
 }
 
+/* Celownik w stylu CAD: cienkie nitki przez caly kadr (latwo zlapac rownoleglosc
+ * z krawedzia sciany), mocniejsze ramiona przy srodku i kwadratowe okienko
+ * wskazujace, ktory dokladnie punkt zostanie zmierzony. Srodek zostaje pusty,
+ * zeby nie zaslaniac celu. */
 function celownik(r, kolor) {
+  // bez zaokraglania: srodek musi sie pokrywac co do ulamka piksela z naEkran()
   const x = r.width / 2, y = r.height / 2;
-  const okrag = (promien) => { ctx.beginPath(); ctx.arc(x, y, promien, 0, Math.PI * 2); ctx.stroke(); };
-  ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = 5; okrag(17);
-  ctx.strokeStyle = kolor; ctx.lineWidth = 2.5; okrag(17);
-  ctx.beginPath(); ctx.arc(x, y, 4.2, 0, Math.PI * 2); ctx.fillStyle = KOLOR.obwodka; ctx.fill();
-  ctx.beginPath(); ctx.arc(x, y, 2.6, 0, Math.PI * 2); ctx.fillStyle = kolor; ctx.fill();
+  const okienko = 6, przerwa = 10, ramie = 40;
+  const kreski = (odcinki) => {
+    ctx.beginPath();
+    odcinki.forEach(([x1, y1, x2, y2]) => { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); });
+    ctx.stroke();
+  };
+  const nitki = [[0, y, x - ramie, y], [x + ramie, y, r.width, y], [x, 0, x, y - ramie], [x, y + ramie, x, r.height]];
+  const ramiona = [[x - ramie, y, x - przerwa, y], [x + przerwa, y, x + ramie, y],
+                   [x, y - ramie, x, y - przerwa], [x, y + przerwa, x, y + ramie]];
+  ctx.save();
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = 'rgba(15, 23, 42, .22)'; ctx.lineWidth = 3; kreski(nitki);
+  ctx.globalAlpha = .75; ctx.strokeStyle = kolor; ctx.lineWidth = 1; kreski(nitki);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = 5; kreski(ramiona);
+  ctx.strokeRect(x - okienko, y - okienko, okienko * 2, okienko * 2);
+  ctx.strokeStyle = kolor; ctx.lineWidth = 2; kreski(ramiona);
+  ctx.lineWidth = 1.75; ctx.strokeRect(x - okienko, y - okienko, okienko * 2, okienko * 2);
+  ctx.restore();
+}
+
+/* Znacznik przyciagniecia - ksztalty jak w AutoCAD-zie, zeby bylo od razu
+ * wiadomo, do czego celownik sie przykleil. */
+function znacznikOsnap(z, r) {
+  const p = naEkran(z.px, r), s = 10;
+  const obrys = () => {
+    ctx.beginPath();
+    switch (z.typ) {
+      case 'srodek':
+        ctx.moveTo(p.x, p.y - s * 1.1); ctx.lineTo(p.x + s * 1.05, p.y + s * .75); ctx.lineTo(p.x - s * 1.05, p.y + s * .75); ctx.closePath();
+        break;
+      case 'przeciecie':
+        ctx.moveTo(p.x - s, p.y - s); ctx.lineTo(p.x + s, p.y + s); ctx.moveTo(p.x + s, p.y - s); ctx.lineTo(p.x - s, p.y + s);
+        break;
+      case 'prostopadle':
+        ctx.moveTo(p.x - s, p.y - s); ctx.lineTo(p.x - s, p.y + s); ctx.lineTo(p.x + s, p.y + s);
+        ctx.moveTo(p.x - s, p.y); ctx.lineTo(p.x, p.y); ctx.lineTo(p.x, p.y + s);
+        break;
+      case 'punkt': case 'naroznik':
+        ctx.arc(p.x, p.y, s, 0, Math.PI * 2);
+        ctx.moveTo(p.x - s * .7, p.y - s * .7); ctx.lineTo(p.x + s * .7, p.y + s * .7);
+        ctx.moveTo(p.x + s * .7, p.y - s * .7); ctx.lineTo(p.x - s * .7, p.y + s * .7);
+        break;
+      default:  // koniec, rog markera
+        ctx.rect(p.x - s, p.y - s, s * 2, s * 2);
+    }
+    ctx.stroke();
+  };
+  const c = { x: r.width / 2, y: r.height / 2 };
+  ctx.save();
+  if (Math.hypot(p.x - c.x, p.y - c.y) > 3) {
+    // nitka od celownika do przyciagnietego punktu - widac, skad wezmie sie wymiar
+    ctx.setLineDash([3, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = KOLOR.osnap;
+    ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.strokeStyle = KOLOR.obwodka; ctx.lineWidth = 4.5; obrys();
+  ctx.strokeStyle = KOLOR.osnap; ctx.lineWidth = 2.25; obrys();
+  ctx.restore();
+  ctx.font = `700 14px ${CZCIONKA}`;
+  const opis = OSNAP[z.typ];
+  pastylka(opis, p.x + 16 + (ctx.measureText(opis).width + 22) / 2, p.y + 30, r, 'rgba(15, 23, 42, .9)', '#fff');
 }
 
 function rysuj() {
@@ -233,6 +390,7 @@ function rysuj() {
   ctx.setTransform(stan.dpr, 0, 0, stan.dpr, 0, 0);
   ctx.clearRect(0, 0, r.width, r.height);
   if (!stan.obraz) return;
+  aktualizujOsnap();
 
   // tlo poza zdjeciem - jasne i neutralne, wyraznie "nie zdjecie"
   ctx.fillStyle = '#D9DDE3';
@@ -290,7 +448,7 @@ function rysuj() {
   // odcinek w trakcie mierzenia
   let kolorCelownika = '#fff';
   if (stan.poczatek) {
-    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const k = koniecOdcinka(stan.poczatek);
     const kolor = k.os ? KOLOR.ok : KOLOR.tasma;
     const a = naEkran(stan.poczatek, r), b = naEkran(k.px, r);
     if (k.os) {
@@ -304,12 +462,23 @@ function rysuj() {
       ctx.stroke();
       ctx.restore();
     }
+    if (stan.zlapany && k.os) {
+      // rzut z przyciagnietego punktu na os wymiaru
+      const z = naEkran(stan.zlapany.px, r);
+      if (Math.hypot(z.x - b.x, z.y - b.y) > 1) {
+        ctx.save();
+        ctx.setLineDash([3, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = KOLOR.osnap;
+        ctx.beginPath(); ctx.moveTo(z.x, z.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        ctx.restore();
+      }
+    }
     linia(a, b, kolor, 4);
     kropka(a, kolor, 6);
     kolorCelownika = kolor;
   }
 
   celownik(r, kolorCelownika);
+  if (stan.zlapany) znacznikOsnap(stan.zlapany, r);
   odswiezOdczyt();
 }
 
@@ -318,23 +487,25 @@ function rysuj() {
 function odswiezOdczyt() {
   const odczyt = $('odczyt'), fab = $('mierz'), podpowiedz = $('podpowiedz');
   const toastTrwa = Date.now() < toastDo;
+  const z = stan.zlapany;
   fab.classList.remove('w-toku', 'zlapane');
   odczyt.classList.remove('zlapane');
-  if (!toastTrwa) podpowiedz.className = 'podpowiedz';
+  if (!toastTrwa) podpowiedz.className = z ? 'podpowiedz osnap' : 'podpowiedz';
+  const przyciagniety = z ? `${OSNAP[z.typ]} — ` : '';
 
   if (stan.tryb === 'wspolrzedne') {
-    const m = roznica(stan.zero, stan.srodek);
+    const m = roznica(stan.zero, cel());
     odczyt.hidden = false;
     $('odczyt-wartosc').textContent = `${mmZnak(m.dx)} × ${mmZnak(m.dy)}`;
     $('odczyt-opis').textContent = 'szerokość × wysokość [mm]';
     fab.setAttribute('aria-label', 'Zapisz punkt');
-    if (!toastTrwa) podpowiedz.textContent = 'Wyceluj i stuknij +, aby zapisać punkt';
+    if (!toastTrwa) podpowiedz.textContent = z ? `${przyciagniety}stuknij +, aby zapisać punkt` : 'Wyceluj i stuknij +, aby zapisać punkt';
     return;
   }
 
   fab.setAttribute('aria-label', stan.poczatek ? 'Zakończ wymiar' : 'Zacznij wymiar');
   if (stan.poczatek) {
-    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const k = koniecOdcinka(stan.poczatek);
     const m = roznica(stan.poczatek, k.px);
     odczyt.hidden = false;
     odczyt.classList.toggle('zlapane', Boolean(k.os));
@@ -342,18 +513,18 @@ function odswiezOdczyt() {
     $('odczyt-wartosc').textContent = `${mm(m.l)} mm`;
     $('odczyt-opis').textContent = k.os ? opisOsi(k.os) : `pod kątem ${stopnie(katOdcinka(stan.poczatek, k.px))}`;
     if (!toastTrwa) {
-      podpowiedz.textContent = k.os
-        ? `Wyrównano ${k.os === 'poziom' ? 'do poziomu' : 'do pionu'} — stuknij +`
+      podpowiedz.textContent = z ? `${przyciagniety}stuknij +, aby zakończyć`
+        : k.os ? `Wyrównano ${k.os === 'poziom' ? 'do poziomu' : 'do pionu'} — stuknij +`
         : 'Wyceluj w drugi punkt i stuknij +';
-      podpowiedz.classList.toggle('zlapane', Boolean(k.os));
+      podpowiedz.classList.toggle('zlapane', Boolean(k.os) && !z);
     }
     return;
   }
 
   odczyt.hidden = true;
   if (!toastTrwa) {
-    podpowiedz.textContent = stan.odcinki.length
-      ? 'Wyceluj w kolejny punkt, aby dodać wymiar'
+    podpowiedz.textContent = z ? `${przyciagniety}stuknij +, aby zacząć wymiar`
+      : stan.odcinki.length ? 'Wyceluj w kolejny punkt, aby dodać wymiar'
       : 'Wyceluj w pierwszy punkt i stuknij +';
   }
 }
@@ -430,6 +601,8 @@ document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('mierz').click(); }
   else if ((e.key === 'z' && (e.ctrlKey || e.metaKey)) || e.key === 'Backspace') { e.preventDefault(); cofnij(); }
+  else if (e.key === 'F3') { e.preventDefault(); $('osnap-szybki').click(); }
+  else if (e.key === 'F8') { e.preventDefault(); $('ortho-szybki').click(); }
   else if (e.key === '+' || e.key === '=') zoom(1.3);
   else if (e.key === '-') zoom(1 / 1.3);
 });
@@ -441,13 +614,14 @@ $('instruktaz-ok').onclick = () => { zamknij('instruktaz'); pamietaj('miarka-ins
 $('mierz').onclick = () => {
   stan.wyrozniony = null;
   if (stan.tryb === 'wspolrzedne') {
-    stan.punkty.push({ nazwa: `Punkt ${stan.nastepnyPunkt++}`, px: { ...stan.srodek } });
-    const m = roznica(stan.zero, stan.srodek);
+    const p = { ...cel() };
+    stan.punkty.push({ nazwa: `Punkt ${stan.nastepnyPunkt++}`, px: p });
+    const m = roznica(stan.zero, p);
     toast(`Zapisano punkt ${mmZnak(m.dx)} × ${mmZnak(m.dy)} mm`);
   } else if (!stan.poczatek) {
-    stan.poczatek = { ...stan.srodek };
+    stan.poczatek = { ...cel() };
   } else {
-    const k = koniecOdcinka(stan.poczatek, stan.srodek);
+    const k = koniecOdcinka(stan.poczatek);
     const odcinek = { nazwa: `Wymiar ${stan.nastepnyOdcinek++}`, a: stan.poczatek, b: k.px, os: k.os };
     stan.odcinki.push(odcinek);
     stan.poczatek = null;
@@ -557,7 +731,26 @@ function pokazNaZdjeciu(typ, i) {
 }
 
 $('lista-otworz').onclick = () => { odswiezListe(); otworz('arkusz-lista'); };
-$('ortho').onchange = rysuj;
+
+/* ORTHO i OSNAP - przelacznik w arkuszu i szybki przycisk na ekranie pomiaru
+ * to ten sam stan; wybor zostaje zapamietany na nastepne zdjecia. */
+const PRZELACZNIKI = {
+  ortho: { przycisk: 'ortho-szybki', wl: 'Prostowanie do poziomu i pionu włączone', wyl: 'Prostowanie wyłączone' },
+  osnap: { przycisk: 'osnap-szybki', wl: 'Przyciąganie do punktów włączone', wyl: 'Przyciąganie wyłączone — celujesz swobodnie' },
+};
+function ustawPrzelacznik(id, wlaczony, zKomunikatem = false) {
+  $(id).checked = wlaczony;
+  $(PRZELACZNIKI[id].przycisk).setAttribute('aria-pressed', String(wlaczony));
+  pamietaj(`miarka-${id}`, wlaczony ? '1' : '0');
+  if (zKomunikatem) toast(wlaczony ? PRZELACZNIKI[id].wl : PRZELACZNIKI[id].wyl, wlaczony ? 'ok' : '', 1400);
+  if (stan.obraz) rysuj();
+}
+Object.entries(PRZELACZNIKI).forEach(([id, { przycisk }]) => {
+  const zapamietany = pamietane(`miarka-${id}`);
+  ustawPrzelacznik(id, zapamietany === null ? $(id).checked : zapamietany === '1');
+  $(id).onchange = () => ustawPrzelacznik(id, $(id).checked);
+  $(przycisk).onclick = () => ustawPrzelacznik(id, !$(id).checked, true);
+});
 
 /* ================================================================ nazwy */
 
@@ -618,11 +811,12 @@ $('tryb-wsp').onchange = (e) => {
 $('tryb-chip').onclick = () => otworz('arkusz-zero');
 
 function ustawZero(osie) {
-  if (osie.includes('x')) { stan.zero.x = stan.srodek.x; stan.zrodloX = 'wskazany'; }
-  if (osie.includes('y')) { stan.zero.y = stan.srodek.y; stan.zrodloY = 'wskazany'; }
+  const p = cel();
+  if (osie.includes('x')) { stan.zero.x = p.x; stan.zrodloX = 'wskazany'; }
+  if (osie.includes('y')) { stan.zero.y = p.y; stan.zrodloY = 'wskazany'; }
   zamknij('arkusz-zero');
   opisZera(); odswiezListe(); rysuj();
-  toast('Ustawiono zero w miejscu celownika');
+  toast(stan.zlapany ? `Ustawiono zero: ${OSNAP[stan.zlapany.typ].toLowerCase()}` : 'Ustawiono zero w miejscu celownika');
 }
 $('zero-xy').onclick = () => ustawZero('xy');
 $('zero-x').onclick = () => ustawZero('x');
@@ -680,7 +874,7 @@ function uruchomPomiar(sesja) {
         zrodloX: 'marker', zrodloY: 'marker',
         srodek: { x: sesja.obraz.szerokosc / 2, y: sesja.obraz.wysokosc / 2 },
         odcinki: [], nastepnyOdcinek: 1, poczatek: null,
-        punkty: [], nastepnyPunkt: 1, wyrozniony: null,
+        punkty: [], nastepnyPunkt: 1, wyrozniony: null, zlapany: null,
       });
       pokazEkran('pomiar');
       requestAnimationFrame(() => {

@@ -109,6 +109,17 @@
     <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
   </button>
 
+  <div class="wspomaganie" role="group" aria-label="Wspomaganie celowania">
+    <button id="osnap-szybki" class="przelacz" type="button" aria-pressed="true" title="Przyciąganie do punktów (F3)">
+      <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>
+      <span>OSNAP</span>
+    </button>
+    <button id="ortho-szybki" class="przelacz" type="button" aria-pressed="true" title="Prostowanie do poziomu i pionu (F8)">
+      <svg viewBox="0 0 24 24"><path d="M5 3v16h16"/><path d="M5 13h6v6"/></svg>
+      <span>ORTHO</span>
+    </button>
+  </div>
+
   <div class="lupa">
     <button id="zoom-plus" class="okragly maly" type="button" aria-label="Przybliż">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -141,7 +152,7 @@
       <h2>Jak mierzyć</h2>
       <ol class="instruktaz-kroki">
         <li><span>1</span><p>Przesuń zdjęcie palcem, aż <b>celownik</b> na środku trafi w punkt.</p></li>
-        <li><span>2</span><p>Stuknij <b>+</b> na początku i na końcu wymiaru.</p></li>
+        <li><span>2</span><p>Stuknij <b>+</b> na początku i na końcu wymiaru. Blisko narożnika celownik sam się do niego przyklei.</p></li>
         <li><span>3</span><p>Rozsuń dwa palce, żeby przybliżyć — trafisz dokładniej.</p></li>
       </ol>
       <button id="instruktaz-ok" class="btn btn-primary btn-lg" type="button">Zaczynamy</button>
@@ -190,6 +201,10 @@
     <p id="pusto" class="pusto">Nie ma jeszcze wymiarów. Wyceluj w punkt i stuknij <b>+</b>.</p>
 
     <div class="grupa">
+      <label class="wiersz-przelacznik">
+        <span><b>Przyciągaj do punktów</b><small>Końce, środki i przecięcia wymiarów oraz narożniki na zdjęciu — jak OSNAP w CAD</small></span>
+        <input type="checkbox" id="osnap" class="przelacznik" checked>
+      </label>
       <label class="wiersz-przelacznik">
         <span><b>Prostuj do poziomu i pionu</b><small>Przyciąga linię, gdy brakuje mniej niż 4° — jak ORTHO w CAD</small></span>
         <input type="checkbox" id="ortho" class="przelacznik" checked>
@@ -250,6 +265,7 @@
     <dl class="pomoc">
       <div><dt>Celowanie</dt><dd>Celownik stoi na środku, a Ty przesuwasz pod nim zdjęcie. Palec nigdy nie zasłania mierzonego miejsca.</dd></div>
       <div><dt>Wymiar</dt><dd>Stuknij <b>+</b> w pierwszym punkcie i ponownie w drugim. Przycisk <b>Cofnij</b> u góry usuwa ostatni krok.</dd></div>
+      <div><dt>Przyciąganie</dt><dd>Gdy celownik jest blisko narożnika, końca lub środka wymiaru, przykleja się do niego — pojawia się niebieski znacznik z nazwą. Przycisk <b>OSNAP</b> z lewej włącza i wyłącza przyciąganie.</dd></div>
       <div><dt>Poziom i pion</dt><dd>Gdy linia jest prawie pozioma lub pionowa, program ją wyrównuje — celownik i przycisk robią się zielone.</dd></div>
       <div><dt>Zdjęcie</dt><dd>Z około 2 metrów, kąt do 30°. Nie przybliżaj aparatem — lepiej podejdź bliżej.</dd></div>
       <div><dt>Dokładność</dt><dd>Około 1–2 mm. Mierzone punkty muszą leżeć na tej samej ścianie co marker.</dd></div>

@@ -145,22 +145,45 @@ jasny, zdjęcie na cały ekran, jeden duży przycisk działania:
    („Szukam markera…", „Prostuję perspektywę…"). Błąd tłumaczy, co poprawić.
 2. **Celownik stoi na środku ekranu**, a pod nim przesuwasz zdjęcie palcem — palec nie zasłania mierzonego
    miejsca. Rozsunięcie dwóch palców przybliża. Celownik sięga każdego punktu zdjęcia, także narożników.
+   Wygląda jak kursor w CAD-zie: cienkie nitki przez cały kadr (łatwo porównać je z krawędzią ściany),
+   mocniejsze ramiona i kwadratowe okienko, którego środek wskazuje mierzony punkt.
 3. **Duży okrągły przycisk +** na dole: pierwsze stuknięcie zaczyna wymiar, drugie go kończy.
    Przycisk zmienia kolor — biały (gotowy), żółty jak taśma miernicza (pomiar w toku),
    zielony (linia wyrównana do poziomu albo pionu). Wymiar na żywo pokazuje pastylka u góry.
 4. **Prostowanie do poziomu i pionu** (odpowiednik ORTHO z CAD-a, domyślnie włączone) przyciąga linię,
    gdy do równego kąta brakuje mniej niż 4°. Przez kadr biegnie wtedy zielona linia śledząca.
-5. **Cofnij** u góry usuwa ostatni krok. **Wymiary** na dole otwierają listę: dotknięcie nazwy pozwala
+5. **Przyciąganie do punktów** (odpowiednik OSNAP z CAD-a, domyślnie włączone): gdy celownik znajdzie się
+   blisko charakterystycznego punktu, przykleja się do niego — pojawia się niebieski znacznik w kształcie
+   jak w AutoCAD-zie, podpis z nazwą, a telefon lekko wibruje. Wymiar zaczyna się lub kończy dokładnie
+   w złapanym punkcie. Przyciągają:
+
+   | Znacznik | Punkt |
+   |---|---|
+   | kwadrat | **Koniec** narysowanego wymiaru, **róg markera** |
+   | trójkąt | **Środek** wymiaru |
+   | krzyżyk | **Przecięcie** dwóch wymiarów |
+   | znak kąta prostego | **Prostopadle** — spodek prostopadłej z początku wymiaru na inny wymiar |
+   | kółko z krzyżykiem | **Narożnik** wykryty na zdjęciu (róg puszki, płytki, ramy) albo zapisany punkt |
+
+   Narożniki na zdjęciu wykrywa serwer raz, przy prostowaniu (`wallmeasure/snap.py`): odrzuca fakturę
+   tynku, łuki, krawędzie i zęby rozciągniętej perspektywy — zostają tylko prawdziwe rogi. Zasięg
+   przyciągania to ok. 26 px ekranu, więc po przybliżeniu robi się węższy i nie przeszkadza w celowaniu
+   tuż obok punktu. Przyciąganie działa razem z ORTHO: jeśli złapany narożnik leży prawie na wysokości
+   początku, wymiar idzie dokładnie poziomo do pionu przez ten narożnik („ile w poziomie do rogu”).
+
+   **OSNAP** i **ORTHO** włączasz i wyłączasz przyciskami po lewej stronie ekranu (na komputerze także
+   klawiszami **F3** i **F8**, jak w AutoCAD-zie). Wybór zostaje zapamiętany.
+6. **Cofnij** u góry usuwa ostatni krok. **Wymiary** na dole otwierają listę: dotknięcie nazwy pozwala
    ją zmienić (gotowe etykiety: gniazdko, woda, odpływ, wentylacja, narożnik…), dotknięcie wiersza
    pokazuje wymiar na zdjęciu.
-6. **Gotowe** zapisuje wynik: serwer renderuje PNG w pełnej rozdzielczości i tabelę `wymiary.json`,
+7. **Gotowe** zapisuje wynik: serwer renderuje PNG w pełnej rozdzielczości i tabelę `wymiary.json`,
    oba do pobrania na ekranie wyniku.
 
 Wymiary na ekranie są w pełnych milimetrach — przy dokładności metody 1–2 mm dziesiąte części
 sugerowałyby precyzję, której nie ma. Pełna precyzja trafia do pliku JSON.
 
 **Tryb współrzędnych** (przełącznik na liście wymiarów) służy do trasowania, gdy każdy otwór ma być
-odmierzony od jednej krawędzi. Zero ustawia się w miejscu celownika — jako narożnik, sama krawędź ściany
+odmierzony od jednej krawędzi. Zero ustawia się w miejscu celownika (albo w złapanym punkcie) — jako narożnik, sama krawędź ściany
 albo sama posadzka, bo te odniesienia rzadko spotykają się w jednym widocznym punkcie.
 
 Argumenty: `--host`, `--port` (domyślnie 8000), `--max-sessions` (ile zdjęć trzymać w pamięci naraz), `--debug`.
@@ -398,10 +421,12 @@ wallmeasure/
     cli.py                  # argumenty wiersza poleceń, spięcie potoku
     server.py               # API HTTP dla wersji mobilnej
     netinfo.py              # diagnostyka sieci, kod QR z adresem
+    snap.py                 # narożniki na zdjęciu do przyciągania celownika (OSNAP)
     static/                 # interfejs dotykowy (HTML, CSS, JS)
 tools/generate_marker.py    # generator markera do wydruku
 tools/make_test_photo.py    # syntetyczne zdjęcie testowe z kluczem odpowiedzi
 tests/test_accuracy.py      # test dokładności na syntetycznym zdjęciu
+tests/test_snap.py          # test wykrywania narożników do przyciągania
 ```
 
 ## Ograniczenia PoC
