@@ -1,0 +1,3 @@
+# Dane produktow i wyniki - nie trzymamy ich w repozytorium
+*.csv
+wzbogacanie.log
