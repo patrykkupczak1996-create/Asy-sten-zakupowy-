@@ -85,7 +85,9 @@ Wymagania:
 2. Rozwiń wszystkie skróty techniczne z nazwy i wyjaśnij je klientowi, np.
    DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
    KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = kółko ręczne,
-   F4/F5 = długość zabudowy wg normy EN 558, ŻEL. = żeliwna itp.
+   F4/F5 = długość zabudowy wg normy EN 558, ŻEL. = żeliwna,
+   RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 lub OD63 = średnica
+   zewnętrzna rury w mm, PE/PVC = do rur z polietylenu i PVC, Z PE = z końcówkami PE itp.
 3. Wyjaśnij zastosowanie produktu (gdzie i do czego się go montuje) i jego zalety.
 4. Nie wymyślaj parametrów, których nie da się wywnioskować z nazwy (np. masy,
    certyfikatów, ceny). Pisz rzeczowo, językiem branżowym, bez przesadnych superlatywów.
@@ -161,6 +163,8 @@ def clean_html(text: str) -> str:
 
 
 def _call_openai(name: str, producer: str, category: str) -> str:
+    # Ścieżka kategorii z IdoSell ("A\\B\\C") jest czytelniejsza dla modelu jako "A > B > C".
+    category = " > ".join(part.strip() for part in category.split("\\") if part.strip())
     response = get_openai_client().chat.completions.create(
         model=OPENAI_MODEL,
         temperature=0.5,

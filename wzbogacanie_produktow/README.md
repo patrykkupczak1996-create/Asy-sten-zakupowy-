@@ -61,6 +61,10 @@ python wzbogac_produkty.py --input produkty.csv --output produkty_wzbogacone.csv
 Zamiast pliku możesz podać link eksportu z Google Sheets:
 `--input "https://docs.google.com/spreadsheets/d/<ID_ARKUSZA>/export?format=csv&gid=0"`
 (arkusz musi być dostępny dla każdego z linkiem). Przy wznawianiu dane w arkuszu nie mogą zmieniać kolejności.
+Parametr `gid` to numer zakładki — widać go w pasku adresu po kliknięciu zakładki (`...#gid=1964847349`).
+
+Jeśli nie chcesz udostępniać arkusza, pobierz go ręcznie: **Plik → Pobierz → Wartości rozdzielone przecinkami (.csv)**
+(pobiera aktualnie otwartą zakładkę) i podaj ścieżkę do pliku w `--input`.
 
 Inne opcje: `--workers 3` (ile produktów naraz, domyślnie 3), `--no-images` (tylko opisy),
 `--sep ";"` (jeśli CSV używa średników), `--image-source serpapi`.
