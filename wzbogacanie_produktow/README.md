@@ -197,6 +197,18 @@ py wzbogac_produkty.py --sprawdz-zdjecia
 Jeśli po akceptacji uruchomisz przetwarzanie ponownie, skrypt nie nadpisze pliku, w którym są już Twoje
 oznaczenia `TAK` — nowa lista trafi do `produkty_wzbogacone_do_akceptacji_nowe.csv`.
 
+## Test na próbce całej bazy
+
+Pierwsze wiersze pliku to zwykle jeden producent — test na nich nie mówi, jak skrypt poradzi sobie z resztą.
+Próbka proporcjonalna do producentów (najwięcej z największych, min. 1 z każdego z 15 największych):
+
+```powershell
+py wzbogac_produkty.py --input produkty.csv --utworz-probke 50
+py wzbogac_produkty.py --input produkty_probka.csv --output wyniki_probka.csv
+py wzbogac_produkty.py --sprawdz-zdjecia --output wyniki_probka.csv
+start wyniki_probka_podglad.html
+```
+
 ## Checkpointy i błędy
 
 * Co **10 wierszy** wynik jest dopisywany do pliku roboczego i zrzucany na dysk.

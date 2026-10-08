@@ -521,6 +521,21 @@ def direct_search_urls(m: ProductMatcher, code: str) -> list[str]:
     return urls
 
 
+def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produkty_probka.csv") -> None:
+    """Losowa próbka proporcjonalna do liczby produktów producenta (każdy z 15 największych ma min. 1)."""
+    df = pd.read_csv(input_path, dtype=str, keep_default_na=False, sep=sep, encoding="utf-8-sig")
+    counts = df[COL_PRODUCER].value_counts()
+    quota = {p: max(1 if i < 15 else 0, round(n * c / len(df))) for i, (p, c) in enumerate(counts.items())}
+    parts = [df[df[COL_PRODUCER] == p].sample(min(q, counts[p]), random_state=42)
+             for p, q in quota.items() if q > 0]
+    sample = pd.concat(parts).sample(frac=1, random_state=42)  # wymieszane, żeby wątki nie szły producentami
+    sample.to_csv(out_path, index=False, encoding="utf-8")
+    print(f"Zapisano {len(sample)} produktów do {out_path}:")
+    for p, c in sample[COL_PRODUCER].value_counts().head(20).items():
+        print(f"  {p or '(brak)':25} {c}")
+    print(f"Test:  py wzbogac_produkty.py --input {out_path} --output wyniki_probka.csv")
+
+
 def test_direct_search(code: str) -> None:
     """Diagnostyka: co zwracają wyszukiwarki hurtowni dla kodu i czy karta zawiera ten kod."""
     from urllib.parse import quote_plus
@@ -1643,6 +1658,9 @@ def main() -> None:
                         help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
     parser.add_argument("--sprawdz-zdjecia", action="store_true",
                         help="Etap 2: sprawdź zdjęcia modelem wizyjnym Ollamy (znak wodny, logo, czy to produkt)")
+    parser.add_argument("--utworz-probke", type=int, metavar="N",
+                        help="Zapisz losową próbkę ok. N produktów z --input do produkty_probka.csv "
+                             "(proporcjonalnie do producentów) — do testów na całej bazie")
     parser.add_argument("--test-wyszukiwarki", metavar="KOD",
                         help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
     parser.add_argument("--aktualizuj", action="store_true",
@@ -1653,6 +1671,11 @@ def main() -> None:
 
     if args.aktualizuj:
         self_update()
+        return
+    if args.utworz_probke:
+        if not args.input:
+            parser.error("--utworz-probke wymaga --input")
+        make_sample(args.input, args.utworz_probke, args.sep)
         return
     if args.test_wyszukiwarki:
         test_direct_search(args.test_wyszukiwarki)
