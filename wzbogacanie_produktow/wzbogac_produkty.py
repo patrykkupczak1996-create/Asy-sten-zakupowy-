@@ -83,7 +83,7 @@ PRODUCER_SEARCH = {
 # powtarzalny i szybszy. "url": adres strony wyników ({q} = kod), "link": fragment adresu karty produktu.
 # Skrypt bierze tylko karty, w których adresie jest kod produktu (warianty z innymi kodami odpadają).
 DIRECT_SEARCH = {
-    "onninen.pl": {"url": "https://onninen.pl/wyszukiwanie?query={q}", "link": "/produkt/"},
+    "onninen.pl": {"url": "https://onninen.pl/szukaj-produktow?query=/szukaj:{q}", "link": "/produkt/"},
 }
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
