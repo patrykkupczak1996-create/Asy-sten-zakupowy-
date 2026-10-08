@@ -65,6 +65,13 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")        # tylko dla "serpapi"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")          # tylko dla "google"
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (identyfikator "cx")
 
+# Strony producentów — przeszukiwane NAJPIERW (najlepsze zdjęcia, bez znaków wodnych, pełne dane).
+# Klucz: nazwa producenta dokładnie jak w kolumnie /producer@name (wielkość liter bez znaczenia).
+# Dopisz kolejnych producentów z bazy, np. "HAWLE": ["hawle.pl"].
+PRODUCER_SITES = {
+    "AEON": ["aeon-sale.com", "aeonvalves.com", "aeon-online.com"],
+}
+
 # =============================================================================
 # USTAWIENIA PRZETWARZANIA
 # =============================================================================
@@ -365,10 +372,21 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]]] | None:
     return text, og_images, imgs
 
 
+def producer_sites(producer: str) -> list[str]:
+    return PRODUCER_SITES.get(producer.strip().upper(), [])
+
+
+def is_producer_url(url: str, producer: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host == d or host.endswith("." + d) for d in producer_sites(producer))
+
+
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
                          row_label: str) -> dict | None:
-    """Szuka strony, na której występuje kod/EAN produktu. Zwraca dane strony albo None."""
+    """Szuka strony, na której występuje kod/EAN produktu — najpierw na stronach producenta."""
     queries = []
+    for domain in producer_sites(producer):
+        queries += [f"site:{domain} {x}" for x in (code, ean) if x]
     if code:
         queries.append(f'"{code}" {producer}'.strip())
         queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
@@ -393,7 +411,7 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
                 continue
             start = max(0, pos - SOURCE_EXCERPT_CHARS // 3)
             return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS],
-                    "og_images": og_images, "imgs": imgs}
+                    "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer)}
     return None
 
 
@@ -401,7 +419,10 @@ def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
     """Zdjęcia ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
     with_code = [src for src, alt in source["imgs"] if is_direct_image_url(src) and m.in_short_text(src, alt)]
     og = [src for src in source["og_images"] if is_direct_image_url(src)]
-    return list(dict.fromkeys(with_code + og))
+    # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku —
+    # na jego stronie bierzemy też pozostałe zdjęcia (logo/ikonki odpadną w filtrach).
+    rest = [src for src, _ in source["imgs"] if is_direct_image_url(src)] if source.get("producer_site") else []
+    return list(dict.fromkeys(with_code + og + rest))
 
 
 def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
@@ -409,7 +430,8 @@ def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, produce
     """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
     verified: list[tuple[str, bool, str]] = []
     unverified: list[tuple[str, bool, str]] = []
-    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    queries = [f"site:{d} {x}" for d in producer_sites(producer) for x in (code, ean) if x]
+    queries += [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     for query in queries:
         results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
         candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])]
@@ -638,7 +660,7 @@ def safe_filename(text: str) -> str:
 BAD_IMAGE_WORDS = ("logo", "banner", "baner", "icon", "ikona", "favicon", "sprite", "placeholder",
                    "noimage", "no-image", "no_image", "brak-zdjecia", "brak_zdjecia", "nophoto", "no-photo",
                    "social", "share")
-MIN_IMAGE_SIDE = 150         # px — mniejsze to ikonki/miniaturki
+MIN_IMAGE_SIDE = 400         # px — mniejsze to miniaturki słabej jakości albo ikonki
 MAX_IMAGE_RATIO = 1.9        # szerokość/wysokość — szersze to zwykle banery i logotypy
 MIN_IMAGE_RATIO = 0.5
 
@@ -921,7 +943,8 @@ def find_replacement(record: dict, engine: str, images_dir: str | None) -> tuple
     if val(COL_SOURCE):
         page = fetch_page(val(COL_SOURCE))
         if page:
-            source = {"url": val(COL_SOURCE), "excerpt": "", "og_images": page[1], "imgs": page[2]}
+            source = {"url": val(COL_SOURCE), "excerpt": "", "og_images": page[1], "imgs": page[2],
+                      "producer_site": is_producer_url(val(COL_SOURCE), val(COL_PRODUCER))}
             candidates += [(u, True, source["url"]) for u in image_candidates_from_source(m, source)]
     candidates += image_candidates_from_search(m, val(COL_CODE), val(COL_EAN), val(COL_PRODUCER), engine, label)
 

@@ -116,6 +116,21 @@ możesz zacząć przeglądać produkty, zanim skończy się cała baza.
 Inne opcje: `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`,
 `--output inna_nazwa.csv`.
 
+## Strony producentów (najlepsze zdjęcia i dane)
+
+Skrypt **najpierw** szuka produktu na stronach producenta (`site:aeon-sale.com AG0828` itd.), dopiero potem
+w reszcie internetu. Ze strony producenta bierze też zdjęcie serii bez kodu w nazwie pliku (producent często ma
+jedno zdjęcie na wszystkie DN). Listę stron ustawiasz na górze skryptu w `PRODUCER_SITES`:
+
+```python
+PRODUCER_SITES = {
+    "AEON": ["aeon-sale.com", "aeonvalves.com", "aeon-online.com"],
+    # "HAWLE": ["hawle.pl"],   # kolejni producenci z bazy
+}
+```
+
+Zdjęcia mniejsze niż 400 px (krótszy bok) są odrzucane jako słabej jakości.
+
 ## Kontrola zdjęć (znak wodny, logo, czy to produkt)
 
 Już przy wyborze zdjęcia skrypt odrzuca pliki z „logo/banner/icon” w adresie, ikonki (< 150 px) i obrazki
