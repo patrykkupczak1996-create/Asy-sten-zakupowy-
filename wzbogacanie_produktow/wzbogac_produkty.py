@@ -9,7 +9,8 @@ Dla każdego wiersza pliku CSV (eksport z Google Sheets):
      nazwy i tekstu tej strony; model dodatkowo ocenia, czy strona opisuje ten sam produkt,
   3. bierze zdjęcie z potwierdzonej strony (albo z wyszukiwarki obrazów, jeśli jego źródło
      też zawiera kod / EAN),
-  4. nadaje status:
+  4. pobiera zdjęcie do folderu zdjecia/ i sprawdza, czy to prawdziwy plik obrazu,
+  5. nadaje status:
        PEWNY          — wszystko potwierdzone kodem/EAN -> plik *_pewne.csv (do importu),
        DO_AKCEPTACJI  — cokolwiek niepotwierdzone (z podanym powodem) -> plik *_do_akceptacji.csv.
 
@@ -69,6 +70,9 @@ REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
 PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
 MAX_PAGES_PER_PRODUCT = 6    # ile stron z wyników wyszukiwania sprawdzić na produkt
 SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
+IMAGES_DIR = "zdjecia"       # folder na pobrane zdjęcia (obok pliku wynikowego)
+MAX_IMAGE_BYTES = 15_000_000
+MIN_IMAGE_BYTES = 2_000      # mniejsze pliki to zwykle ikonki/piksele śledzące, nie zdjęcia produktu
 DEFAULT_WORKERS = 3          # ile wierszy przetwarzać równolegle w ramach jednej paczki
 
 # Nazwy kolumn wejściowych (dokładnie jak w eksporcie z IdoSell / Google Sheets)
@@ -82,11 +86,12 @@ COL_NAME = "/description/name[pol]"
 # Kolumny dopisywane przez skrypt
 COL_DESC = "Opis_HTML"
 COL_IMAGE = "Zdjecie_URL"
+COL_IMAGE_FILE = "Zdjecie_plik"
 COL_SOURCE = "Zrodlo_URL"
 COL_STATUS = "Status"
 COL_REASON = "Powod"
 COL_ACCEPT = "Akceptacja"
-NEW_COLUMNS = [COL_DESC, COL_IMAGE, COL_SOURCE, COL_STATUS, COL_REASON]
+NEW_COLUMNS = [COL_DESC, COL_IMAGE, COL_IMAGE_FILE, COL_SOURCE, COL_STATUS, COL_REASON]
 
 STATUS_OK = "PEWNY"
 STATUS_REVIEW = "DO_AKCEPTACJI"
@@ -437,9 +442,69 @@ def generate_description(row: dict, source: dict | None, row_label: str) -> dict
 
 
 # =============================================================================
+# POBIERANIE ZDJĘĆ NA DYSK
+# =============================================================================
+IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"GIF8", ".gif"),
+)
+
+
+def image_type(head: bytes) -> str | None:
+    """Rozszerzenie na podstawie nagłówka pliku — odrzuca strony błędów udające obrazek."""
+    for signature, ext in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return ext
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def safe_filename(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", text).strip("_")[:80] or "produkt"
+
+
+def download_image(url: str, images_dir: str, base_name: str, referer: str = "") -> tuple[str, str]:
+    """Pobiera zdjęcie do images_dir. Zwraca (ścieżka_pliku, "") albo ("", powód_błędu)."""
+    # Plik pobrany przy wcześniejszym uruchomieniu — nie pobieramy drugi raz.
+    for ext in (".jpg", ".png", ".webp", ".gif"):
+        existing = os.path.join(images_dir, base_name + ext)
+        if os.path.exists(existing) and os.path.getsize(existing) >= MIN_IMAGE_BYTES:
+            return existing, ""
+    headers = dict(BROWSER_HEADERS)
+    if referer:
+        headers["Referer"] = referer  # część sklepów blokuje obrazki pobierane bez strony źródłowej
+    try:
+        with requests.get(url, headers=headers, timeout=PAGE_TIMEOUT, stream=True) as resp:
+            if resp.status_code != 200:
+                return "", f"HTTP {resp.status_code}"
+            data = b""
+            for chunk in resp.iter_content(64 * 1024):
+                data += chunk
+                if len(data) > MAX_IMAGE_BYTES:
+                    return "", "plik za duży"
+    except Exception as exc:
+        return "", type(exc).__name__
+    ext = image_type(data[:16])
+    if not ext:
+        return "", "to nie jest plik obrazu"
+    if len(data) < MIN_IMAGE_BYTES:
+        return "", "obrazek za mały"
+    os.makedirs(images_dir, exist_ok=True)
+    path = os.path.join(images_dir, base_name + ext)
+    tmp = path + ".part"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    return path, ""
+
+
+# =============================================================================
 # PRZETWARZANIE WIERSZA
 # =============================================================================
-def process_row(record: dict, position: int, engine: str) -> dict:
+def process_row(record: dict, position: int, engine: str, images_dir: str | None) -> dict:
+    """images_dir=None wyłącza pobieranie zdjęć na dysk."""
     def val(col: str) -> str:
         return str(record.get(col, "") or "").strip()
 
@@ -482,9 +547,18 @@ def process_row(record: dict, position: int, engine: str) -> dict:
     elif not image_ok:
         reasons.append("zdjęcie niepotwierdzone kodem/EAN")
 
+    # 4. Pobranie zdjęcia na dysk (jeśli link nie działa teraz, IdoSell też go nie pobierze)
+    image_file = ""
+    if image and images_dir:
+        base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
+        image_file, error = download_image(image, images_dir, base_name, source["url"] if source else "")
+        if error:
+            reasons.append(f"nie udało się pobrać zdjęcia ({error})")
+
     out = dict(record)
     out[COL_DESC] = desc
     out[COL_IMAGE] = image
+    out[COL_IMAGE_FILE] = image_file.replace(os.sep, "/")
     out[COL_SOURCE] = source["url"] if source else ""
     out[COL_STATUS] = STATUS_REVIEW if reasons else STATUS_OK
     out[COL_REASON] = "; ".join(reasons)
@@ -510,8 +584,8 @@ def count_done_rows(output_path: str, df_in: pd.DataFrame) -> int:
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         return 0
     df_out = read_csv(output_path)
-    if COL_STATUS not in df_out.columns:
-        sys.exit(f"Plik {output_path} pochodzi ze starszej wersji skryptu (brak kolumny '{COL_STATUS}'). "
+    if any(c not in df_out.columns for c in NEW_COLUMNS):
+        sys.exit(f"Plik {output_path} pochodzi ze starszej wersji skryptu (inne kolumny). "
                  "Usuń go albo podaj inną nazwę w --output.")
     done = len(df_out)
     if done > len(df_in):
@@ -582,6 +656,10 @@ def write_preview(df: pd.DataFrame, path: str) -> None:
     for _, row in df.iterrows():
         ok = col(row, COL_STATUS) == STATUS_OK
         img = col(row, COL_IMAGE)
+        local = col(row, COL_IMAGE_FILE)
+        if local and os.path.exists(local):
+            # Lokalna kopia działa w podglądzie także bez internetu i gdy sklep blokuje podlinkowanie.
+            img = os.path.relpath(local, os.path.dirname(os.path.abspath(path))).replace(os.sep, "/")
         src = col(row, COL_SOURCE)
         cards.append(
             f'<article class="card {"ok" if ok else "review"}">'
@@ -669,6 +747,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None,
                         help="Przetwórz tylko N kolejnych wierszy (do testów, np. --limit 5)")
     parser.add_argument("--sep", default=",", help="Separator kolumn w pliku wejściowym (domyślnie przecinek)")
+    parser.add_argument("--bez-pobierania", action="store_true",
+                        help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
     parser.add_argument("--zatwierdz", metavar="PLIK",
                         help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
     args = parser.parse_args()
@@ -725,6 +805,12 @@ def main() -> None:
              total, start + 1, " (wznowienie)" if start else "", args.search, args.workers)
 
     records = df_in.to_dict("records")
+    images_dir = None if args.bez_pobierania else os.path.join(
+        os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR)
+    if images_dir:
+        # Ścieżki w CSV względem bieżącego folderu (zwykle "zdjecia/28846_AG0828.jpg").
+        images_dir = os.path.relpath(images_dir)
+        log.info("Zdjęcia będą pobierane do folderu: %s", os.path.abspath(images_dir))
     started_at = time.time()
     done_now = 0
     exit_code = 0
@@ -733,7 +819,7 @@ def main() -> None:
             for batch_start in range(start, end, CHECKPOINT_EVERY):
                 batch_end = min(batch_start + CHECKPOINT_EVERY, end)
                 # pool.map zachowuje kolejność wierszy, więc plik wyjściowy ma ten sam porządek co wejściowy.
-                results = list(pool.map(lambda p: process_row(records[p], p, args.search),
+                results = list(pool.map(lambda p: process_row(records[p], p, args.search, images_dir),
                                         range(batch_start, batch_end)))
                 append_batch(results, columns, args.output)
 

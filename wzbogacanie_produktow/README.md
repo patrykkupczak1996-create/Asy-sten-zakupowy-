@@ -9,7 +9,9 @@ Skrypt `wzbogac_produkty.py` czyta CSV z Google Sheets i dla każdego produktu:
    czy strona opisuje dokładnie ten produkt (kod, DN, PN …),
 3. **bierze zdjęcie** z potwierdzonej strony, a gdy go tam nie ma — z wyszukiwarki obrazów,
    ale za potwierdzone uznaje je tylko, jeśli kod/EAN jest w nazwie pliku, tytule albo na stronie, z której pochodzi,
-4. **nadaje status**:
+4. **pobiera zdjęcie na dysk** do folderu `zdjecia/` (np. `zdjecia/28846_AG0828.jpg`) i sprawdza, czy to
+   naprawdę plik obrazu — jeśli link nie działa albo zamiast zdjęcia przychodzi strona błędu, produkt idzie do akceptacji,
+5. **nadaje status**:
 
 | Status | Kiedy | Gdzie trafia |
 |---|---|---|
@@ -67,6 +69,8 @@ Alternatywnie wpisz klucz na górze skryptu w sekcji `KONFIGURACJA`. Wtedy nie u
 Powstają pliki:
 
 * `produkty_wzbogacone.csv` — plik roboczy z postępem (nie edytuj go),
+* **`zdjecia/`** — pobrane zdjęcia, nazwane `ID_KOD.jpg`; przejrzysz je w Eksploratorze Windows (widok „Duże ikony”).
+  Kolumna `Zdjecie_plik` w CSV wskazuje plik danego produktu, a `Zdjecie_URL` — link, z którego go pobrano,
 * `produkty_wzbogacone_pewne.csv` — produkty potwierdzone, gotowe do importu,
 * `produkty_wzbogacone_do_akceptacji.csv` — produkty do przejrzenia (pierwsza kolumna `Akceptacja` jest pusta).
 * **`produkty_wzbogacone_podglad.html`** — podgląd w przeglądarce (dwuklik w pliku): każdy produkt jako karta
@@ -81,7 +85,7 @@ albo pobranego z Google Sheets.
 Pliki `_pewne` i `_do_akceptacji` są odświeżane po każdym uruchomieniu (także po Ctrl+C), więc
 możesz zacząć przeglądać produkty, zanim skończy się cała baza.
 
-Inne opcje: `--workers 3` (ile produktów naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`,
+Inne opcje: `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`,
 `--output inna_nazwa.csv`.
 
 ## 4. Akceptacja niepewnych produktów
@@ -109,6 +113,15 @@ oznaczenia `TAK` — nowa lista trafi do `produkty_wzbogacone_do_akceptacji_nowe
   Jeśli wszystkie zawiodą, produkt trafia do akceptacji z odpowiednim powodem, a skrypt jedzie dalej.
 * Zły klucz API albo brak środków na koncie OpenAI → skrypt zatrzymuje się (postęp zostaje zapisany).
 * Pełny log trafia do `wzbogacanie.log`.
+
+## Zdjęcia a import do IdoSell
+
+* Import przez CSV: IdoSell pobiera zdjęcie z linku w `Zdjecie_URL`. To, że skrypt pobrał zdjęcie, oznacza,
+  że link działał w chwili przetwarzania.
+* Jeśli wolisz nie zależeć od cudzych stron, wgraj pliki z folderu `zdjecia/` na własny serwer/FTP sklepu
+  i podmień linki, albo dodaj je ręcznie w panelu IdoSell.
+* Jeśli w pliku do akceptacji wpiszesz inny link w `Zdjecie_URL`, plik w `zdjecia/` zostaje stary —
+  do importu liczy się link.
 
 ## Czego skrypt NIE gwarantuje
 
