@@ -83,10 +83,12 @@ PRODUCER_SEARCH = {
 # powtarzalny i szybszy. "url": adres strony wyników ({q} = kod), "link": fragment adresu karty produktu.
 # Skrypt bierze tylko karty, w których adresie jest kod produktu (warianty z innymi kodami odpadają).
 DIRECT_SEARCH = {
-    "onninen.pl": {"url": "https://onninen.pl/szukaj-produktow?query=/szukaj:{q}", "link": "/produkt/"},
+    # Onninen (https://onninen.pl/szukaj-produktow?query=/szukaj:{q}) blokuje automatyczne pobieranie
+    # (HTTP 403), więc go tu nie ma. Dopisuj hurtownie, których wyszukiwarka odpowiada skryptowi —
+    # sprawdzisz to komendą:  py wzbogac_produkty.py --test-wyszukiwarki AG0828
 }
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
-TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
+TRUSTED_SITES = ["cetel-hurtownia.pl", "mateomarket.pl"]  # Onninen odpada — blokuje skrypty (HTTP 403)
 # Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
 # dane do opisu), a zdjęcie szuka gdzie indziej. Dotyczy też ich serwerów ze zdjęciami (np. img.onninen…).
 WATERMARK_SITES = ["onninen.pl"]
@@ -414,11 +416,37 @@ def largest_from_srcset(srcset: str) -> str:
     return best
 
 
+BLOCK_AFTER = 3              # po tylu odmowach (403) z rzędu domena jest pomijana do końca przebiegu
+_refusals: dict[str, int] = {}
+_refusals_lock = threading.Lock()
+
+
+def domain_blocked(url: str) -> bool:
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    with _refusals_lock:
+        return _refusals.get(host, 0) >= BLOCK_AFTER
+
+
+def note_response(url: str, status: int) -> None:
+    """Liczy odmowy dostępu per domena — strony blokujące skrypty nie zabierają czasu przy kolejnych produktach."""
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    with _refusals_lock:
+        if status in (401, 403):
+            _refusals[host] = _refusals.get(host, 0) + 1
+            if _refusals[host] == BLOCK_AFTER:
+                log.warning("Strona %s blokuje automatyczne pobieranie (HTTP %d) — pomijam ją do końca przebiegu.",
+                            host, status)
+        elif status == 200:
+            _refusals[host] = 0
+
+
 def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | None:
     """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>], tytuł) albo None."""
-
+    if domain_blocked(url):
+        return None
     try:
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+        note_response(url, resp.status_code)
         if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
             return None
         doc = html_doc(resp)
@@ -914,11 +942,14 @@ def image_url_looks_bad(url: str) -> bool:
 
 def fetch_image(url: str, referer: str = "") -> tuple[bytes, str, str]:
     """Pobiera obrazek do pamięci. Zwraca (dane, rozszerzenie, "") albo (b"", "", powód_odrzucenia)."""
+    if domain_blocked(url):
+        return b"", "", "strona blokuje pobieranie"
     headers = dict(BROWSER_HEADERS)
     if referer:
         headers["Referer"] = referer  # część sklepów blokuje obrazki pobierane bez strony źródłowej
     try:
         with requests.get(url, headers=headers, timeout=PAGE_TIMEOUT, stream=True) as resp:
+            note_response(url, resp.status_code)
             if resp.status_code != 200:
                 return b"", "", f"HTTP {resp.status_code}"
             data = b""

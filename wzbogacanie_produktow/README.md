@@ -132,7 +132,7 @@ Wpisuj tylko strony, na których przy produkcie widać kod producenta lub EAN �
 na nich produktu, a tylko wydłuży szukanie. (Sklep AEON aeon-sale.com kodów nie pokazuje, więc go tu nie ma.)
 
 Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami produktów (kod producenta + EAN),
-ustawione w `TRUSTED_SITES` (domyślnie `onninen.pl`, `cetel-hurtownia.pl`). Na tych stronach szuka po kodzie
+ustawione w `TRUSTED_SITES` (domyślnie `cetel-hurtownia.pl`, `mateomarket.pl`). Na tych stronach szuka po kodzie
 producenta; EAN sprawdza w ogólnym wyszukiwaniu.
 
 **Sklep producenta bez kodów (np. AEON)** — w `PRODUCER_SEARCH` jest adres wewnętrznej wyszukiwarki sklepu
@@ -142,9 +142,11 @@ w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycj�
 gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
 pasuje na pewno, skrypt bierze zdjęcie z innych stron.
 
-**Bezpośrednie wyszukiwanie w hurtowni** — `DIRECT_SEARCH` zawiera adres wyszukiwarki hurtowni (domyślnie
-Onninen). Skrypt wpisuje tam kod producenta i bierze kartę, w której adresie jest ten kod — bez DuckDuckGo,
-więc wynik jest powtarzalny. DuckDuckGo jest używane dopiero, gdy hurtownia nic nie znajdzie.
+**Bezpośrednie wyszukiwanie w hurtowni** — `DIRECT_SEARCH` może zawierać adres wyszukiwarki hurtowni; skrypt
+wpisuje tam kod i bierze kartę z tym kodem w adresie, bez DuckDuckGo. Onninen blokuje automatyczne pobieranie
+(HTTP 403), więc domyślnie lista jest pusta. Czy wyszukiwarka danej hurtowni odpowiada skryptowi, sprawdzisz:
+`py wzbogac_produkty.py --test-wyszukiwarki AG0828`. Strony, które kilka razy z rzędu odmówią dostępu (403),
+są pomijane do końca przebiegu.
 
 Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
 Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej
