@@ -478,6 +478,32 @@ def direct_search_urls(m: ProductMatcher, code: str) -> list[str]:
     return urls
 
 
+def test_direct_search(code: str) -> None:
+    """Diagnostyka: co zwracają wyszukiwarki hurtowni dla kodu i czy karta zawiera ten kod."""
+    from urllib.parse import quote_plus
+
+    m = ProductMatcher(code, "", "")
+    for domain, cfg in DIRECT_SEARCH.items():
+        url = cfg["url"].format(q=quote_plus(code))
+        print(f"\n{domain}: {url}")
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+            print(f"  odpowiedź: HTTP {resp.status_code}, {len(resp.content)} bajtów, "
+                  f"'{cfg['link']}' występuje {resp.text.count(cfg['link'])} razy, kod {code}: "
+                  f"{'jest' if code.lower() in resp.text.lower() else 'BRAK'} w kodzie strony")
+        except Exception as exc:
+            print(f"  błąd: {exc}")
+            continue
+    urls = direct_search_urls(m, code)
+    print(f"\nZnalezione karty z kodem {code}: {len(urls)}")
+    for url in urls:
+        page = fetch_page(url)
+        ok = page is not None and m.find(page[0]) is not None
+        print(f"  {url}\n    kod na stronie karty: {'TAK' if ok else 'NIE'}")
+    if not urls:
+        print("  Brak — wyszukiwarka pewnie ładuje wyniki przez JavaScript; skrypt użyje wtedy DuckDuckGo.")
+
+
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
                          row_label: str) -> dict | None:
     """Szuka strony, na której występuje kod/EAN produktu — najpierw w wyszukiwarkach hurtowni."""
@@ -1556,6 +1582,8 @@ def main() -> None:
                         help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
     parser.add_argument("--sprawdz-zdjecia", action="store_true",
                         help="Etap 2: sprawdź zdjęcia modelem wizyjnym Ollamy (znak wodny, logo, czy to produkt)")
+    parser.add_argument("--test-wyszukiwarki", metavar="KOD",
+                        help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
     parser.add_argument("--aktualizuj", action="store_true",
                         help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
     parser.add_argument("--zatwierdz", metavar="PLIK",
@@ -1564,6 +1592,9 @@ def main() -> None:
 
     if args.aktualizuj:
         self_update()
+        return
+    if args.test_wyszukiwarki:
+        test_direct_search(args.test_wyszukiwarki)
         return
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
