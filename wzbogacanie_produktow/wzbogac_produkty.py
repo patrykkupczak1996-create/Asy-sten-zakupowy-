@@ -801,7 +801,9 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
 # =============================================================================
 VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
 VISION_MAX_SIDE = 1024       # zdjęcie zmniejszane przed wysłaniem do modelu — szybciej, wynik ten sam
-CHECK_COLUMNS = [COL_ID, COL_IMAGE, "Wynik", "Uwagi"]
+# Zamiennik_* — inne zdjęcie znalezione w miejsce odrzuconego (np. ze znakiem wodnym).
+CHECK_COLUMNS = [COL_ID, COL_IMAGE, "Wynik", "Uwagi", "Zamiennik_URL", "Zamiennik_plik", "Zamiennik_potwierdzony"]
+MAX_REPLACEMENT_CHECKS = 3   # ile zastępczych zdjęć obejrzeć modelem, zanim produkt zostanie bez zdjęcia
 CHECK_OK, CHECK_REJECTED = "OK", "ODRZUCONE"
 
 VISION_PROMPT = """To zdjęcie ma być zdjęciem produktu w sklepie internetowym z armaturą instalacyjną.
@@ -823,13 +825,19 @@ def check_file_path(output_path: str) -> str:
     return side_path(output_path, "kontrola_zdjec")
 
 
-def load_image_checks(output_path: str) -> dict[tuple[str, str], tuple[str, str]]:
-    """{(id, url_zdjęcia): (wynik, uwagi)} — wynik dotyczy konkretnego zdjęcia, więc zmiana zdjęcia = nowa kontrola."""
+def load_image_checks(output_path: str) -> dict[tuple[str, str], dict]:
+    """{(id, url_zdjęcia): wiersz kontroli} — wynik dotyczy konkretnego zdjęcia, więc zmiana zdjęcia = nowa kontrola."""
     path = check_file_path(output_path)
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return {}
     df = read_csv(path)
-    return {(r[COL_ID], r[COL_IMAGE]): (r["Wynik"], r["Uwagi"]) for r in df.to_dict("records")}
+    missing = [c for c in CHECK_COLUMNS if c not in df.columns]
+    if missing:
+        # Plik ze starszej wersji (bez kolumn zamiennika) — uzupełniamy nagłówek, wyniki zostają.
+        for c in missing:
+            df[c] = ""
+        df[CHECK_COLUMNS].to_csv(path, index=False, encoding="utf-8")
+    return {(r[COL_ID], r[COL_IMAGE]): r for r in df.to_dict("records")}
 
 
 def _image_for_vision(record: dict) -> bytes:
@@ -868,10 +876,21 @@ def _ask_vision(image_jpeg: bytes, name: str) -> dict:
     return parse_json((resp.json().get("message") or {}).get("content") or "{}")
 
 
-def check_one_image(record: dict) -> tuple[str, str]:
-    """(wynik, uwagi) dla zdjęcia jednego produktu."""
+def _shrink_for_vision(data: bytes) -> bytes:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=90)
+        return out.getvalue()
+
+
+def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
+    """(wynik, uwagi) dla zdjęcia produktu — z rekordu albo z podanych bajtów (zdjęcie zastępcze)."""
     try:
-        image = _image_for_vision(record)
+        image = _shrink_for_vision(data) if data is not None else _image_for_vision(record)
     except Exception as exc:
         return CHECK_REJECTED, str(exc)
     answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
@@ -888,8 +907,51 @@ def check_one_image(record: dict) -> tuple[str, str]:
     return CHECK_OK, ""
 
 
-def run_image_check(output_path: str) -> None:
-    """Etap 2: ogląda modelem wizyjnym każde zdjęcie, którego jeszcze nie sprawdzono."""
+def find_replacement(record: dict, engine: str, images_dir: str | None) -> tuple[str, bool, str, str]:
+    """Szuka innego zdjęcia w miejsce odrzuconego i sprawdza je modelem wizyjnym.
+
+    Zwraca (url, czy_potwierdzone_kodem, plik, uwagi) albo ("", False, "", powód).
+    """
+    def val(col: str) -> str:
+        return str(record.get(col, "") or "").strip()
+
+    m = ProductMatcher(val(COL_CODE), val(COL_EAN), val(COL_PRODUCER))
+    label = f"[id={val(COL_ID)}]"
+    candidates: list[tuple[str, bool, str]] = []
+    if val(COL_SOURCE):
+        page = fetch_page(val(COL_SOURCE))
+        if page:
+            source = {"url": val(COL_SOURCE), "excerpt": "", "og_images": page[1], "imgs": page[2]}
+            candidates += [(u, True, source["url"]) for u in image_candidates_from_source(m, source)]
+    candidates += image_candidates_from_search(m, val(COL_CODE), val(COL_EAN), val(COL_PRODUCER), engine, label)
+
+    tried = {val(COL_IMAGE)}
+    base_name = safe_filename(f"{val(COL_ID)}_{val(COL_CODE)}")
+    last_note = "nie znaleziono innego zdjęcia"
+    for _ in range(MAX_REPLACEMENT_CHECKS):
+        # pick_image pobiera i filtruje (logo w adresie, wymiary) — model ogląda tylko to, co przeszło
+        url, verified, path, reason = pick_image(candidates, None, base_name, tried)
+        if not url:
+            last_note = f"brak innego poprawnego zdjęcia ({reason})" if reason else last_note
+            break
+        data, ext, err = fetch_image(url)
+        if err:
+            last_note = err
+            continue
+        result, note = check_one_image(record, data)
+        log.info("%s zdjęcie zastępcze %s%s", label, result, f" — {note}" if note else "")
+        if result == CHECK_OK:
+            path = save_image(data, ext, images_dir, base_name) if images_dir else ""
+            return url, verified, path, ""
+        last_note = f"zastępcze też odrzucone: {note}"
+    return "", False, "", last_note
+
+
+def run_image_check(output_path: str, engine: str = "ddg", images_dir: str | None = None) -> None:
+    """Etap 2: ogląda modelem wizyjnym każde zdjęcie, którego jeszcze nie sprawdzono.
+
+    Przy odrzuconym zdjęciu (znak wodny, logo, nie produkt) szuka zdjęcia zastępczego.
+    """
     if not os.path.exists(output_path):
         sys.exit(f"Nie ma pliku {output_path}. Najpierw uruchom przetwarzanie produktów (--input ...).")
     check_ollama(dict(AI_PROVIDERS["ollama"], models=[VISION_MODEL]))
@@ -899,19 +961,31 @@ def run_image_check(output_path: str) -> None:
     log.info("Kontrola zdjęć modelem %s: do sprawdzenia %d (sprawdzone wcześniej: %d).",
              VISION_MODEL, len(todo), len(done))
     path = check_file_path(output_path)
-    started, batch, rejected = time.time(), [], 0
+    started, batch, rejected, replaced = time.time(), [], 0, 0
     try:
         for i, record in enumerate(todo, 1):
             result, note = check_one_image(record)
-            rejected += result != CHECK_OK
-            batch.append({COL_ID: record[COL_ID], COL_IMAGE: record[COL_IMAGE], "Wynik": result, "Uwagi": note})
             log.info("[id=%s] zdjęcie %s%s", record[COL_ID], result, f" — {note}" if note else "")
+            entry = {COL_ID: record[COL_ID], COL_IMAGE: record[COL_IMAGE], "Wynik": result, "Uwagi": note,
+                     "Zamiennik_URL": "", "Zamiennik_plik": "", "Zamiennik_potwierdzony": ""}
+            if result != CHECK_OK:
+                new_url, new_ok, new_path, new_note = find_replacement(record, engine, images_dir)
+                if new_url:
+                    replaced += 1
+                    entry.update({"Zamiennik_URL": new_url, "Zamiennik_plik": new_path.replace(os.sep, "/"),
+                                  "Zamiennik_potwierdzony": "TAK" if new_ok else "NIE"})
+                    log.info("[id=%s] zamieniono zdjęcie na: %s", record[COL_ID], new_url)
+                else:
+                    rejected += 1
+                    entry["Uwagi"] = f"{note}; {new_note}"
+                    log.info("[id=%s] brak zdjęcia zastępczego — %s", record[COL_ID], new_note)
+            batch.append(entry)
             if len(batch) >= CHECKPOINT_EVERY or i == len(todo):
                 append_batch(batch, CHECK_COLUMNS, path)
                 batch = []
                 remaining = (len(todo) - i) * (time.time() - started) / i
-                log.info("KONTROLA: %d/%d, odrzucone: %d. Pozostało ok. %.1f h.",
-                         i, len(todo), rejected, remaining / 3600)
+                log.info("KONTROLA: %d/%d, zamienione: %d, bez zdjęcia: %d. Pozostało ok. %.1f h.",
+                         i, len(todo), replaced, rejected, remaining / 3600)
     except KeyboardInterrupt:
         if batch:
             append_batch(batch, CHECK_COLUMNS, path)
@@ -974,11 +1048,24 @@ def apply_image_checks(df: pd.DataFrame, checks: dict) -> pd.DataFrame:
     for i, row in df.iterrows():
         if not row[COL_IMAGE]:
             continue
-        result, note = checks.get((row[COL_ID], row[COL_IMAGE]), ("", ""))
+        check = checks.get((row[COL_ID], row[COL_IMAGE]), {})
+        result, note = check.get("Wynik", ""), check.get("Uwagi", "")
         if result == CHECK_OK:
             continue
-        reason = (f"zdjęcie odrzucone: {note}" if result == CHECK_REJECTED
-                  else "zdjęcie niesprawdzone (uruchom --sprawdz-zdjecia)")
+        if result == CHECK_REJECTED and check.get("Zamiennik_URL"):
+            # Odrzucone zdjęcie zastąpione innym, które przeszło kontrolę modelu.
+            df.at[i, COL_IMAGE] = check["Zamiennik_URL"]
+            df.at[i, COL_IMAGE_FILE] = check.get("Zamiennik_plik", "")
+            if check.get("Zamiennik_potwierdzony") == "TAK":
+                continue
+            reason = "zdjęcie zastępcze niepotwierdzone kodem/EAN"
+        elif result == CHECK_REJECTED:
+            # Bez zdjęcia — lepiej żadne niż ze znakiem wodnym albo cudzym logo.
+            df.at[i, COL_IMAGE] = ""
+            df.at[i, COL_IMAGE_FILE] = ""
+            reason = f"brak zdjęcia — odrzucone: {note}"
+        else:
+            reason = "zdjęcie niesprawdzone (uruchom --sprawdz-zdjecia)"
         df.at[i, COL_STATUS] = STATUS_REVIEW
         df.at[i, COL_REASON] = "; ".join(r for r in (row[COL_REASON], reason) if r)
     return df
@@ -1243,7 +1330,9 @@ def main() -> None:
     check_for_update()
 
     if args.sprawdz_zdjecia:
-        run_image_check(args.output)
+        images_dir = None if args.bez_pobierania else os.path.relpath(
+            os.path.join(os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR))
+        run_image_check(args.output, args.search, images_dir)
         return
 
     configure_ai(args.ai)

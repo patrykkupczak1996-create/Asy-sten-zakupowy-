@@ -128,6 +128,10 @@ py wzbogac_produkty.py --sprawdz-zdjecia
 ```
 
 * Sprawdza tylko zdjęcia, których jeszcze nie sprawdził — można przerywać (Ctrl+C) i wznawiać.
+* **Gdy zdjęcie zostanie odrzucone, skrypt szuka zastępczego** (ze strony źródłowej i z wyszukiwarki obrazów),
+  ogląda je tym samym modelem i podstawia pierwsze bez znaku wodnego. Jeśli żadne nie przejdzie (do 3 prób),
+  produkt zostaje **bez zdjęcia** i trafia do akceptacji — lepiej brak zdjęcia niż cudzy znak wodny.
+  Zdjęcie zastępcze niepotwierdzone kodem/EAN też trafia do akceptacji.
 * Odrzuca: znak wodny, nałożone logo sklepu/firmy, adres www lub telefon na zdjęciu, a także obrazki,
   które nie są zdjęciem produktu (logo, baner, rysunek, tabela, inny przedmiot).
 * **Produkt jest PEWNY tylko wtedy, gdy jego zdjęcie przeszło tę kontrolę.** Dopóki jej nie uruchomisz,
