@@ -789,6 +789,73 @@ def approve(output_path: str, accepted_path: str) -> None:
 
 
 # =============================================================================
+# AKTUALIZACJA SKRYPTU Z GITHUBA
+# =============================================================================
+UPDATE_BASE_URL = ("https://raw.githubusercontent.com/patrykkupczak1996-create/Asy-sten-zakupowy-/"
+                   "claude/b2b-product-enrichment-script-uve0u0/wzbogacanie_produktow/")
+UPDATE_FILES = ("wzbogac_produkty.py", "requirements.txt", "README.md")
+
+
+def _download_text(name: str, timeout: int) -> bytes:
+    resp = requests.get(UPDATE_BASE_URL + name, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+
+def check_for_update() -> None:
+    """Przy starcie: jeśli na GitHubie jest inna wersja skryptu, podpowiada --aktualizuj. Błędy ignoruje."""
+    try:
+        remote = _download_text("wzbogac_produkty.py", timeout=5)
+        with open(os.path.abspath(__file__), "rb") as fh:
+            local = fh.read()
+        if remote.replace(b"\r\n", b"\n") != local.replace(b"\r\n", b"\n"):
+            log.warning("Jest nowsza wersja skryptu. Zaktualizuj: py wzbogac_produkty.py --aktualizuj")
+    except Exception:
+        pass  # brak internetu / GitHub niedostępny — pracujemy na obecnej wersji
+
+
+def self_update() -> None:
+    """Pobiera najnowsze pliki skryptu z GitHuba i podmienia je w folderze skryptu."""
+    folder = os.path.dirname(os.path.abspath(__file__))
+    downloaded = {}
+    for name in UPDATE_FILES:
+        try:
+            downloaded[name] = _download_text(name, timeout=30)
+        except Exception as exc:
+            sys.exit(f"Nie udało się pobrać {name}: {exc}. Nic nie zostało zmienione.")
+    try:
+        # Nie podmieniamy działającego skryptu na uszkodzony plik (np. stronę błędu zamiast kodu).
+        compile(downloaded["wzbogac_produkty.py"], "wzbogac_produkty.py", "exec")
+    except SyntaxError as exc:
+        sys.exit(f"Pobrany skrypt jest uszkodzony ({exc}). Nic nie zostało zmienione.")
+
+    old_requirements = b""
+    req_path = os.path.join(folder, "requirements.txt")
+    if os.path.exists(req_path):
+        with open(req_path, "rb") as fh:
+            old_requirements = fh.read()
+
+    changed = []
+    for name, content in downloaded.items():
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            with open(path, "rb") as fh:
+                if fh.read().replace(b"\r\n", b"\n") == content.replace(b"\r\n", b"\n"):
+                    continue
+        with open(path + ".nowy", "wb") as fh:
+            fh.write(content)
+        os.replace(path + ".nowy", path)
+        changed.append(name)
+
+    if not changed:
+        print("Masz już najnowszą wersję.")
+        return
+    print("Zaktualizowano: " + ", ".join(changed))
+    if downloaded["requirements.txt"].replace(b"\r\n", b"\n") != old_requirements.replace(b"\r\n", b"\n"):
+        print("Zmieniły się wymagane biblioteki — uruchom: py -m pip install -r requirements.txt")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main() -> None:
@@ -806,10 +873,15 @@ def main() -> None:
     parser.add_argument("--sep", default=",", help="Separator kolumn w pliku wejściowym (domyślnie przecinek)")
     parser.add_argument("--bez-pobierania", action="store_true",
                         help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
+    parser.add_argument("--aktualizuj", action="store_true",
+                        help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
     parser.add_argument("--zatwierdz", metavar="PLIK",
                         help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
     args = parser.parse_args()
 
+    if args.aktualizuj:
+        self_update()
+        return
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
         return
@@ -823,6 +895,7 @@ def main() -> None:
         handlers=[logging.StreamHandler(),
                   logging.FileHandler("wzbogacanie.log", encoding="utf-8")],
     )
+    check_for_update()
 
     configure_ai(args.ai)
     if args.search == "serpapi" and not SERPAPI_API_KEY:

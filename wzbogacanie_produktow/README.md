@@ -31,6 +31,17 @@ py -m pip install -r requirements.txt
 
 (Na Windows używaj `py` zamiast `python`/`pip`, jeśli te polecenia nie są rozpoznawane.)
 
+### Aktualizacja skryptu
+
+```powershell
+py wzbogac_produkty.py --aktualizuj
+```
+
+Pobiera najnowszą wersję skryptu, `requirements.txt` i README z GitHuba i podmienia je w folderze
+(Twoje pliki CSV, zdjęcia i postęp zostają). Jeśli zmieniły się biblioteki, skrypt napisze, żeby uruchomić
+`py -m pip install -r requirements.txt`. Przy każdym starcie skrypt sam sprawdza, czy jest nowsza wersja,
+i wypisuje ostrzeżenie.
+
 ## 2. Klucze API
 
 **Gemini (domyślnie)** — klucz z https://aistudio.google.com/apikey (zaczyna się od `AIza`):
