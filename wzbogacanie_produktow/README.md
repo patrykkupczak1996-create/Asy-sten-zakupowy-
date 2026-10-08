@@ -113,8 +113,20 @@ albo pobranego z Google Sheets.
 Pliki `_pewne` i `_do_akceptacji` są odświeżane po każdym uruchomieniu (także po Ctrl+C), więc
 możesz zacząć przeglądać produkty, zanim skończy się cała baza.
 
-Inne opcje: `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`,
-`--output inna_nazwa.csv`.
+Inne opcje: `--bez-zdjec` (tylko opisy — zdjęcia nie są szukane ani pobierane, PEWNY zależy wtedy tylko
+od źródła i opisu), `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów
+naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`, `--output inna_nazwa.csv`.
+
+### Kontrola opisu
+
+Każdy wygenerowany opis przechodzi dwie kontrole:
+
+* **Zakazane ogólniki** (`BANNED_PHRASES` w skrypcie): wysoka jakość, niezawodność, odporność na korozję /
+  chemikalia / warunki atmosferyczne, zgodność z normami / standardami, łatwy montaż, trwałość. Zdanie (albo punkt
+  listy) z taką frazą jest usuwane, chyba że źródło mówi o tym samym (np. „korozja” jest w tekście strony
+  źródłowej). Jeśli po usunięciu opis ma mniej niż 200 znaków, produkt idzie do akceptacji.
+* **Nagłówek `<h2>`** musi zawierać rodzaj produktu z nazwy (pierwsze słowo, np. „zasuwa”, „trójnik”; odmiana
+  dozwolona). Łapie literówki modelu typu „Zasuga” — taki produkt idzie do akceptacji.
 
 ## Strony producentów (najlepsze zdjęcia i dane)
 

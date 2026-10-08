@@ -1071,10 +1071,113 @@ def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
 
 
 # =============================================================================
+# KONTROLA OPISU: zakazane ogólniki i nagłówek z rodzajem produktu
+# =============================================================================
+# (wzorzec ogólnika, wzorzec w tekście źródła, który go uzasadnia). Zdanie z ogólnikiem zostaje tylko wtedy,
+# gdy źródło mówi o tym samym — np. „odporny na korozję” przejdzie, jeśli w źródle jest słowo „korozj…”.
+BANNED_PHRASES = [
+    (r"(?:wysok|najwyższ|doskonał|świetn)\w*\s+jakoś\w*|jakoś\w*\s+wykonania", r"jakoś"),
+    (r"niezawodn\w*", r"niezawodn"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?korozj\w*|antykorozyjn\w*", r"korozj"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?(?:chemikal\w*|chemiczn\w*|substancj\w*)", r"chemi|substancj"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?(?:warunk\w*\s+atmosferyczn\w*|czynnik\w*\s+atmosferyczn\w*|"
+     r"atmosferyczn\w*|UV|promieniowan\w*)", r"atmosferyczn|\bUV\b|promieniowan"),
+    (r"(?:zgodn\w*|spełni\w*|zgodnie)\s+(?:\w+\s+){0,2}?(?:norm\w*|standard\w*|wymog\w*|wymagani\w*|przepis\w*)",
+     r"\bPN-|\bEN\s?\d|\bISO\b|norm|standard|DVGW|atest|certyfikat"),
+    (r"(?:najnowsz|nowoczesn)\w*\s+(?:standard\w*|technologi\w*|rozwiązan\w*)", r"standard|technologi"),
+    (r"(?:łatw|prost|szybk|bezproblemow)\w*\s+(?:i\s+\w+\s+)?(?:montaż\w*|instalacj\w*|w\s+montażu|"
+     r"w\s+instalacji|do\s+zamontowania|zamontowa\w*)", r"montaż|instalacj"),
+    (r"(?:dług[oi]?\w*\s*)?trwał(?:ość|ości|y|a|e|ego|ej|ym|ych)\b|długotrwał\w*|żywotnoś\w*", r"trwał|żywotnoś"),
+]
+MIN_DESC_CHARS = 200          # opis krótszy po usunięciu ogólników idzie do akceptacji
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ0-9<])")
+
+
+def _plain(fragment: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+def _banned_hit(sentence: str, source_text: str) -> str:
+    """Pierwszy ogólnik w zdaniu, którego źródło nie uzasadnia, albo ""."""
+    plain = _plain(sentence)
+    for pattern, allowed in BANNED_PHRASES:
+        hit = re.search(pattern, plain, flags=re.IGNORECASE)
+        if hit and not re.search(allowed, source_text, flags=re.IGNORECASE):
+            return hit.group(0)
+    return ""
+
+
+def filter_generic_claims(desc_html: str, source_text: str) -> tuple[str, list[str]]:
+    """Usuwa zdania i punkty listy z ogólnikami nieobecnymi w źródle. Zwraca (nowy HTML, usunięte frazy)."""
+    removed: list[str] = []
+
+    def clean_block(match: re.Match) -> str:
+        tag, inner = match.group(1).lower(), match.group(2)
+        if tag == "li":  # punkt listy to jedno stwierdzenie — usuwamy go w całości
+            hit = _banned_hit(inner, source_text)
+            if hit:
+                removed.append(hit)
+                return ""
+            return match.group(0)
+        kept = []
+        for sentence in _SENTENCE_END.split(inner):
+            hit = _banned_hit(sentence, source_text)
+            if hit:
+                removed.append(hit)
+            else:
+                kept.append(sentence)
+        return f"<p>{' '.join(kept)}</p>" if _plain(" ".join(kept)) else ""
+
+    out = re.sub(r"<(p|li)>(.*?)</\1>", clean_block, desc_html, flags=re.IGNORECASE | re.DOTALL)
+    out = re.sub(r"<ul>\s*</ul>", "", out, flags=re.IGNORECASE)  # lista bez punktów
+    return out, removed
+
+
+def product_type_word(name: str) -> str:
+    """Rodzaj produktu = pierwsze słowo nazwy złożone z liter (np. „ZASUWA”, „Trójnik”, „Grzejnik”)."""
+    for word in re.findall(r"[^\W\d_]+", name):
+        if len(word) >= 3:
+            return word.lower()
+    return ""
+
+
+def heading_has_type(desc_html: str, name: str) -> bool:
+    """Czy <h2> zawiera rodzaj produktu z nazwy (odmiana dozwolona: zasuwa/zasuwy, łącznik/łącznika).
+
+    Rdzeń bez ostatniej litery łapie literówki modelu typu „Zasuga” zamiast „Zasuwa”.
+    """
+    word = product_type_word(name)
+    h2 = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.IGNORECASE | re.DOTALL)
+    if not word:
+        return True  # nazwa bez słowa — nie ma czego sprawdzać
+    if not h2:
+        return False
+    stem = word[:-1] if len(word) > 4 else word
+    return stem in _plain(h2.group(1)).lower()
+
+
+def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
+    """Filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody do akceptacji)."""
+    reasons: list[str] = []
+    source_text = " ".join([row["name"], row["category"], (source or {}).get("excerpt", "")])
+    desc_html, removed = filter_generic_claims(desc_html, source_text)
+    if removed:
+        log.info("%s usunięte ogólniki (brak w źródle): %s", row_label, "; ".join(removed))
+        length = len(_plain(desc_html))
+        if length < MIN_DESC_CHARS:
+            reasons.append(f"opis po usunięciu ogólników za krótki ({length} znaków)")
+    if not heading_has_type(desc_html, row["name"]):
+        reasons.append(f"nagłówek opisu nie zawiera rodzaju produktu („{product_type_word(row['name'])}”) "
+                       "— możliwa literówka")
+    return desc_html, reasons
+
+
+# =============================================================================
 # PRZETWARZANIE WIERSZA
 # =============================================================================
-def process_row(record: dict, position: int, engine: str, images_dir: str | None) -> dict:
-    """images_dir=None wyłącza pobieranie zdjęć na dysk."""
+def process_row(record: dict, position: int, engine: str, images_dir: str | None,
+                with_images: bool = True) -> dict:
+    """images_dir=None wyłącza zapis zdjęć na dysk; with_images=False pomija zdjęcia całkowicie."""
     def val(col: str) -> str:
         return str(record.get(col, "") or "").strip()
 
@@ -1103,6 +1206,8 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
             if source and result.get("ten_sam_produkt") is not True:
                 reasons.append("AI: strona nie pasuje do produktu"
                                + (f" ({result.get('uwagi')})" if result.get("uwagi") else ""))
+            desc, desc_reasons = review_description(desc, row, source, row_label)
+            reasons += desc_reasons
         else:
             reasons.append("nie udało się wygenerować opisu")
 
@@ -1113,18 +1218,20 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
     rejections: list[str] = []
     image, image_ok, image_file, rejected = "", False, "", ""
     # Najpierw zdjęcie serii ze sklepu producenta (najlepsza jakość, bez znaków wodnych).
-    shop = image_candidates_from_producer_shop(row, source, result, row_label) if source else []
+    shop = image_candidates_from_producer_shop(row, source, result, row_label) if source and with_images else []
     if shop:
         image, image_ok, image_file, rejected = pick_image(shop, images_dir, base_name, tried, rejections)
-    if source and not image:
+    if with_images and source and not image:
         image, image_ok, image_file, rejected = pick_image(
             [(u, True, source["url"]) for u in image_candidates_from_source(m, source)],
             images_dir, base_name, tried, rejections)
-    if not image:
+    if with_images and not image:
         found = image_candidates_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
         image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried, rejections)
         rejected = reason or rejected
-    if not image:
+    if not with_images:
+        pass  # --bez-zdjec: PEWNY zależy tylko od źródła i opisu
+    elif not image:
         log.info("%s zdjęcie: kandydaci — sklep producenta %d, strona źródłowa %d, sprawdzone %d%s",
                  row_label, len(shop), len(image_candidates_from_source(m, source)) if source else 0,
                  len(tried), "" if rejections else ", brak kandydatów")
@@ -1667,6 +1774,8 @@ def main() -> None:
                         help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
     parser.add_argument("--zatwierdz", metavar="PLIK",
                         help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
+    parser.add_argument("--bez-zdjec", action="store_true",
+                        help="Tylko opisy: bez szukania i pobierania zdjęć; PEWNY zależy od źródła i opisu")
     args = parser.parse_args()
 
     if args.aktualizuj:
@@ -1738,8 +1847,10 @@ def main() -> None:
              args.search, args.workers)
 
     records = df_in.to_dict("records")
-    images_dir = None if args.bez_pobierania else os.path.join(
+    images_dir = None if (args.bez_pobierania or args.bez_zdjec) else os.path.join(
         os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR)
+    if args.bez_zdjec:
+        log.info("Tryb --bez-zdjec: tylko opisy, zdjęcia nie są szukane.")
     if images_dir:
         # Ścieżki w CSV względem bieżącego folderu (zwykle "zdjecia/28846_AG0828.jpg").
         images_dir = os.path.relpath(images_dir)
@@ -1752,7 +1863,8 @@ def main() -> None:
             for batch_start in range(start, end, CHECKPOINT_EVERY):
                 batch_end = min(batch_start + CHECKPOINT_EVERY, end)
                 # pool.map zachowuje kolejność wierszy, więc plik wyjściowy ma ten sam porządek co wejściowy.
-                results = list(pool.map(lambda p: process_row(records[p], p, args.search, images_dir),
+                results = list(pool.map(lambda p: process_row(records[p], p, args.search, images_dir,
+                                                              not args.bez_zdjec),
                                         range(batch_start, batch_end)))
                 append_batch(results, columns, args.output)
 
