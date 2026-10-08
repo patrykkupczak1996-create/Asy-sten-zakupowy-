@@ -1023,11 +1023,11 @@ def save_image(data: bytes, ext: str, images_dir: str, base_name: str) -> str:
     return path
 
 
-MAX_IMAGE_TRIES = 6          # ilu kandydatów na zdjęcie sprawdzić na produkt
+MAX_IMAGE_TRIES = 15         # ilu kandydatów na zdjęcie sprawdzić na produkt (sklep + źródło + wyszukiwarka)
 
 
 def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
-               base_name: str, tried: set[str]) -> tuple[str, bool, str, str]:
+               base_name: str, tried: set[str], log_rejections: list[str] | None = None) -> tuple[str, bool, str, str]:
     """Pierwsze zdjęcie, które przejdzie wszystkie filtry.
 
     Zwraca (url, czy_potwierdzone, ścieżka_pliku, powód_ostatniego_odrzucenia).
@@ -1039,12 +1039,16 @@ def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
         tried.add(url)
         if image_url_looks_bad(url):
             last_reason = "logo/baner w adresie"
+            if log_rejections is not None:
+                log_rejections.append(f"{last_reason}: {url}")
             continue
         data, ext, reason = fetch_image(url, referer)
         if not reason:
             reason = check_image(data)
         if reason:
             last_reason = reason
+            if log_rejections is not None:
+                log_rejections.append(f"{reason}: {url}")
             continue
         path = save_image(data, ext, images_dir, base_name) if images_dir else ""
         return url, verified, path, ""
@@ -1091,23 +1095,26 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
     #    i sprawdzany (sygnatura pliku, wymiary, logo/baner) — pierwszy poprawny wygrywa.
     base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
     tried: set[str] = set()
+    rejections: list[str] = []
     image, image_ok, image_file, rejected = "", False, "", ""
     # Najpierw zdjęcie serii ze sklepu producenta (najlepsza jakość, bez znaków wodnych).
     shop = image_candidates_from_producer_shop(row, source, result, row_label) if source else []
     if shop:
-        image, image_ok, image_file, rejected = pick_image(shop, images_dir, base_name, tried)
+        image, image_ok, image_file, rejected = pick_image(shop, images_dir, base_name, tried, rejections)
     if source and not image:
         image, image_ok, image_file, rejected = pick_image(
             [(u, True, source["url"]) for u in image_candidates_from_source(m, source)],
-            images_dir, base_name, tried)
+            images_dir, base_name, tried, rejections)
     if not image:
         found = image_candidates_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
-        image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried)
+        image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried, rejections)
         rejected = reason or rejected
     if not image:
-        log.info("%s zdjęcie: kandydaci — sklep producenta %d, strona źródłowa %d, sprawdzone %d, ostatni powód: %s",
+        log.info("%s zdjęcie: kandydaci — sklep producenta %d, strona źródłowa %d, sprawdzone %d%s",
                  row_label, len(shop), len(image_candidates_from_source(m, source)) if source else 0,
-                 len(tried), rejected or "brak kandydatów")
+                 len(tried), "" if rejections else ", brak kandydatów")
+        for line in rejections:
+            log.info("%s   odrzucone — %s", row_label, line)
         reasons.append(f"brak poprawnego zdjęcia (odrzucone: {rejected})" if rejected else "brak zdjęcia")
     elif not image_ok:
         reasons.append("zdjęcie niepotwierdzone kodem/EAN")
