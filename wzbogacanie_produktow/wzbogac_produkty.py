@@ -75,6 +75,9 @@ PRODUCER_SITES = {
 }
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
+# Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
+# dane do opisu), a zdjęcie szuka gdzie indziej. Dotyczy też ich serwerów ze zdjęciami (np. img.onninen…).
+WATERMARK_SITES = ["onninen.pl"]
 
 # =============================================================================
 # USTAWIENIA PRZETWARZANIA
@@ -419,8 +422,15 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
     return None
 
 
+def is_watermark_site(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host == d or host.endswith("." + d) or d.split(".")[0] in host for d in WATERMARK_SITES)
+
+
 def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
     """Zdjęcia ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
+    if is_watermark_site(source["url"]):
+        return []  # strona ze znakami wodnymi — zdjęcie znajdzie wyszukiwarka obrazów
     with_code = [src for src, alt in source["imgs"] if is_direct_image_url(src) and m.in_short_text(src, alt)]
     og = [src for src in source["og_images"] if is_direct_image_url(src)]
     # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku —
@@ -434,11 +444,13 @@ def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, produce
     """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
     verified: list[tuple[str, bool, str]] = []
     unverified: list[tuple[str, bool, str]] = []
-    queries = [f"site:{d} {code}" for d in producer_sites(producer) + TRUSTED_SITES] if code else []
+    queries = [f"site:{d} {code}" for d in producer_sites(producer) + TRUSTED_SITES
+               if not is_watermark_site("https://" + d)] if code else []
     queries += [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     for query in queries:
         results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
-        candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])]
+        candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])
+                      and not is_watermark_site(r["image"]) and not is_watermark_site(r["page"] or "")]
         pages_checked = 0
         for r in candidates:
             if m.in_short_text(r["image"], r["title"], r["page"]):

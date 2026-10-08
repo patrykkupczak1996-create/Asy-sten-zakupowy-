@@ -135,6 +135,10 @@ Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami prod
 ustawione w `TRUSTED_SITES` (domyślnie `onninen.pl`, `cetel-hurtownia.pl`). Na tych stronach szuka po kodzie
 producenta; EAN sprawdza w ogólnym wyszukiwaniu.
 
+Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
+Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej
+— np. w innej hurtowni czy sklepie z tym samym kodem.
+
 Zdjęcia mniejsze niż 400 px (krótszy bok) są odrzucane jako słabej jakości.
 
 ## Kontrola zdjęć (znak wodny, logo, czy to produkt)
