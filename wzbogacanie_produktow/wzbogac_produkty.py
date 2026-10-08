@@ -68,13 +68,15 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (
 # =============================================================================
 # Gemini udostępnia interfejs zgodny z OpenAI, więc oba działają przez tę samą bibliotekę `openai`.
 AI_PROVIDERS = {
-    "gemini": {"name": "Gemini", "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+    # Gdy model jest przeciążony (503) albo niedostępny (404), skrypt bierze kolejny z listy.
+    "gemini": {"name": "Gemini",
+               "models": os.getenv("GEMINI_MODEL", "gemini-3.8-flash,gemini-3.7-flash,gemini-3.5-flash").split(","),
                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
                "key_env": "GEMINI_API_KEY", "key_url": "https://aistudio.google.com/apikey",
                # Modele Gemini 3.x "myślą" przed odpowiedzią i liczą to do limitu tokenów —
                # mały limit uciąłby opis w połowie.
                "max_tokens": 8000},
-    "openai": {"name": "OpenAI", "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    "openai": {"name": "OpenAI", "models": os.getenv("OPENAI_MODEL", "gpt-4o-mini").split(","),
                "base_url": None,
                "key_env": "OPENAI_API_KEY", "key_url": "https://platform.openai.com/api-keys",
                "max_tokens": 1500},
@@ -252,10 +254,20 @@ def _google(params: dict) -> dict:
     return resp.json()
 
 
+def _ddg_call(method: str, query: str, max_results: int) -> list[dict]:
+    try:
+        return getattr(_ddgs(), method)(query, region="pl-pl", max_results=max_results) or []
+    except Exception as exc:
+        # "No results found" to odpowiedź, nie awaria — nie ma sensu ponawiać tego samego zapytania.
+        if "no results" in str(exc).lower():
+            return []
+        raise
+
+
 def search_pages(query: str, engine: str) -> list[str]:
     """Zwraca listę adresów stron z wyników wyszukiwania."""
     if engine == "ddg":
-        return [r.get("href", "") for r in _ddgs().text(query, region="pl-pl", max_results=10) or []]
+        return [r.get("href", "") for r in _ddg_call("text", query, 10)]
     if engine == "serpapi":
         return [r.get("link", "") for r in _serpapi({"engine": "google", "q": query}).get("organic_results", [])]
     return [i.get("link", "") for i in _google({"q": query}).get("items", [])]
@@ -265,7 +277,7 @@ def search_images(query: str, engine: str) -> list[dict]:
     """Zwraca listę {"image": url_obrazka, "page": url_strony, "title": tytuł}."""
     if engine == "ddg":
         return [{"image": r.get("image", ""), "page": r.get("url", ""), "title": r.get("title", "")}
-                for r in _ddgs().images(query, region="pl-pl", max_results=20) or []]
+                for r in _ddg_call("images", query, 20)]
     if engine == "serpapi":
         data = _serpapi({"engine": "google_images", "q": query})
         return [{"image": r.get("original", ""), "page": r.get("link", ""), "title": r.get("title", "")}
@@ -349,6 +361,7 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
     queries = []
     if code:
         queries.append(f'"{code}" {producer}'.strip())
+        queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
     if ean:
         queries.append(ean)
 
@@ -456,9 +469,21 @@ def clean_html(text: str) -> str:
 
 
 def _call_openai(prompt: str) -> dict:
-    """Zapytanie do wybranego modelu (Gemini lub OpenAI — ten sam interfejs)."""
+    """Zapytanie do wybranego dostawcy; przy przeciążeniu modelu próbuje kolejnych z listy."""
+    last_error: Exception | None = None
+    for model in AI["models"]:
+        try:
+            return _call_model(model.strip(), prompt)
+        except (openai.InternalServerError, openai.NotFoundError) as exc:
+            # 503 "high demand" / model wycofany — od razu kolejny model, bez czekania.
+            log.debug("Model %s niedostępny: %s", model, exc)
+            last_error = exc
+    raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
+
+
+def _call_model(model: str, prompt: str) -> dict:
     request = dict(
-        model=AI["model"],
+        model=model,
         temperature=0.3,
         max_tokens=AI["max_tokens"],
         response_format={"type": "json_object"},
@@ -791,13 +816,34 @@ def approve(output_path: str, accepted_path: str) -> None:
 # =============================================================================
 # AKTUALIZACJA SKRYPTU Z GITHUBA
 # =============================================================================
-UPDATE_BASE_URL = ("https://raw.githubusercontent.com/patrykkupczak1996-create/Asy-sten-zakupowy-/"
-                   "claude/b2b-product-enrichment-script-uve0u0/wzbogacanie_produktow/")
+UPDATE_REPO = "patrykkupczak1996-create/Asy-sten-zakupowy-"
+UPDATE_BRANCH = "claude/b2b-product-enrichment-script-uve0u0"
+UPDATE_DIR = "wzbogacanie_produktow"
+UPDATE_BASE_URL = ""  # pusty = ustalany automatycznie (testy mogą go nadpisać)
 UPDATE_FILES = ("wzbogac_produkty.py", "requirements.txt", "README.md")
 
 
-def _download_text(name: str, timeout: int) -> bytes:
-    resp = requests.get(UPDATE_BASE_URL + name, timeout=timeout)
+def _update_base_url() -> str:
+    """Adres plików z najnowszego commita gałęzi.
+
+    Adres z nazwą gałęzi jest przez kilka minut cache'owany przez GitHub (stara wersja),
+    adres z numerem commita — nie. Gdy API GitHuba nie odpowie, używamy nazwy gałęzi.
+    """
+    if UPDATE_BASE_URL:
+        return UPDATE_BASE_URL
+    ref = UPDATE_BRANCH
+    try:
+        resp = requests.get(f"https://api.github.com/repos/{UPDATE_REPO}/commits/{UPDATE_BRANCH}",
+                            headers={"Accept": "application/vnd.github.sha"}, timeout=10)
+        if resp.status_code == 200 and re.fullmatch(r"[0-9a-f]{40}", resp.text.strip()):
+            ref = resp.text.strip()
+    except Exception:
+        pass
+    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{ref}/{UPDATE_DIR}/"
+
+
+def _download_text(name: str, timeout: int, base_url: str | None = None) -> bytes:
+    resp = requests.get((base_url or _update_base_url()) + name, timeout=timeout)
     resp.raise_for_status()
     return resp.content
 
@@ -818,9 +864,10 @@ def self_update() -> None:
     """Pobiera najnowsze pliki skryptu z GitHuba i podmienia je w folderze skryptu."""
     folder = os.path.dirname(os.path.abspath(__file__))
     downloaded = {}
+    base_url = _update_base_url()
     for name in UPDATE_FILES:
         try:
-            downloaded[name] = _download_text(name, timeout=30)
+            downloaded[name] = _download_text(name, timeout=30, base_url=base_url)
         except Exception as exc:
             sys.exit(f"Nie udało się pobrać {name}: {exc}. Nic nie zostało zmienione.")
     try:
@@ -895,6 +942,9 @@ def main() -> None:
         handlers=[logging.StreamHandler(),
                   logging.FileHandler("wzbogacanie.log", encoding="utf-8")],
     )
+    # Biblioteki (httpx, ddgs, openai) logują każde zapytanie — to zasłania komunikaty skryptu.
+    logging.getLogger().setLevel(logging.WARNING)
+    log.setLevel(logging.INFO)
     check_for_update()
 
     configure_ai(args.ai)
@@ -927,7 +977,7 @@ def main() -> None:
         split_results(args.output)
         return
     log.info("Wierszy w pliku: %d. Start od wiersza %d%s. AI: %s (%s). Wyszukiwarka: %s. Wątki: %d.",
-             total, start + 1, " (wznowienie)" if start else "", AI["name"], AI["model"],
+             total, start + 1, " (wznowienie)" if start else "", AI["name"], ", ".join(AI["models"]),
              args.search, args.workers)
 
     records = df_in.to_dict("records")
