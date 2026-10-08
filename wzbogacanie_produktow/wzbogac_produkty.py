@@ -73,6 +73,12 @@ PRODUCER_SITES = {
     # wyszukiwarek, więc nie da się na nim potwierdzić produktu — produkty AEON potwierdzają hurtownie
     # z TRUSTED_SITES. Tu wpisuj tylko strony producentów, które pokazują kod lub EAN produktu.
 }
+# Wyszukiwarki sklepów producentów, w których kodów nie ma, ale są dobre zdjęcia serii. Skrypt szuka tam
+# po nazwie serii (z karty hurtowni), a model AI wybiera z wyników pozycję zgodną z produktem.
+# {q} = zapytanie. Strona nie musi być w indeksie DuckDuckGo — skrypt używa jej własnej wyszukiwarki.
+PRODUCER_SEARCH = {
+    "AEON": "https://aeon-sale.com/?s={q}&post_type=product",
+}
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
 # Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
@@ -180,9 +186,29 @@ Zasady:
 4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
    Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
 5. Nie wspominaj w opisie o stronie źródłowej ani o innych sklepach.
+6. "pelna_nazwa": pełna nazwa handlowa produktu ze strony źródłowej (bez ceny i kodów sklepu).
+7. "zapytanie_producent": 2–5 słów do znalezienia TEJ SERII w sklepie producenta: nazwa serii/linii
+   (np. OptiValve), rodzaj produktu i najważniejsza cecha odróżniająca (np. "zasuwa gaz kołnierzowa
+   OptiValve typ A"). Bez średnicy DN, ciśnienia PN i kodów. Puste, jeśli nie da się ustalić.
 
 Odpowiedz WYŁĄCZNIE obiektem JSON:
-{{"ten_sam_produkt": true lub false, "uwagi": "...", "opis_html": "..."}}"""
+{{"ten_sam_produkt": true lub false, "uwagi": "...", "opis_html": "...",
+  "pelna_nazwa": "...", "zapytanie_producent": "..."}}"""
+
+PROMPT_PICK_PRODUCER_ITEM = """Szukamy w sklepie producenta {producer} zdjęcia produktu:
+- Nazwa w kartotece: {name}
+- Pełna nazwa z hurtowni: {full_name}
+
+Wyniki wyszukiwania w sklepie producenta:
+{items}
+
+Wskaż numer pozycji, która jest DOKŁADNIE tym samym rodzajem i serią produktu. Muszą się zgadzać
+(jeśli są podane): rodzaj (np. zasuwa, łącznik), przeznaczenie (gaz / woda), sposób połączenia
+(kołnierzowa, z króćcami PE, kielichowa, gwintowana), typ i seria (np. OptiValve typ A vs OptiValve Plus),
+długość zabudowy (F4 / F5), materiał korpusu. Pozycja może dotyczyć całej serii bez podanej średnicy;
+jeśli jednak ma podaną INNĄ średnicę DN niż szukany produkt — nie pasuje. Gdy nie masz pewności, zwróć 0.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON: {{"numer": liczba, "uzasadnienie": "krótko"}}"""
 
 PROMPT_NAME_ONLY = """Napisz opis produktu do sklepu internetowego B2B.
 
@@ -352,19 +378,33 @@ def is_direct_image_url(url: str) -> bool:
     return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
 
 
-def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]]] | None:
-    """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>]) albo None."""
+def html_doc(resp: requests.Response):
+    """Drzewo HTML z poprawnym kodowaniem (polskie znaki) także dla stron, które go nie deklarują."""
     import lxml.html
+
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"  # requests domyślnie zakłada latin-1
+    text = resp.text[:3_000_000]
+    try:
+        return lxml.html.fromstring(text)
+    except ValueError:  # deklaracja <?xml encoding=...?> w napisie — lxml chce wtedy bajtów
+        return lxml.html.fromstring(text.encode("utf-8"))
+
+
+def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | None:
+    """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>], tytuł) albo None."""
 
     try:
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
         if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
             return None
-        doc = lxml.html.fromstring(resp.content[:3_000_000])
+        doc = html_doc(resp)
     except Exception as exc:
         log.debug("Nie udało się pobrać %s: %s", url, exc)
         return None
 
+    titles = doc.xpath('//meta[@property="og:title"]/@content') or doc.xpath("//h1//text()") or doc.xpath("//title/text()")
+    title = re.sub(r"\s+", " ", " ".join(t.strip() for t in titles[:1])).strip()
     og_images = [urljoin(url, u) for u in doc.xpath(
         '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
     imgs = []
@@ -376,7 +416,7 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]]] | None:
         bad.drop_tree()
     # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
     text = re.sub(r"\s+", " ", " ".join(doc.itertext())).strip()
-    return text, og_images, imgs
+    return text, og_images, imgs, title
 
 
 def producer_sites(producer: str) -> list[str]:
@@ -412,13 +452,14 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
             page = fetch_page(url)
             if not page:
                 continue
-            text, og_images, imgs = page
+            text, og_images, imgs = page[0], page[1], page[2]
             pos = m.find(text)
             if pos is None:
                 continue
             start = max(0, pos - SOURCE_EXCERPT_CHARS // 3)
             return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS],
-                    "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer)}
+                    "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
+                    "title": page[3] if len(page) > 3 else ""}
     return None
 
 
@@ -437,6 +478,73 @@ def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
     # na jego stronie bierzemy też pozostałe zdjęcia (logo/ikonki odpadną w filtrach).
     rest = [src for src, _ in source["imgs"] if is_direct_image_url(src)] if source.get("producer_site") else []
     return list(dict.fromkeys(with_code + og + rest))
+
+
+_shop_cache: dict[str, list[tuple[str, str]]] = {}
+_shop_cache_lock = threading.Lock()
+
+
+def search_producer_shop(template: str, query: str) -> list[tuple[str, str]]:
+    """[(tytuł, adres)] produktów z wyników wewnętrznej wyszukiwarki sklepu producenta (z pamięcią podręczną)."""
+    from urllib.parse import quote_plus
+
+    url = template.format(q=quote_plus(query))
+    with _shop_cache_lock:
+        if url in _shop_cache:
+            return _shop_cache[url]
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+    resp.raise_for_status()
+    doc = html_doc(resp)
+    found: dict[str, str] = {}
+    for a in doc.xpath("//a[@href]"):
+        href = urljoin(url, a.get("href"))
+        if "/product/" not in href or "add-to-cart" in href:
+            continue
+        title = re.sub(r"\s+", " ", a.text_content()).strip()
+        if len(title) > len(found.get(href, "")):
+            found[href] = title
+    items = [(t, h) for h, t in found.items() if len(t) >= 5][:40]
+    with _shop_cache_lock:
+        _shop_cache[url] = items
+    return items
+
+
+def image_candidates_from_producer_shop(row: dict, source: dict | None, ai_result: dict | None,
+                                        row_label: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z karty serii w sklepie producenta, wybranej przez AI z wyników wyszukiwania po nazwie."""
+    template = PRODUCER_SEARCH.get(row["producer"].strip().upper())
+    query = str((ai_result or {}).get("zapytanie_producent") or "").strip()
+    if not template or not query or not source or (ai_result or {}).get("ten_sam_produkt") is not True:
+        return []
+    words = query.split()
+    items: list[tuple[str, str]] = []
+    # Sklep szuka wszystkich słów naraz — przy braku wyników skracamy zapytanie od końca (max 3 próby).
+    for n in range(len(words), max(len(words) - 3, 1), -1):
+        items = with_retry(search_producer_shop, template, " ".join(words[:n]),
+                           what=f"{row_label} sklep producenta '{' '.join(words[:n])}'") or []
+        if items:
+            break
+    if not items:
+        return []
+    listing = "\n".join(f"{i}. {title}" for i, (title, _) in enumerate(items, 1))
+    full_name = str(ai_result.get("pelna_nazwa") or source.get("title") or row["name"])
+    answer = with_retry(ai_json, PROMPT_PICK_PRODUCER_ITEM.format(
+        producer=row["producer"], name=row["name"], full_name=full_name, items=listing),
+        what=f"{row_label} wybór w sklepie producenta") or {}
+    try:
+        number = int(answer.get("numer") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    if not 1 <= number <= len(items):
+        log.info("%s sklep producenta: brak pasującej pozycji (%s)", row_label, answer.get("uzasadnienie", ""))
+        return []
+    title, url = items[number - 1]
+    log.info("%s sklep producenta: %s", row_label, title)
+    page = fetch_page(url)
+    if not page:
+        return []
+    shop_source = {"url": url, "og_images": page[1], "imgs": page[2], "producer_site": True}
+    return [(u, True, url) for u in image_candidates_from_source(ProductMatcher("", "", ""), shop_source)]
 
 
 def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
@@ -578,9 +686,23 @@ def _call_ollama(model: str, prompt: str) -> dict:
     return parse_json((data.get("message") or {}).get("content") or "{}")
 
 
-def _call_model(model: str, prompt: str) -> dict:
+def ai_json(prompt: str) -> dict:
+    """Dowolne zapytanie do modelu z odpowiedzią JSON (bez wymogu opisu)."""
+    last_error: Exception | None = None
+    for model in AI["models"]:
+        try:
+            return _call_model(model.strip(), prompt, require_desc=False)
+        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError,
+                openai.RateLimitError) as exc:
+            last_error = exc
+    raise last_error
+
+
+def _call_model(model: str, prompt: str, require_desc: bool = True) -> dict:
     if AI["name"] == "Ollama":
         data = _call_ollama(model, prompt)
+        if not require_desc:
+            return data
         data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
         if not data["opis_html"]:
             raise ValueError("Model zwrócił pusty opis")
@@ -605,6 +727,8 @@ def _call_model(model: str, prompt: str) -> dict:
     if choice.finish_reason == "length":
         raise ValueError("Odpowiedź ucięta (limit tokenów)")
     data = parse_json(choice.message.content or "{}")
+    if not require_desc:
+        return data
     data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
     if not data["opis_html"]:
         raise ValueError("Model zwrócił pusty opis")
@@ -793,6 +917,7 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
 
     # 2. Opis
     desc = ""
+    result = None
     if not row["name"]:
         reasons.append("brak nazwy produktu")
     else:
@@ -810,7 +935,11 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
     base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
     tried: set[str] = set()
     image, image_ok, image_file, rejected = "", False, "", ""
-    if source:
+    # Najpierw zdjęcie serii ze sklepu producenta (najlepsza jakość, bez znaków wodnych).
+    shop = image_candidates_from_producer_shop(row, source, result, row_label) if source else []
+    if shop:
+        image, image_ok, image_file, rejected = pick_image(shop, images_dir, base_name, tried)
+    if source and not image:
         image, image_ok, image_file, rejected = pick_image(
             [(u, True, source["url"]) for u in image_candidates_from_source(m, source)],
             images_dir, base_name, tried)

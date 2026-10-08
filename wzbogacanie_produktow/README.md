@@ -135,6 +135,13 @@ Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami prod
 ustawione w `TRUSTED_SITES` (domyślnie `onninen.pl`, `cetel-hurtownia.pl`). Na tych stronach szuka po kodzie
 producenta; EAN sprawdza w ogólnym wyszukiwaniu.
 
+**Sklep producenta bez kodów (np. AEON)** — w `PRODUCER_SEARCH` jest adres wewnętrznej wyszukiwarki sklepu
+(`https://aeon-sale.com/?s={q}&post_type=product`). Gdy hurtownia potwierdzi produkt po kodzie, model AI
+wyciąga z jej karty pełną nazwę serii (np. „zasuwa gaz OptiValve typ A kołnierzowa”), skrypt wpisuje ją
+w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycję tej samej serii (rodzaj,
+gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
+pasuje na pewno, skrypt bierze zdjęcie z innych stron.
+
 Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
 Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej
 — np. w innej hurtowni czy sklepie z tym samym kodem.
