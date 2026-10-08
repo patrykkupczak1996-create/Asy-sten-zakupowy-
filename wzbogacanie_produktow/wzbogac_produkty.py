@@ -188,10 +188,13 @@ Zasady:
 1. Najpierw sprawdź, czy tekst ze strony dotyczy DOKŁADNIE tego produktu: ten sam kod lub EAN
    i parametry zgodne z nazwą (np. DN, PN, średnice). Jeśli cokolwiek się nie zgadza,
    ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
-2. Opis: około 1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
-   {abbreviations}. Wyjaśnij zastosowanie produktu.
+2. Opis: DO około 1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
+   {abbreviations}. Wyjaśnij zastosowanie produktu. Jeśli źródło ma mało danych, opis ma być
+   KRÓTSZY — 400 znaków samych faktów jest lepsze niż 1000 znaków z ogólnikami.
 3. Używaj WYŁĄCZNIE faktów z nazwy i z tekstu źródłowego. Jeśli czegoś tam nie ma
    (materiał, norma, masa, wymiary, certyfikaty), POMIŃ to — nie zgaduj. Pisz rzeczowo.
+   ZAKAZANE są ogólniki, których nie ma w źródle: o jakości, trwałości, odporności (na korozję,
+   chemikalia, warunki atmosferyczne), zgodności z normami/standardami, łatwości montażu, niezawodności.
 4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
    Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
 5. Nie wspominaj w opisie o stronie źródłowej ani o innych sklepach.
@@ -228,10 +231,11 @@ DANE Z KARTOTEKI:
 - Kategoria: {category}
 
 Nie mamy karty katalogowej tego produktu, więc:
-1. Opis: około 800–1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
+1. Opis: DO około 600 znaków (bez znaczników HTML) — krótko. Rozwiń skróty techniczne z nazwy, np.
    {abbreviations}. Wyjaśnij typowe zastosowanie tego rodzaju produktu.
 2. Używaj WYŁĄCZNIE informacji wynikających z nazwy i kategorii. NIE podawaj materiałów,
-   norm, masy, wymiarów ani certyfikatów, których nie ma w nazwie.
+   norm, masy, wymiarów ani certyfikatów, których nie ma w nazwie. ZAKAZANE są ogólniki o jakości,
+   trwałości, odporności, zgodności z normami, łatwości montażu i niezawodności.
 3. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
    Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
 
@@ -440,8 +444,11 @@ def note_response(url: str, status: int) -> None:
             _refusals[host] = 0
 
 
-def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | None:
-    """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>], tytuł) albo None."""
+def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, list[str]] | None:
+    """Pobiera stronę HTML.
+
+    Zwraca (tekst, og:image, [(src, alt) wszystkich <img>], tytuł, zdjęcia z galerii produktu) albo None.
+    """
     if domain_blocked(url):
         return None
     try:
@@ -458,7 +465,7 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | 
     title = re.sub(r"\s+", " ", " ".join(t.strip() for t in titles[:1])).strip()
     og_images = [urljoin(url, u) for u in doc.xpath(
         '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
-    imgs = []
+    imgs, gallery = [], []
     for img in doc.xpath("//img"):
         # Pełny rozmiar: WooCommerce trzyma go w data-large_image, inne sklepy w data-zoom-image / srcset.
         src = (img.get("data-large_image") or img.get("data-zoom-image") or img.get("data-large")
@@ -466,11 +473,19 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | 
                or img.get("data-src") or img.get("src") or "")
         if src and not src.startswith("data:"):
             imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
+            # Zdjęcie z galerii TEGO produktu (nie z „podobnych produktów”, banerów, menu czy stopki).
+            around = " ".join(img.xpath("ancestor::*/@class") + img.xpath("ancestor::*/@id")).lower()
+            in_gallery = (img.get("data-large_image") or img.get("data-zoom-image")
+                          or any(k in around for k in ("gallery", "product-image", "product__image", "product-photo")))
+            elsewhere = any(k in around for k in ("related", "upsell", "up-sells", "cross-sell", "crosssell",
+                                                  "recent", "widget", "footer", "header", "menu", "banner"))
+            if in_gallery and not elsewhere:
+                gallery.append(urljoin(url, src))
     for bad in doc.xpath("//script|//style|//noscript|//svg"):
         bad.drop_tree()
     # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
     text = re.sub(r"\s+", " ", " ".join(doc.itertext())).strip()
-    return text, og_images, imgs, title
+    return text, og_images, imgs, title, gallery
 
 
 def producer_sites(producer: str) -> list[str]:
@@ -574,7 +589,7 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
             start = max(0, pos - SOURCE_EXCERPT_CHARS // 3)
             return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS],
                     "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
-                    "title": page[3] if len(page) > 3 else ""}
+                    "title": page[3] if len(page) > 3 else "", "gallery": page[4] if len(page) > 4 else []}
     return None
 
 
@@ -589,9 +604,10 @@ def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
         return []  # strona ze znakami wodnymi — zdjęcie znajdzie wyszukiwarka obrazów
     with_code = [src for src, alt in source["imgs"] if is_direct_image_url(src) and m.in_short_text(src, alt)]
     og = [src for src in source["og_images"] if is_direct_image_url(src)]
-    # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku —
-    # na jego stronie bierzemy też pozostałe zdjęcia (logo/ikonki odpadną w filtrach).
-    rest = [src for src, _ in source["imgs"] if is_direct_image_url(src)] if source.get("producer_site") else []
+    # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku — na jego
+    # stronie bierzemy też zdjęcia z GALERII produktu (nie wszystkie obrazki: „podobne produkty” to inne towary).
+    rest = ([src for src in source.get("gallery", []) if is_direct_image_url(src)]
+            if source.get("producer_site") else [])
     return list(dict.fromkeys(with_code + og + rest))
 
 
@@ -658,7 +674,8 @@ def image_candidates_from_producer_shop(row: dict, source: dict | None, ai_resul
     page = fetch_page(url)
     if not page:
         return []
-    shop_source = {"url": url, "og_images": page[1], "imgs": page[2], "producer_site": True}
+    shop_source = {"url": url, "og_images": page[1], "imgs": page[2], "producer_site": True,
+                   "gallery": page[4] if len(page) > 4 else []}
     return [(u, True, url) for u in image_candidates_from_source(ProductMatcher("", "", ""), shop_source)]
 
 
@@ -807,7 +824,7 @@ def _call_ollama(model: str, prompt: str) -> dict:
         "format": "json",
         "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.3, "num_predict": AI["max_tokens"]},
+        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.1, "num_predict": AI["max_tokens"]},
     })
     resp.raise_for_status()
     data = resp.json()
@@ -839,7 +856,7 @@ def _call_model(model: str, prompt: str, require_desc: bool = True) -> dict:
         return data
     request = dict(
         model=model,
-        temperature=0.3,
+        temperature=0.1,  # niska — mniej „twórczości”, czyli mniej zmyślonych cech
         max_tokens=AI["max_tokens"],
         response_format={"type": "json_object"},
         messages=[{"role": "system", "content": SYSTEM_PROMPT},
@@ -1121,11 +1138,14 @@ Produkt: {name}
 
 Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"zdjecie_produktu": true lub false,
+  "rodzaj_zgodny": true lub false,
   "znak_wodny": true lub false,
   "uwagi": "krótko po polsku, co jest nie tak (puste, jeśli wszystko w porządku)"}}
 
 - "zdjecie_produktu": true tylko jeśli widać fizyczny produkt (np. zasuwa, zawór, łącznik, kształtka, rura).
   false dla: logo, banera, samego napisu, rysunku technicznego, tabeli, zrzutu strony, zdjęcia innego przedmiotu.
+- "rodzaj_zgodny": true tylko jeśli na zdjęciu jest TEN SAM RODZAJ produktu co w nazwie powyżej
+  (np. nazwa „łącznik” → na zdjęciu łącznik; hydrant, zasuwa, rura czy zawór to wtedy false).
 - "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny, logo sklepu lub firmy, adres strony www,
   numer telefonu albo inny napis, który nie jest częścią samego produktu (napisy odlane/nadrukowane
   na produkcie się nie liczą)."""
@@ -1209,6 +1229,8 @@ def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
     problems = []
     if answer.get("zdjecie_produktu") is not True:
         problems.append("to nie jest zdjęcie produktu")
+    elif answer.get("rodzaj_zgodny") is not True:
+        problems.append("zdjęcie przedstawia inny rodzaj produktu")
     if answer.get("znak_wodny") is not False:
         problems.append("znak wodny / nałożone logo lub napis")
     if problems:
@@ -1232,6 +1254,7 @@ def find_replacement(record: dict, engine: str, images_dir: str | None) -> tuple
         page = fetch_page(val(COL_SOURCE))
         if page:
             source = {"url": val(COL_SOURCE), "excerpt": "", "og_images": page[1], "imgs": page[2],
+                      "gallery": page[4] if len(page) > 4 else [],
                       "producer_site": is_producer_url(val(COL_SOURCE), val(COL_PRODUCER))}
             candidates += [(u, True, source["url"]) for u in image_candidates_from_source(m, source)]
     candidates += image_candidates_from_search(m, val(COL_CODE), val(COL_EAN), val(COL_PRODUCER), engine, label)
