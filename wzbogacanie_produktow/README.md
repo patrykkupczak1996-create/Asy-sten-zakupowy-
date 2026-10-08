@@ -124,10 +124,12 @@ jedno zdjęcie na wszystkie DN). Listę stron ustawiasz na górze skryptu w `PRO
 
 ```python
 PRODUCER_SITES = {
-    "AEON": ["aeon-sale.com", "aeonvalves.com", "aeon-online.com"],
-    # "HAWLE": ["hawle.pl"],   # kolejni producenci z bazy
+    # "HAWLE": ["hawle.pl"],   # producent, którego strona pokazuje kod lub EAN produktu
 }
 ```
+
+Wpisuj tylko strony, na których przy produkcie widać kod producenta lub EAN — inaczej skrypt nie potwierdzi
+na nich produktu, a tylko wydłuży szukanie. (Sklep AEON aeon-sale.com kodów nie pokazuje, więc go tu nie ma.)
 
 Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami produktów (kod producenta + EAN),
 ustawione w `TRUSTED_SITES` (domyślnie `onninen.pl`, `cetel-hurtownia.pl`). Na tych stronach szuka po kodzie

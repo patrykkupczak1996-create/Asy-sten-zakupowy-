@@ -69,7 +69,9 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (
 # Klucz: nazwa producenta dokładnie jak w kolumnie /producer@name (wielkość liter bez znaczenia).
 # Dopisz kolejnych producentów z bazy, np. "HAWLE": ["hawle.pl"].
 PRODUCER_SITES = {
-    "AEON": ["aeon-sale.com", "aeonvalves.com", "aeon-online.com"],
+    # AEON: aeon-sale.com nie pokazuje kodów producenta (AG0828) ani EAN i nie ma go w indeksie
+    # wyszukiwarek, więc nie da się na nim potwierdzić produktu — produkty AEON potwierdzają hurtownie
+    # z TRUSTED_SITES. Tu wpisuj tylko strony producentów, które pokazują kod lub EAN produktu.
 }
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
