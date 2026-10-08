@@ -142,6 +142,10 @@ w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycj�
 gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
 pasuje na pewno, skrypt bierze zdjęcie z innych stron.
 
+**Bezpośrednie wyszukiwanie w hurtowni** — `DIRECT_SEARCH` zawiera adres wyszukiwarki hurtowni (domyślnie
+Onninen). Skrypt wpisuje tam kod producenta i bierze kartę, w której adresie jest ten kod — bez DuckDuckGo,
+więc wynik jest powtarzalny. DuckDuckGo jest używane dopiero, gdy hurtownia nic nie znajdzie.
+
 Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
 Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej
 — np. w innej hurtowni czy sklepie z tym samym kodem.

@@ -79,6 +79,12 @@ PRODUCER_SITES = {
 PRODUCER_SEARCH = {
     "AEON": "https://aeon-sale.com/?s={q}&post_type=product",
 }
+# Bezpośrednie wyszukiwanie po kodzie we własnej wyszukiwarce hurtowni — bez DuckDuckGo, więc wynik jest
+# powtarzalny i szybszy. "url": adres strony wyników ({q} = kod), "link": fragment adresu karty produktu.
+# Skrypt bierze tylko karty, w których adresie jest kod produktu (warianty z innymi kodami odpadają).
+DIRECT_SEARCH = {
+    "onninen.pl": {"url": "https://onninen.pl/wyszukiwanie?query={q}", "link": "/produkt/"},
+}
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
 # Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
@@ -448,9 +454,33 @@ def is_producer_url(url: str, producer: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in producer_sites(producer))
 
 
+def direct_search_urls(m: ProductMatcher, code: str) -> list[str]:
+    """Karty produktów z wyszukiwarek hurtowni (DIRECT_SEARCH), które mają kod produktu w adresie."""
+    from urllib.parse import quote_plus
+
+    urls: list[str] = []
+    for domain, cfg in DIRECT_SEARCH.items():
+        try:
+            resp = requests.get(cfg["url"].format(q=quote_plus(code)), headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+            resp.raise_for_status()
+        except Exception as exc:
+            log.debug("Wyszukiwarka %s niedostępna: %s", domain, exc)
+            continue
+        if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        # Szukamy adresów w całym kodzie strony — działa też, gdy wyniki są w danych JSON dla JavaScriptu.
+        link = re.escape(cfg["link"])
+        page = resp.text.replace("\\/", "/")  # JSON zapisuje ukośniki jako \/
+        for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
+            url = urljoin(f"https://{domain}/", found)
+            if m.in_short_text(url) and url not in urls:
+                urls.append(url)
+    return urls
+
+
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
                          row_label: str) -> dict | None:
-    """Szuka strony, na której występuje kod/EAN produktu — najpierw na stronach producenta."""
+    """Szuka strony, na której występuje kod/EAN produktu — najpierw w wyszukiwarkach hurtowni."""
     # Najpierw zwykłe zapytania (najczęściej trafiają), "site:" tylko gdy one nic nie dadzą —
     # każde dodatkowe zapytanie zwiększa ryzyko, że DuckDuckGo zacznie blokować.
     queries = []
@@ -463,10 +493,14 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
         queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
 
     checked: set[str] = set()
-    for query in queries:
-        urls = [u for u in (with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or [])
-                if u and u not in checked and not urlparse(u).path.lower().endswith(".pdf")]
-        if query.startswith("site:"):
+    direct = direct_search_urls(m, code) if code else []
+    for query in ([None] if direct else []) + queries:
+        if query is None:
+            urls = direct  # wyniki z wyszukiwarek hurtowni — sprawdzane przed DuckDuckGo
+        else:
+            urls = [u for u in (with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or [])
+                    if u and u not in checked and not urlparse(u).path.lower().endswith(".pdf")]
+        if query and query.startswith("site:"):
             # Część wyszukiwarek ignoruje "site:" i zwraca przypadkowe strony — zostawiamy tylko tę domenę.
             domain = query.split()[0].removeprefix("site:")
             urls = [u for u in urls if urlparse(u).netloc.lower().removeprefix("www.").endswith(domain)]
