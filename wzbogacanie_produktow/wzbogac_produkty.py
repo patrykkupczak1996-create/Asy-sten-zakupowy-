@@ -147,7 +147,7 @@ STATUS_OK = "PEWNY"
 STATUS_REVIEW = "DO_AKCEPTACJI"
 ACCEPT_VALUES = {"TAK", "T", "OK", "X", "1", "YES", "Y"}
 
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")  # .webp: m.in. sklepy na WordPressie (np. AEON)
 BROWSER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
@@ -395,6 +395,19 @@ def html_doc(resp: requests.Response):
         return lxml.html.fromstring(text.encode("utf-8"))
 
 
+def largest_from_srcset(srcset: str) -> str:
+    """Największy wariant z atrybutu srcset ("a.jpg 300w, b.jpg 1200w")."""
+    best, best_w = "", -1
+    for part in srcset.split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        width = int(bits[1][:-1]) if len(bits) > 1 and bits[1].endswith("w") and bits[1][:-1].isdigit() else 0
+        if width > best_w:
+            best, best_w = bits[0], width
+    return best
+
+
 def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | None:
     """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>], tytuł) albo None."""
 
@@ -413,7 +426,10 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str] | 
         '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
     imgs = []
     for img in doc.xpath("//img"):
-        src = img.get("data-zoom-image") or img.get("data-large") or img.get("data-src") or img.get("src") or ""
+        # Pełny rozmiar: WooCommerce trzyma go w data-large_image, inne sklepy w data-zoom-image / srcset.
+        src = (img.get("data-large_image") or img.get("data-zoom-image") or img.get("data-large")
+               or largest_from_srcset(img.get("data-srcset") or img.get("srcset") or "")
+               or img.get("data-src") or img.get("src") or "")
         if src and not src.startswith("data:"):
             imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
     for bad in doc.xpath("//script|//style|//noscript|//svg"):
@@ -435,14 +451,16 @@ def is_producer_url(url: str, producer: str) -> bool:
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
                          row_label: str) -> dict | None:
     """Szuka strony, na której występuje kod/EAN produktu — najpierw na stronach producenta."""
+    # Najpierw zwykłe zapytania (najczęściej trafiają), "site:" tylko gdy one nic nie dadzą —
+    # każde dodatkowe zapytanie zwiększa ryzyko, że DuckDuckGo zacznie blokować.
     queries = []
-    if code:  # na wybranych stronach tylko po kodzie — EAN sprawdza ogólne wyszukiwanie niżej
-        queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
     if code:
         queries.append(f'"{code}" {producer}'.strip())
         queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
     if ean:
         queries.append(ean)
+    if code:  # na wybranych stronach tylko po kodzie
+        queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
 
     checked: set[str] = set()
     for query in queries:
@@ -883,6 +901,13 @@ def save_image(data: bytes, ext: str, images_dir: str, base_name: str) -> str:
         old = os.path.join(images_dir, base_name + old_ext)
         if os.path.exists(old):
             os.remove(old)
+    if ext == ".webp":
+        # Lokalna kopia jako JPG — pewniejsza przy ręcznym wgrywaniu do sklepu i w starszych programach.
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as img:
+            out = io.BytesIO()
+            img.convert("RGB").save(out, "JPEG", quality=92)
+        data, ext = out.getvalue(), ".jpg"
     path = os.path.join(images_dir, base_name + ext)
     with open(path + ".part", "wb") as fh:
         fh.write(data)
@@ -972,6 +997,9 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
         image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried)
         rejected = reason or rejected
     if not image:
+        log.info("%s zdjęcie: kandydaci — sklep producenta %d, strona źródłowa %d, sprawdzone %d, ostatni powód: %s",
+                 row_label, len(shop), len(image_candidates_from_source(m, source)) if source else 0,
+                 len(tried), rejected or "brak kandydatów")
         reasons.append(f"brak poprawnego zdjęcia (odrzucone: {rejected})" if rejected else "brak zdjęcia")
     elif not image_ok:
         reasons.append("zdjęcie niepotwierdzone kodem/EAN")
