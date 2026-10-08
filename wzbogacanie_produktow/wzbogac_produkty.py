@@ -117,7 +117,8 @@ REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
 OLLAMA_NUM_CTX = 8192        # kontekst lokalnego modelu (tokeny) — mieści polecenie + tekst strony
 AI_TIMEOUT = 180             # timeout odpowiedzi modelu AI — przy przeciążeniu Gemini odpowiada wolno
 PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
-MAX_PAGES_PER_PRODUCT = 6    # ile stron z wyników wyszukiwania sprawdzić na produkt
+MAX_PAGES_PER_PRODUCT = 12   # ile stron z wyników wyszukiwania sprawdzić łącznie na produkt
+MAX_PAGES_PER_QUERY = 3      # …i ile z wyników jednego zapytania (żeby jedno złe zapytanie nie zużyło limitu)
 SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
 IMAGES_DIR = "zdjecia"       # folder na pobrane zdjęcia (obok pliku wynikowego)
 MAX_IMAGE_BYTES = 15_000_000
@@ -445,12 +446,17 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
 
     checked: set[str] = set()
     for query in queries:
-        urls = with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or []
-        for url in urls:
+        urls = [u for u in (with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or [])
+                if u and u not in checked and not urlparse(u).path.lower().endswith(".pdf")]
+        if query.startswith("site:"):
+            # Część wyszukiwarek ignoruje "site:" i zwraca przypadkowe strony — zostawiamy tylko tę domenę.
+            domain = query.split()[0].removeprefix("site:")
+            urls = [u for u in urls if urlparse(u).netloc.lower().removeprefix("www.").endswith(domain)]
+        # Najpierw adresy, w których jest kod/EAN (np. onninen.pl/produkt/…-AG0828) — najczęściej trafione.
+        urls.sort(key=lambda u: not m.in_short_text(u))
+        for url in urls[:MAX_PAGES_PER_QUERY]:
             if len(checked) >= MAX_PAGES_PER_PRODUCT:
                 return None
-            if not url or url in checked or urlparse(url).path.lower().endswith(".pdf"):
-                continue
             checked.add(url)
             page = fetch_page(url)
             if not page:
