@@ -3,28 +3,36 @@
 Wzbogacanie bazy produktów B2B (armatura, zasuwy) pod import do IdoSell.
 
 Dla każdego wiersza pliku CSV (eksport z Google Sheets):
-  1. generuje opis SEO w czystym HTML przez OpenAI (gpt-4o-mini) -> kolumna "Opis_HTML",
-  2. wyszukuje URL zdjęcia produktu ("Producent kod_producenta", fallback: EAN)
-     -> kolumna "Zdjecie_URL".
+  1. szuka w internecie strony produktu po kodzie producenta i EAN i sprawdza,
+     czy ten kod / EAN faktycznie występuje na stronie (weryfikacja),
+  2. generuje opis SEO w czystym HTML przez OpenAI (gpt-4o-mini) WYŁĄCZNIE na podstawie
+     nazwy i tekstu tej strony; model dodatkowo ocenia, czy strona opisuje ten sam produkt,
+  3. bierze zdjęcie z potwierdzonej strony (albo z wyszukiwarki obrazów, jeśli jego źródło
+     też zawiera kod / EAN),
+  4. nadaje status:
+       PEWNY          — wszystko potwierdzone kodem/EAN -> plik *_pewne.csv (do importu),
+       DO_AKCEPTACJI  — cokolwiek niepotwierdzone (z podanym powodem) -> plik *_do_akceptacji.csv.
 
-Postęp jest zapisywany co CHECKPOINT_EVERY wierszy do pliku wyjściowego.
-Po restarcie skrypt liczy wiersze już zapisane w pliku wyjściowym i zaczyna
-od następnego, więc nic nie jest generowane (ani opłacane) dwa razy.
+Po przejrzeniu pliku do akceptacji (kolumna "Akceptacja" = TAK) komenda
+    py wzbogac_produkty.py --output produkty_wzbogacone.csv --zatwierdz zaakceptowane.csv
+tworzy plik *_do_importu.csv = produkty pewne + zaakceptowane ręcznie.
 
-Uruchomienie (szczegóły w README.md w tym katalogu):
-    python wzbogac_produkty.py --input produkty.csv --output produkty_wzbogacone.csv
+Postęp jest zapisywany co CHECKPOINT_EVERY wierszy. Po restarcie skrypt zaczyna od
+pierwszego niezapisanego wiersza, więc nic nie jest generowane (ani opłacane) dwa razy.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
+import json
 import logging
 import os
 import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -40,11 +48,11 @@ import openai
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")          # wymagany, np. "sk-proj-..."
 
-# Wyszukiwarka zdjęć — wybierz JEDNĄ (parametr --image-source lub poniżej):
-#   "ddg"     — DuckDuckGo, darmowe, bez klucza (ale potrafi blokować przy dużej liczbie zapytań)
-#   "serpapi" — SerpApi (Google Images), płatne, najlepsza trafność
+# Wyszukiwarka (strony produktów + zdjęcia) — parametr --search lub poniżej:
+#   "ddg"     — DuckDuckGo, darmowe, bez klucza (przy dużej liczbie zapytań potrafi blokować)
+#   "serpapi" — SerpApi (Google), płatne, najlepsza trafność i stabilność
 #   "google"  — Google Custom Search JSON API (100 zapytań/dzień za darmo)
-IMAGE_SOURCE = os.getenv("IMAGE_SOURCE", "ddg")
+SEARCH_ENGINE = os.getenv("SEARCH_ENGINE", "ddg")
 
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")        # tylko dla "serpapi"
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")          # tylko dla "google"
@@ -57,7 +65,10 @@ OPENAI_MODEL = "gpt-4o-mini"
 CHECKPOINT_EVERY = 10        # co ile wierszy zapisywać postęp na dysk
 RETRY_WAIT_SECONDS = 5       # ile czekać przed ponowieniem po błędzie
 MAX_RETRIES = 6              # ile razy ponawiać jedno zapytanie, zanim wiersz zostanie pominięty
-REQUEST_TIMEOUT = 60         # timeout pojedynczego zapytania HTTP (sekundy)
+REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
+PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
+MAX_PAGES_PER_PRODUCT = 6    # ile stron z wyników wyszukiwania sprawdzić na produkt
+SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
 DEFAULT_WORKERS = 3          # ile wierszy przetwarzać równolegle w ramach jednej paczki
 
 # Nazwy kolumn wejściowych (dokładnie jak w eksporcie z IdoSell / Google Sheets)
@@ -68,34 +79,81 @@ COL_EAN = "/sizes/size@code_producer"
 COL_CATEGORY = "/navigation/site/menu/item@textid[pol]"
 COL_NAME = "/description/name[pol]"
 
+# Kolumny dopisywane przez skrypt
 COL_DESC = "Opis_HTML"
 COL_IMAGE = "Zdjecie_URL"
+COL_SOURCE = "Zrodlo_URL"
+COL_STATUS = "Status"
+COL_REASON = "Powod"
+COL_ACCEPT = "Akceptacja"
+NEW_COLUMNS = [COL_DESC, COL_IMAGE, COL_SOURCE, COL_STATUS, COL_REASON]
+
+STATUS_OK = "PEWNY"
+STATUS_REVIEW = "DO_AKCEPTACJI"
+ACCEPT_VALUES = {"TAK", "T", "OK", "X", "1", "YES", "Y"}
+
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.5",
+}
 
 SYSTEM_PROMPT = "Jesteś ekspertem SEO w branży instalacyjnej i B2B."
 
-USER_PROMPT_TEMPLATE = """Napisz opis produktu do sklepu internetowego B2B.
+ABBREVIATIONS = """DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
+KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = kółko ręczne,
+F4/F5 = długość zabudowy wg normy EN 558, ŻEL. = żeliwna,
+RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 lub OD63 = średnica
+zewnętrzna rury w mm, PE/PVC = do rur z polietylenu i PVC, Z PE = z końcówkami PE"""
 
-Dane produktu:
+PROMPT_WITH_SOURCE = """Napisz opis produktu do sklepu internetowego B2B.
+
+DANE Z KARTOTEKI:
 - Nazwa techniczna: {name}
 - Producent: {producer}
+- Kod producenta: {code}
+- EAN: {ean}
 - Kategoria: {category}
 
-Wymagania:
-1. Długość: około 1000 znaków (ze spacjami, nie licząc znaczników HTML).
-2. Rozwiń wszystkie skróty techniczne z nazwy i wyjaśnij je klientowi, np.
-   DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
-   KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = kółko ręczne,
-   F4/F5 = długość zabudowy wg normy EN 558, ŻEL. = żeliwna,
-   RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 lub OD63 = średnica
-   zewnętrzna rury w mm, PE/PVC = do rur z polietylenu i PVC, Z PE = z końcówkami PE itp.
-3. Wyjaśnij zastosowanie produktu (gdzie i do czego się go montuje) i jego zalety.
-4. Nie wymyślaj parametrów, których nie da się wywnioskować z nazwy (np. masy,
-   certyfikatów, ceny). Pisz rzeczowo, językiem branżowym, bez przesadnych superlatywów.
-5. Formatowanie: WYŁĄCZNIE czysty HTML z użyciem tagów <h2>, <p>, <ul>, <li>, <strong>.
-   Bez <html>, <body>, <head>, bez stylów CSS, bez Markdown i bez bloków ```.
-   Zacznij od <h2> z czytelną nazwą produktu."""
+TEKST ZE STRONY ŹRÓDŁOWEJ ({url}):
+\"\"\"
+{source}
+\"\"\"
 
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+Zasady:
+1. Najpierw sprawdź, czy tekst ze strony dotyczy DOKŁADNIE tego produktu: ten sam kod lub EAN
+   i parametry zgodne z nazwą (np. DN, PN, średnice). Jeśli cokolwiek się nie zgadza,
+   ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
+2. Opis: około 1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
+   {abbreviations}. Wyjaśnij zastosowanie produktu.
+3. Używaj WYŁĄCZNIE faktów z nazwy i z tekstu źródłowego. Jeśli czegoś tam nie ma
+   (materiał, norma, masa, wymiary, certyfikaty), POMIŃ to — nie zgaduj. Pisz rzeczowo.
+4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
+   Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
+5. Nie wspominaj w opisie o stronie źródłowej ani o innych sklepach.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"ten_sam_produkt": true lub false, "uwagi": "...", "opis_html": "..."}}"""
+
+PROMPT_NAME_ONLY = """Napisz opis produktu do sklepu internetowego B2B.
+
+DANE Z KARTOTEKI:
+- Nazwa techniczna: {name}
+- Producent: {producer}
+- Kod producenta: {code}
+- Kategoria: {category}
+
+Nie mamy karty katalogowej tego produktu, więc:
+1. Opis: około 800–1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
+   {abbreviations}. Wyjaśnij typowe zastosowanie tego rodzaju produktu.
+2. Używaj WYŁĄCZNIE informacji wynikających z nazwy i kategorii. NIE podawaj materiałów,
+   norm, masy, wymiarów ani certyfikatów, których nie ma w nazwie.
+3. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
+   Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"opis_html": "..."}}"""
 
 log = logging.getLogger("wzbogacanie")
 
@@ -111,7 +169,7 @@ def with_retry(func, *args, what: str = "zapytanie", **kwargs):
     """Wywołuje func; przy błędzie czeka RETRY_WAIT_SECONDS i ponawia (do MAX_RETRIES razy).
 
     Zwraca wynik func albo None, jeśli wszystkie próby się nie powiodły
-    (wiersz zostanie wtedy zapisany z pustą wartością, a skrypt jedzie dalej).
+    (wiersz trafi wtedy do akceptacji, a skrypt jedzie dalej).
     """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -131,15 +189,203 @@ def with_retry(func, *args, what: str = "zapytanie", **kwargs):
             log.warning("%s: błąd (próba %d/%d): %s: %s",
                         what, attempt, MAX_RETRIES, type(exc).__name__, msg[:200])
             if attempt < MAX_RETRIES:
-                # Przy kolejnych błędach z rzędu czekamy trochę dłużej (5 s, 10 s, 15 s...),
+                # Przy kolejnych błędach z rzędu czekamy dłużej (5 s, 10 s, 15 s...),
                 # co pomaga przy limitach zapytań (rate limit).
                 time.sleep(RETRY_WAIT_SECONDS * attempt)
-    log.error("%s: wszystkie %d próby nieudane — zapisuję pustą wartość.", what, MAX_RETRIES)
+    log.error("%s: wszystkie %d próby nieudane.", what, MAX_RETRIES)
     return None
 
 
 # =============================================================================
-# KROK 1: OPIS HTML (OpenAI)
+# WYSZUKIWARKI
+# =============================================================================
+def _ddgs():
+    try:
+        from ddgs import DDGS  # nowa nazwa paczki
+    except ImportError:
+        from duckduckgo_search import DDGS  # starsza nazwa paczki
+    return DDGS(timeout=REQUEST_TIMEOUT)
+
+
+def _serpapi(params: dict) -> dict:
+    resp = requests.get("https://serpapi.com/search.json",
+                        params={**params, "api_key": SERPAPI_API_KEY, "hl": "pl", "gl": "pl"},
+                        timeout=REQUEST_TIMEOUT)
+    if resp.status_code in (401, 403):
+        raise FatalError(f"SerpApi odrzuciło klucz API (HTTP {resp.status_code}).")
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data and "hasn't returned any results" not in data["error"]:
+        raise RuntimeError(f"SerpApi: {data['error']}")
+    return data
+
+
+def _google(params: dict) -> dict:
+    resp = requests.get("https://www.googleapis.com/customsearch/v1",
+                        params={**params, "key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "num": 10},
+                        timeout=REQUEST_TIMEOUT)
+    if resp.status_code in (400, 401, 403) and "quota" not in resp.text.lower():
+        raise FatalError(f"Google Custom Search odrzucił zapytanie (HTTP {resp.status_code}): {resp.text[:200]}")
+    resp.raise_for_status()  # 429 / limit dzienny -> zwykły błąd, ponawiamy
+    return resp.json()
+
+
+def search_pages(query: str, engine: str) -> list[str]:
+    """Zwraca listę adresów stron z wyników wyszukiwania."""
+    if engine == "ddg":
+        return [r.get("href", "") for r in _ddgs().text(query, region="pl-pl", max_results=10) or []]
+    if engine == "serpapi":
+        return [r.get("link", "") for r in _serpapi({"engine": "google", "q": query}).get("organic_results", [])]
+    return [i.get("link", "") for i in _google({"q": query}).get("items", [])]
+
+
+def search_images(query: str, engine: str) -> list[dict]:
+    """Zwraca listę {"image": url_obrazka, "page": url_strony, "title": tytuł}."""
+    if engine == "ddg":
+        return [{"image": r.get("image", ""), "page": r.get("url", ""), "title": r.get("title", "")}
+                for r in _ddgs().images(query, region="pl-pl", max_results=20) or []]
+    if engine == "serpapi":
+        data = _serpapi({"engine": "google_images", "q": query})
+        return [{"image": r.get("original", ""), "page": r.get("link", ""), "title": r.get("title", "")}
+                for r in data.get("images_results", [])]
+    data = _google({"q": query, "searchType": "image"})
+    return [{"image": i.get("link", ""), "page": (i.get("image") or {}).get("contextLink", ""),
+             "title": i.get("title", "")} for i in data.get("items", [])]
+
+
+# =============================================================================
+# WERYFIKACJA: CZY STRONA / ZDJĘCIE DOTYCZY TEGO PRODUKTU
+# =============================================================================
+def code_regex(code: str) -> re.Pattern | None:
+    """Wzorzec dopasowujący kod jako osobny ciąg, z tolerancją na spacje/myślniki (AG-0828, AG 0828)."""
+    chars = [re.escape(c) for c in code if c.isalnum()]
+    if len(chars) < 4:  # zbyt krótki kod dałby przypadkowe trafienia
+        return None
+    return re.compile(r"(?<![0-9A-Za-z])" + r"[\s\-./]?".join(chars) + r"(?![0-9A-Za-z])", re.IGNORECASE)
+
+
+class ProductMatcher:
+    """Sprawdza, czy tekst zawiera EAN albo kod producenta (+ nazwę producenta)."""
+
+    def __init__(self, code: str, ean: str, producer: str):
+        self.ean_re = code_regex(ean) if len(re.sub(r"\D", "", ean)) >= 8 else None
+        self.code_re = code_regex(code)
+        self.producer = producer.lower()
+
+    def find(self, text: str) -> int | None:
+        """Pozycja potwierdzającego dopasowania w tekście albo None."""
+        if self.ean_re and (m := self.ean_re.search(text)):
+            return m.start()
+        if self.code_re and (m := self.code_re.search(text)):
+            # Sam kod (np. AG0828) może się powtórzyć u innego producenta — wymagamy też nazwy producenta.
+            if not self.producer or self.producer in text.lower():
+                return m.start()
+        return None
+
+    def in_short_text(self, *texts: str) -> bool:
+        """Dopasowanie w krótkich tekstach (tytuł, adres URL) — wystarczy sam kod lub EAN."""
+        joined = " ".join(texts)
+        return bool((self.ean_re and self.ean_re.search(joined)) or (self.code_re and self.code_re.search(joined)))
+
+
+def is_direct_image_url(url: str) -> bool:
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
+
+
+def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]]] | None:
+    """Pobiera stronę HTML. Zwraca (tekst, obrazki og:image, [(src, alt) wszystkich <img>]) albo None."""
+    import lxml.html
+
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+        if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
+            return None
+        doc = lxml.html.fromstring(resp.content[:3_000_000])
+    except Exception as exc:
+        log.debug("Nie udało się pobrać %s: %s", url, exc)
+        return None
+
+    og_images = [urljoin(url, u) for u in doc.xpath(
+        '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
+    imgs = []
+    for img in doc.xpath("//img"):
+        src = img.get("data-zoom-image") or img.get("data-large") or img.get("data-src") or img.get("src") or ""
+        if src and not src.startswith("data:"):
+            imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
+    for bad in doc.xpath("//script|//style|//noscript|//svg"):
+        bad.drop_tree()
+    # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
+    text = re.sub(r"\s+", " ", " ".join(doc.itertext())).strip()
+    return text, og_images, imgs
+
+
+def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
+                         row_label: str) -> dict | None:
+    """Szuka strony, na której występuje kod/EAN produktu. Zwraca dane strony albo None."""
+    queries = []
+    if code:
+        queries.append(f'"{code}" {producer}'.strip())
+    if ean:
+        queries.append(ean)
+
+    checked: set[str] = set()
+    for query in queries:
+        urls = with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or []
+        for url in urls:
+            if len(checked) >= MAX_PAGES_PER_PRODUCT:
+                return None
+            if not url or url in checked or urlparse(url).path.lower().endswith(".pdf"):
+                continue
+            checked.add(url)
+            page = fetch_page(url)
+            if not page:
+                continue
+            text, og_images, imgs = page
+            pos = m.find(text)
+            if pos is None:
+                continue
+            start = max(0, pos - SOURCE_EXCERPT_CHARS // 3)
+            return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS],
+                    "og_images": og_images, "imgs": imgs}
+    return None
+
+
+def image_from_source(m: ProductMatcher, source: dict) -> str:
+    """Zdjęcie ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
+    for src, alt in source["imgs"]:
+        if is_direct_image_url(src) and m.in_short_text(src, alt):
+            return src
+    for src in source["og_images"]:
+        if is_direct_image_url(src):
+            return src
+    return ""
+
+
+def image_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
+                      row_label: str) -> tuple[str, bool]:
+    """Zdjęcie z wyszukiwarki obrazów. Zwraca (url, czy_zweryfikowane)."""
+    first_unverified = ""
+    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    for query in queries:
+        results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
+        candidates = [r for r in results if is_direct_image_url(r["image"])]
+        for r in candidates:
+            if m.in_short_text(r["image"], r["title"], r["page"]):
+                return r["image"], True
+        # Kod nie występuje w tytule/adresie — sprawdzamy stronę, z której pochodzi obrazek (max 3).
+        for r in candidates[:3]:
+            page = fetch_page(r["page"]) if r["page"] else None
+            if page and m.find(page[0]) is not None:
+                return r["image"], True
+        if candidates and not first_unverified:
+            first_unverified = candidates[0]["image"]
+    return first_unverified, False
+
+
+# =============================================================================
+# OPIS HTML (OpenAI)
 # =============================================================================
 _openai_client: OpenAI | None = None
 
@@ -153,135 +399,120 @@ def get_openai_client() -> OpenAI:
 
 
 def clean_html(text: str) -> str:
-    """Usuwa ewentualne bloki ```html ... ``` i zbędne białe znaki z odpowiedzi modelu."""
+    """Usuwa ewentualne bloki ```html ... ``` i zbędne białe znaki."""
     text = text.strip()
     text = re.sub(r"^```(?:html)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
-    # Jedna linia na tag — CSV jest wtedy czytelniejszy, a HTML działa tak samo.
     text = re.sub(r">\s*\n\s*<", "><", text)
     return text.strip()
 
 
-def _call_openai(name: str, producer: str, category: str) -> str:
-    # Ścieżka kategorii z IdoSell ("A\\B\\C") jest czytelniejsza dla modelu jako "A > B > C".
-    category = " > ".join(part.strip() for part in category.split("\\") if part.strip())
+def _call_openai(prompt: str) -> dict:
     response = get_openai_client().chat.completions.create(
         model=OPENAI_MODEL,
-        temperature=0.5,
-        max_tokens=1200,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_PROMPT_TEMPLATE.format(
-                name=name, producer=producer or "brak danych", category=category or "brak danych")},
-        ],
+        temperature=0.3,
+        max_tokens=1500,
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": prompt}],
     )
-    content = response.choices[0].message.content or ""
-    html = clean_html(content)
-    if not html:
-        raise ValueError("Model zwrócił pustą odpowiedź")
-    return html
+    data = json.loads(response.choices[0].message.content or "{}")
+    data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
+    if not data["opis_html"]:
+        raise ValueError("Model zwrócił pusty opis")
+    return data
 
 
-def generate_description(name: str, producer: str, category: str, row_label: str) -> str:
-    if not name:
-        log.warning("%s: brak nazwy produktu — pomijam opis.", row_label)
-        return ""
-    return with_retry(_call_openai, name, producer, category,
-                      what=f"{row_label} OpenAI") or ""
-
-
-# =============================================================================
-# KROK 2: URL ZDJĘCIA
-# =============================================================================
-def is_direct_image_url(url: str) -> bool:
-    if not url or not url.startswith(("http://", "https://")):
-        return False
-    return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
-
-
-def _search_ddg(query: str) -> list[str]:
-    try:
-        from ddgs import DDGS  # nowa nazwa paczki
-    except ImportError:
-        from duckduckgo_search import DDGS  # starsza nazwa paczki
-    results = DDGS(timeout=REQUEST_TIMEOUT).images(query, max_results=20)
-    return [r.get("image", "") for r in results or []]
-
-
-def _search_serpapi(query: str) -> list[str]:
-    resp = requests.get(
-        "https://serpapi.com/search.json",
-        params={"engine": "google_images", "q": query, "api_key": SERPAPI_API_KEY, "hl": "pl", "gl": "pl"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    if resp.status_code in (401, 403):
-        raise FatalError(f"SerpApi odrzuciło klucz API (HTTP {resp.status_code}).")
-    resp.raise_for_status()
-    data = resp.json()
-    if "error" in data and "hasn't returned any results" not in data["error"]:
-        raise RuntimeError(f"SerpApi: {data['error']}")
-    return [r.get("original", "") for r in data.get("images_results", [])]
-
-
-def _search_google(query: str) -> list[str]:
-    resp = requests.get(
-        "https://www.googleapis.com/customsearch/v1",
-        params={"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": query, "searchType": "image", "num": 10},
-        timeout=REQUEST_TIMEOUT,
-    )
-    if resp.status_code in (400, 401, 403) and "quota" not in resp.text.lower():
-        raise FatalError(f"Google Custom Search odrzucił zapytanie (HTTP {resp.status_code}): {resp.text[:200]}")
-    resp.raise_for_status()  # 429 / limit dzienny -> zwykły błąd, ponawiamy
-    return [item.get("link", "") for item in resp.json().get("items", [])]
-
-
-SEARCHERS = {"ddg": _search_ddg, "serpapi": _search_serpapi, "google": _search_google}
-
-
-def _first_image(query: str, source: str) -> str:
-    """Zwraca pierwszy bezpośredni URL .jpg/.png albo "" (brak wyników to nie błąd)."""
-    for url in SEARCHERS[source](query):
-        if is_direct_image_url(url):
-            return url
-    return ""
-
-
-def find_image(producer: str, code: str, ean: str, source: str, row_label: str) -> str:
-    queries = []
-    if code:
-        queries.append(f"{producer} {code}".strip())
-    if ean:
-        queries.append(ean)  # fallback: kod EAN
-    for query in queries:
-        url = with_retry(_first_image, query, source, what=f"{row_label} zdjęcie '{query}'")
-        if url:
-            return url
-    return ""
+def generate_description(row: dict, source: dict | None, row_label: str) -> dict | None:
+    # Ścieżka kategorii z IdoSell ("A\B\C") jest czytelniejsza dla modelu jako "A > B > C".
+    category = " > ".join(p.strip() for p in row["category"].split("\\") if p.strip()) or "brak danych"
+    common = dict(name=row["name"], producer=row["producer"] or "brak danych",
+                  code=row["code"] or "brak", ean=row["ean"] or "brak",
+                  category=category, abbreviations=ABBREVIATIONS)
+    if source:
+        prompt = PROMPT_WITH_SOURCE.format(**common, url=source["url"], source=source["excerpt"])
+    else:
+        prompt = PROMPT_NAME_ONLY.format(**common)
+    return with_retry(_call_openai, prompt, what=f"{row_label} OpenAI")
 
 
 # =============================================================================
-# PRZETWARZANIE WIERSZY I CHECKPOINTY
+# PRZETWARZANIE WIERSZA
 # =============================================================================
-def process_row(row: dict, position: int, source: str, skip_images: bool) -> dict:
+def process_row(record: dict, position: int, engine: str) -> dict:
     def val(col: str) -> str:
-        return str(row.get(col, "") or "").strip()
+        return str(record.get(col, "") or "").strip()
 
+    row = {"name": val(COL_NAME), "producer": val(COL_PRODUCER), "code": val(COL_CODE),
+           "ean": val(COL_EAN), "category": val(COL_CATEGORY)}
     row_label = f"[wiersz {position + 1}, id={val(COL_ID)}]"
-    out = dict(row)
-    out[COL_DESC] = generate_description(val(COL_NAME), val(COL_PRODUCER), val(COL_CATEGORY), row_label)
-    out[COL_IMAGE] = "" if skip_images else find_image(
-        val(COL_PRODUCER), val(COL_CODE), val(COL_EAN), source, row_label)
-    log.info("%s opis: %s, zdjęcie: %s", row_label,
-             f"{len(out[COL_DESC])} zn." if out[COL_DESC] else "BRAK",
-             out[COL_IMAGE] or "BRAK")
+    m = ProductMatcher(row["code"], row["ean"], row["producer"])
+    reasons: list[str] = []
+
+    # 1. Strona produktu potwierdzona kodem/EAN
+    source = None
+    if m.code_re or m.ean_re:
+        source = find_verified_source(m, row["code"], row["ean"], row["producer"], engine, row_label)
+    if not source:
+        reasons.append("nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy")
+
+    # 2. Opis
+    desc = ""
+    if not row["name"]:
+        reasons.append("brak nazwy produktu")
+    else:
+        result = generate_description(row, source, row_label)
+        if result:
+            desc = result["opis_html"]
+            if source and result.get("ten_sam_produkt") is not True:
+                reasons.append("AI: strona nie pasuje do produktu"
+                               + (f" ({result.get('uwagi')})" if result.get("uwagi") else ""))
+        else:
+            reasons.append("nie udało się wygenerować opisu")
+
+    # 3. Zdjęcie
+    image, image_ok = "", False
+    if source:
+        image = image_from_source(m, source)
+        image_ok = bool(image)
+    if not image:
+        image, image_ok = image_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
+    if not image:
+        reasons.append("brak zdjęcia")
+    elif not image_ok:
+        reasons.append("zdjęcie niepotwierdzone kodem/EAN")
+
+    out = dict(record)
+    out[COL_DESC] = desc
+    out[COL_IMAGE] = image
+    out[COL_SOURCE] = source["url"] if source else ""
+    out[COL_STATUS] = STATUS_REVIEW if reasons else STATUS_OK
+    out[COL_REASON] = "; ".join(reasons)
+    log.info("%s %s%s", row_label, out[COL_STATUS], f" — {out[COL_REASON]}" if reasons else "")
     return out
+
+
+# =============================================================================
+# PLIKI: CHECKPOINTY, PODZIAŁ NA PEWNE / DO AKCEPTACJI, ZATWIERDZANIE
+# =============================================================================
+def side_path(output_path: str, suffix: str) -> str:
+    base, ext = os.path.splitext(output_path)
+    return f"{base}_{suffix}{ext or '.csv'}"
+
+
+def read_csv(path: str) -> pd.DataFrame:
+    # dtype=str + keep_default_na=False: EAN-y i kody zostają tekstem (bez "5.9e+12" i "nan").
+    return pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
 
 
 def count_done_rows(output_path: str, df_in: pd.DataFrame) -> int:
     """Ile wierszy jest już w pliku wyjściowym (= od którego wiersza wznowić)."""
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         return 0
-    df_out = pd.read_csv(output_path, dtype=str, keep_default_na=False, encoding="utf-8")
+    df_out = read_csv(output_path)
+    if COL_STATUS not in df_out.columns:
+        sys.exit(f"Plik {output_path} pochodzi ze starszej wersji skryptu (brak kolumny '{COL_STATUS}'). "
+                 "Usuń go albo podaj inną nazwę w --output.")
     done = len(df_out)
     if done > len(df_in):
         sys.exit(f"Plik wyjściowy ma więcej wierszy ({done}) niż wejściowy ({len(df_in)}). "
@@ -306,20 +537,147 @@ def append_batch(rows: list[dict], columns: list[str], output_path: str) -> None
         os.fsync(fh.fileno())
 
 
+def split_results(output_path: str) -> None:
+    """Dzieli plik roboczy na *_pewne.csv (do importu) i *_do_akceptacji.csv (do przejrzenia)."""
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        return
+    df = read_csv(output_path)
+    ok_path, review_path = side_path(output_path, "pewne"), side_path(output_path, "do_akceptacji")
+
+    df[df[COL_STATUS] == STATUS_OK].to_csv(ok_path, index=False, encoding="utf-8-sig")
+
+    review = df[df[COL_STATUS] != STATUS_OK].copy()
+    review.insert(0, COL_ACCEPT, "")
+    # Nie nadpisujemy pliku, w którym ktoś już zaczął akceptować produkty.
+    if os.path.exists(review_path):
+        try:
+            existing = read_csv(review_path)
+            if COL_ACCEPT in existing.columns and existing[COL_ACCEPT].str.strip().ne("").any():
+                review_path = side_path(output_path, "do_akceptacji_nowe")
+                log.warning("Plik do akceptacji ma już Twoje oznaczenia — nowa wersja trafia do %s.", review_path)
+        except Exception:
+            pass
+    review.to_csv(review_path, index=False, encoding="utf-8-sig")
+    log.info("PODZIAŁ: %d pewnych -> %s | %d do akceptacji -> %s",
+             len(df) - len(review), ok_path, len(review), review_path)
+    write_preview(df, side_path(output_path, "podglad").rsplit(".", 1)[0] + ".html")
+
+
+ALLOWED_TAGS = ("h2", "h3", "p", "ul", "ol", "li", "strong", "b", "em", "br")
+
+
+def safe_html(fragment: str) -> str:
+    """Zostawia tylko proste tagi opisu (bez atrybutów) — reszta jest wyświetlana jako tekst."""
+    escaped = html.escape(fragment, quote=False)
+    tags = "|".join(ALLOWED_TAGS)
+    return re.sub(rf"&lt;(/?)({tags})(?:\s[^&]*)?&gt;", r"<\1\2>", escaped, flags=re.IGNORECASE)
+
+
+def write_preview(df: pd.DataFrame, path: str) -> None:
+    """Strona HTML do przejrzenia wyników w przeglądarce: wyrenderowany opis + miniatura zdjęcia."""
+    def col(row, name):
+        return str(row.get(name, "") or "")
+
+    cards = []
+    for _, row in df.iterrows():
+        ok = col(row, COL_STATUS) == STATUS_OK
+        img = col(row, COL_IMAGE)
+        src = col(row, COL_SOURCE)
+        cards.append(
+            f'<article class="card {"ok" if ok else "review"}">'
+            f'<header><span class="badge">{"PEWNY" if ok else "DO AKCEPTACJI"}</span> '
+            f'<b>{html.escape(col(row, COL_NAME))}</b>'
+            f'<small>id {html.escape(col(row, COL_ID))} · kod {html.escape(col(row, COL_CODE))} · '
+            f'EAN {html.escape(col(row, COL_EAN))}</small></header>'
+            + (f'<p class="reason">⚠ {html.escape(col(row, COL_REASON))}</p>' if not ok else "")
+            + '<div class="body">'
+            + (f'<a href="{html.escape(img)}" target="_blank"><img loading="lazy" src="{html.escape(img)}" '
+               f'alt="" referrerpolicy="no-referrer"></a>' if img else '<div class="noimg">brak zdjęcia</div>')
+            + f'<div class="desc">{safe_html(col(row, COL_DESC)) or "<i>brak opisu</i>"}'
+            + (f'<p class="src">Źródło: <a href="{html.escape(src)}" target="_blank" rel="noreferrer">'
+               f'{html.escape(src)}</a></p>' if src else "")
+            + "</div></div></article>")
+    n_ok = int((df[COL_STATUS] == STATUS_OK).sum())
+    page = f"""<!doctype html><html lang="pl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Podgląd produktów</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:0;background:#f4f5f7;color:#1d2433}}
+.top{{position:sticky;top:0;background:#fff;padding:12px 16px;border-bottom:1px solid #ddd;z-index:1}}
+.top button{{margin-right:6px;padding:6px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}}
+.top button.on{{background:#1d2433;color:#fff}}
+main{{max-width:1100px;margin:0 auto;padding:16px}}
+.card{{background:#fff;border-radius:10px;padding:14px 16px;margin-bottom:14px;border-left:6px solid #2e9d5b}}
+.card.review{{border-left-color:#e0a100}}
+header small{{display:block;color:#667;margin-top:4px}}
+.badge{{font-size:12px;padding:2px 8px;border-radius:10px;background:#e3f4ea;color:#1f6f40;margin-right:6px}}
+.review .badge{{background:#fff3cf;color:#8a6100}}
+.reason{{color:#8a6100;background:#fff8e1;padding:6px 10px;border-radius:6px}}
+.body{{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}}
+.body img{{width:200px;max-height:200px;object-fit:contain;border:1px solid #eee;border-radius:6px;background:#fff}}
+.noimg{{width:200px;height:120px;display:flex;align-items:center;justify-content:center;background:#f0f0f0;color:#888;border-radius:6px}}
+.desc{{flex:1;min-width:260px}} .desc h2{{font-size:18px;margin:4px 0 8px}}
+.src{{font-size:12px;color:#667;word-break:break-all}}
+</style></head><body>
+<div class="top"><button class="on" data-f="all">Wszystkie ({len(df)})</button>
+<button data-f="ok">Pewne ({n_ok})</button><button data-f="review">Do akceptacji ({len(df) - n_ok})</button></div>
+<main>{"".join(cards)}</main>
+<script>
+document.querySelectorAll('.top button').forEach(b=>b.onclick=()=>{{
+  document.querySelectorAll('.top button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.card').forEach(c=>c.style.display=
+    (b.dataset.f==='all'||c.classList.contains(b.dataset.f))?'':'none');
+}});
+</script></body></html>"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    log.info("PODGLĄD w przeglądarce: %s", path)
+
+
+def approve(output_path: str, accepted_path: str) -> None:
+    """Łączy produkty pewne z ręcznie zaakceptowanymi w jeden plik do importu."""
+    ok_path = side_path(output_path, "pewne")
+    if not os.path.exists(ok_path):
+        sys.exit(f"Nie ma pliku {ok_path}. Najpierw uruchom przetwarzanie z tym samym --output.")
+    if not os.path.isfile(accepted_path):
+        sys.exit(f"Nie znaleziono pliku z akceptacją: {accepted_path}")
+    ok = read_csv(ok_path)
+    reviewed = read_csv(accepted_path)
+    if COL_ACCEPT not in reviewed.columns:
+        sys.exit(f"W pliku {accepted_path} brakuje kolumny '{COL_ACCEPT}'.")
+    accepted = reviewed[reviewed[COL_ACCEPT].str.strip().str.upper().isin(ACCEPT_VALUES)].drop(columns=[COL_ACCEPT])
+    accepted[COL_STATUS] = "ZAAKCEPTOWANY"
+    result = pd.concat([ok, accepted], ignore_index=True)
+    if COL_ID in result.columns:
+        result = result.drop_duplicates(subset=[COL_ID], keep="last")
+    import_path = side_path(output_path, "do_importu")
+    result.to_csv(import_path, index=False, encoding="utf-8-sig")
+    print(f"Pewne: {len(ok)}, zaakceptowane ręcznie: {len(accepted)} "
+          f"(odrzucone/pominięte: {len(reviewed) - len(accepted)}). Plik do importu: {import_path}")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 def main() -> None:
     parser = argparse.ArgumentParser(description="Wzbogacanie produktów B2B o opisy HTML i zdjęcia.")
-    parser.add_argument("--input", "-i", required=True,
-                        help="Plik CSV z Google Sheets (ścieżka lub link .../export?format=csv)")
-    parser.add_argument("--output", "-o", default="produkty_wzbogacone.csv", help="Plik wynikowy CSV")
-    parser.add_argument("--image-source", choices=sorted(SEARCHERS), default=IMAGE_SOURCE,
-                        help="Wyszukiwarka zdjęć (domyślnie: %(default)s)")
+    parser.add_argument("--input", "-i", help="Plik CSV z Google Sheets (ścieżka lub link .../export?format=csv)")
+    parser.add_argument("--output", "-o", default="produkty_wzbogacone.csv", help="Plik roboczy z wynikami")
+    parser.add_argument("--search", choices=["ddg", "serpapi", "google"], default=SEARCH_ENGINE,
+                        help="Wyszukiwarka stron i zdjęć (domyślnie: %(default)s)")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help="Ile wierszy przetwarzać równolegle (domyślnie: %(default)s)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Przetwórz tylko N kolejnych wierszy (do testów, np. --limit 5)")
-    parser.add_argument("--no-images", action="store_true", help="Pomiń wyszukiwanie zdjęć")
     parser.add_argument("--sep", default=",", help="Separator kolumn w pliku wejściowym (domyślnie przecinek)")
+    parser.add_argument("--zatwierdz", metavar="PLIK",
+                        help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
     args = parser.parse_args()
+
+    if args.zatwierdz:
+        approve(args.output, args.zatwierdz)
+        return
+    if not args.input:
+        parser.error("podaj --input (plik CSV z produktami) albo --zatwierdz")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -335,13 +693,11 @@ def main() -> None:
     if "TWÓJ" in OPENAI_API_KEY.upper() or "..." in OPENAI_API_KEY:
         sys.exit("OPENAI_API_KEY zawiera przykładowy tekst zamiast prawdziwego klucza. "
                  "Wklej swój klucz z https://platform.openai.com/api-keys.")
-    if not args.no_images:
-        if args.image_source == "serpapi" and not SERPAPI_API_KEY:
-            sys.exit("Wybrano SerpApi, ale brak SERPAPI_API_KEY.")
-        if args.image_source == "google" and not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
-            sys.exit("Wybrano Google Custom Search, ale brak GOOGLE_API_KEY lub GOOGLE_CSE_ID.")
+    if args.search == "serpapi" and not SERPAPI_API_KEY:
+        sys.exit("Wybrano SerpApi, ale brak SERPAPI_API_KEY.")
+    if args.search == "google" and not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
+        sys.exit("Wybrano Google Custom Search, ale brak GOOGLE_API_KEY lub GOOGLE_CSE_ID.")
 
-    # dtype=str + keep_default_na=False: EAN-y i kody zostają tekstem (bez "5.9e+12" i "nan").
     if "://" not in args.input and not os.path.isfile(args.input):
         csv_files = sorted(f for f in os.listdir(".") if f.lower().endswith(".csv"))
         sys.exit(f"Nie znaleziono pliku wejściowego '{args.input}' w folderze {os.getcwd()}.\n"
@@ -356,29 +712,29 @@ def main() -> None:
     if COL_NAME not in df_in.columns:
         sys.exit(f"Nie znaleziono kolumny z nazwą produktu '{COL_NAME}'. Sprawdź separator (--sep).")
 
-    columns = [c for c in df_in.columns if c not in (COL_DESC, COL_IMAGE)] + [COL_DESC, COL_IMAGE]
+    columns = [c for c in df_in.columns if c not in NEW_COLUMNS + [COL_ACCEPT]] + NEW_COLUMNS
     total = len(df_in)
     start = count_done_rows(args.output, df_in)
     end = total if args.limit is None else min(total, start + args.limit)
 
     if start >= total:
-        log.info("Wszystkie %d wiersze są już przetworzone w %s. Nic do zrobienia.", total, args.output)
+        log.info("Wszystkie %d wiersze są już przetworzone w %s.", total, args.output)
+        split_results(args.output)
         return
-    log.info("Wierszy w pliku: %d. Start od wiersza %d%s. Wyszukiwarka zdjęć: %s. Wątki: %d.",
-             total, start + 1, " (wznowienie)" if start else "",
-             "wyłączona" if args.no_images else args.image_source, args.workers)
+    log.info("Wierszy w pliku: %d. Start od wiersza %d%s. Wyszukiwarka: %s. Wątki: %d.",
+             total, start + 1, " (wznowienie)" if start else "", args.search, args.workers)
 
     records = df_in.to_dict("records")
     started_at = time.time()
     done_now = 0
+    exit_code = 0
     try:
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
             for batch_start in range(start, end, CHECKPOINT_EVERY):
                 batch_end = min(batch_start + CHECKPOINT_EVERY, end)
-                positions = range(batch_start, batch_end)
                 # pool.map zachowuje kolejność wierszy, więc plik wyjściowy ma ten sam porządek co wejściowy.
-                results = list(pool.map(
-                    lambda p: process_row(records[p], p, args.image_source, args.no_images), positions))
+                results = list(pool.map(lambda p: process_row(records[p], p, args.search),
+                                        range(batch_start, batch_end)))
                 append_batch(results, columns, args.output)
 
                 done_now += len(results)
@@ -390,13 +746,16 @@ def main() -> None:
         log.error("Zatrzymuję skrypt: %s", exc)
         log.error("Dotychczasowy postęp jest zapisany w %s — po poprawieniu problemu uruchom skrypt ponownie.",
                   args.output)
-        sys.exit(1)
+        exit_code = 1
     except KeyboardInterrupt:
         log.warning("Przerwano (Ctrl+C). Zapisane paczki zostają w %s; niedokończona paczka "
                     "zostanie przetworzona ponownie przy następnym uruchomieniu.", args.output)
-        sys.exit(130)
+        exit_code = 130
 
-    log.info("Gotowe. Przetworzono %d wierszy w tym uruchomieniu. Wynik: %s", done_now, args.output)
+    split_results(args.output)
+    if exit_code:
+        sys.exit(exit_code)
+    log.info("Gotowe. Przetworzono %d wierszy w tym uruchomieniu.", done_now)
 
 
 if __name__ == "__main__":
