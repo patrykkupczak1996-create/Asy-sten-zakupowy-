@@ -81,12 +81,19 @@ AI_PROVIDERS = {
                "base_url": None,
                "key_env": "OPENAI_API_KEY", "key_url": "https://platform.openai.com/api-keys",
                "max_tokens": 1500},
+    # Ollama — model uruchomiony lokalnie na Twoim komputerze (darmowy, bez klucza, potrzebna dobra karta graficzna).
+    "ollama": {"name": "Ollama", "models": os.getenv("OLLAMA_MODEL", "gemma3:12b").split(","),
+               "base_url": os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/v1",
+               "key_env": None, "key_url": "https://ollama.com/download",
+               "max_tokens": 1500,
+               "timeout": 600},  # lokalny model bywa wolny, szczególnie bez karty graficznej
 }
 AI = dict(AI_PROVIDERS["gemini"], key="")  # ustawiane w main() przez configure_ai()
 CHECKPOINT_EVERY = 10        # co ile wierszy zapisywać postęp na dysk
 RETRY_WAIT_SECONDS = 5       # ile czekać przed ponowieniem po błędzie
 MAX_RETRIES = 6              # ile razy ponawiać jedno zapytanie, zanim wiersz zostanie pominięty
 REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
+OLLAMA_NUM_CTX = 8192        # kontekst lokalnego modelu (tokeny) — mieści polecenie + tekst strony
 AI_TIMEOUT = 180             # timeout odpowiedzi modelu AI — przy przeciążeniu Gemini odpowiada wolno
 PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
 MAX_PAGES_PER_PRODUCT = 6    # ile stron z wyników wyszukiwania sprawdzić na produkt
@@ -427,9 +434,32 @@ def image_from_search(m: ProductMatcher, code: str, ean: str, producer: str, eng
 _openai_client: OpenAI | None = None
 
 
+def check_ollama(settings: dict) -> None:
+    """Sprawdza, czy Ollama działa i czy wybrany model jest pobrany."""
+    host = settings["base_url"].removesuffix("/v1")
+    try:
+        resp = requests.get(host + "/api/tags", timeout=10)
+        resp.raise_for_status()
+        installed = {m.get("name", "") for m in resp.json().get("models", [])}
+    except Exception:
+        sys.exit(f"Ollama nie odpowiada pod adresem {host}. Zainstaluj ją z {settings['key_url']} "
+                 "i uruchom (ikona Ollama w zasobniku systemowym), potem spróbuj ponownie.")
+    # "gemma3" bez tagu w Ollamie oznacza "gemma3:latest"
+    names = installed | {n.removesuffix(":latest") for n in installed}
+    missing = [m for m in settings["models"] if m.strip() not in names]
+    if missing:
+        sys.exit(f"W Ollamie brakuje modelu {missing[0]}. Pobierz go poleceniem:  ollama pull {missing[0]}\n"
+                 f"Pobrane modele: {', '.join(sorted(installed)) or 'brak'}. "
+                 "Inny model ustawisz zmienną OLLAMA_MODEL, np. $env:OLLAMA_MODEL=\"qwen3:8b\".")
+
+
 def configure_ai(provider: str) -> None:
     """Wybiera dostawcę AI i sprawdza klucz. Kończy skrypt czytelnym komunikatem, jeśli klucza brak."""
     settings = AI_PROVIDERS[provider]
+    if provider == "ollama":
+        check_ollama(settings)
+        AI.update(settings, key="ollama")  # Ollama nie sprawdza klucza, ale biblioteka wymaga jakiegoś
+        return
     key = GEMINI_API_KEY if provider == "gemini" else OPENAI_API_KEY
     if not key:
         sys.exit(f"Brak klucza {settings['name']}. Ustaw zmienną środowiskową {settings['key_env']} "
@@ -445,7 +475,7 @@ def get_openai_client() -> OpenAI:
     if _openai_client is None:
         # max_retries=0 — ponawianiem zajmuje się with_retry (5 s przerwy, logowanie).
         _openai_client = OpenAI(api_key=AI["key"], base_url=AI["base_url"],
-                                timeout=AI_TIMEOUT, max_retries=0)
+                                timeout=AI.get("timeout", AI_TIMEOUT), max_retries=0)
     return _openai_client
 
 
@@ -485,7 +515,34 @@ def _call_openai(prompt: str) -> dict:
     raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
 
 
+def _call_ollama(model: str, prompt: str) -> dict:
+    """Ollama przez jej własne API — pozwala ustawić większy kontekst (num_ctx).
+
+    Domyślny kontekst Ollamy (2–4 tys. tokenów) ucinałby tekst strony źródłowej.
+    """
+    host = AI["base_url"].removesuffix("/v1")
+    resp = requests.post(host + "/api/chat", timeout=AI.get("timeout", AI_TIMEOUT), json={
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                     {"role": "user", "content": prompt}],
+        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.3, "num_predict": AI["max_tokens"]},
+    })
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("done_reason") == "length":
+        raise ValueError("Odpowiedź ucięta (limit tokenów)")
+    return parse_json((data.get("message") or {}).get("content") or "{}")
+
+
 def _call_model(model: str, prompt: str) -> dict:
+    if AI["name"] == "Ollama":
+        data = _call_ollama(model, prompt)
+        data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
+        if not data["opis_html"]:
+            raise ValueError("Model zwrócił pusty opis")
+        return data
     request = dict(
         model=model,
         temperature=0.3,
@@ -541,9 +598,12 @@ def _track_ai_result(ok: bool) -> None:
         _ai_failures["in_row"] = 0 if ok else _ai_failures["in_row"] + 1
         if _ai_failures["in_row"] >= MAX_AI_FAILURES_IN_ROW:
             raise FatalError(
-                f"{AI['name']} nie odpowiedziało dla {MAX_AI_FAILURES_IN_ROW} produktów z rzędu. Najczęstsza "
-                "przyczyna: wyczerpany limit/brak płatności na koncie (błąd 429 'exceeded your current quota'). "
-                "Sprawdź konto i uruchom skrypt ponownie — zacznie od miejsca, w którym przerwał.")
+                f"{AI['name']} nie odpowiedziało dla {MAX_AI_FAILURES_IN_ROW} produktów z rzędu. "
+                + ("Sprawdź, czy Ollama działa i czy komputerowi starcza pamięci na ten model. "
+                   if AI["name"] == "Ollama" else
+                   "Najczęstsza przyczyna: wyczerpany limit/brak płatności na koncie "
+                   "(błąd 429 'exceeded your current quota'). Sprawdź konto. ")
+                + "Po poprawieniu uruchom skrypt ponownie — zacznie od miejsca, w którym przerwał.")
 
 
 # =============================================================================

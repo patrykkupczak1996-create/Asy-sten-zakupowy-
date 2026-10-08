@@ -57,6 +57,16 @@ Darmowy limit Gemini ma ograniczoną liczbę zapytań na minutę i dzień — pr
 w Google AI Studio, inaczej skrypt będzie często czekał na limit (to nie błąd, tylko wolniejsza praca).
 Inny model Gemini ustawisz zmienną `GEMINI_MODEL`, np. `$env:GEMINI_MODEL="gemini-3.7-flash"`.
 
+**Ollama (darmowo, lokalnie, bez klucza)** — model działa na Twoim komputerze; potrzebna karta graficzna
+(np. RTX 3060 12 GB wystarcza na domyślny `gemma3:12b`):
+
+1. Zainstaluj Ollamę z https://ollama.com/download i uruchom ją.
+2. Pobierz model (jednorazowo, kilka GB): `ollama pull gemma3:12b`
+3. Uruchamiaj skrypt z `--ai ollama`, np. `py wzbogac_produkty.py --input produkty.csv --ai ollama --limit 10`
+
+Inny model: `$env:OLLAMA_MODEL="nazwa:tag"` (najpierw `ollama pull nazwa:tag`). Przy 6–8 GB VRAM wybierz mniejszy model.
+Lokalny model jest darmowy, ale wolniejszy i zwykle słabszy po polsku — porównaj opisy w podglądzie.
+
 **OpenAI (opcjonalnie, zamiast Gemini)** — klucz z https://platform.openai.com/api-keys, ustawiany jako
 `OPENAI_API_KEY`; uruchamiasz wtedy skrypt z `--ai openai`.
 
