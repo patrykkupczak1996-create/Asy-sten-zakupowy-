@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
@@ -475,8 +476,10 @@ def _call_openai(prompt: str) -> dict:
     for model in AI["models"]:
         try:
             return _call_model(model.strip(), prompt)
-        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError) as exc:
-            # 503 "high demand" / model wycofany / brak odpowiedzi — od razu kolejny model, bez czekania.
+        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError,
+                openai.RateLimitError) as exc:
+            # 503 "high demand" / model wycofany / brak odpowiedzi / limit (każdy model Gemini ma
+            # osobny limit) — od razu kolejny model, bez czekania.
             log.debug("Model %s niedostępny: %s", model, exc)
             last_error = exc
     raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
@@ -519,7 +522,28 @@ def generate_description(row: dict, source: dict | None, row_label: str) -> dict
         prompt = PROMPT_WITH_SOURCE.format(**common, url=source["url"], source=source["excerpt"])
     else:
         prompt = PROMPT_NAME_ONLY.format(**common)
-    return with_retry(_call_openai, prompt, what=f"{row_label} {AI['name']}")
+    result = with_retry(_call_openai, prompt, what=f"{row_label} {AI['name']}")
+    _track_ai_result(result is not None)
+    return result
+
+
+MAX_AI_FAILURES_IN_ROW = 5
+_ai_failures = {"in_row": 0}
+_ai_failures_lock = threading.Lock()
+
+
+def _track_ai_result(ok: bool) -> None:
+    """Zatrzymuje skrypt, gdy AI kilka razy z rzędu nie odpowiada (np. wyczerpany limit konta).
+
+    Bez tego skrypt przeszedłby przez tysiące produktów bez opisów, zużywając zapytania wyszukiwarki.
+    """
+    with _ai_failures_lock:
+        _ai_failures["in_row"] = 0 if ok else _ai_failures["in_row"] + 1
+        if _ai_failures["in_row"] >= MAX_AI_FAILURES_IN_ROW:
+            raise FatalError(
+                f"{AI['name']} nie odpowiedziało dla {MAX_AI_FAILURES_IN_ROW} produktów z rzędu. Najczęstsza "
+                "przyczyna: wyczerpany limit/brak płatności na koncie (błąd 429 'exceeded your current quota'). "
+                "Sprawdź konto i uruchom skrypt ponownie — zacznie od miejsca, w którym przerwał.")
 
 
 # =============================================================================
