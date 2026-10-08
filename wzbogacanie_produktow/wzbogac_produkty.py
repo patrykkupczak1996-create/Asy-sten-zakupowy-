@@ -587,16 +587,25 @@ def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, produce
 _openai_client: OpenAI | None = None
 
 
-def check_ollama(settings: dict) -> None:
-    """Sprawdza, czy Ollama działa i czy wybrany model jest pobrany."""
+# Gdy OLLAMA_MODEL nie jest ustawione, skrypt bierze pierwszy pobrany model z tej listy (od najlepszego po polsku).
+OLLAMA_PREFERRED = ["qwen2.5:14b-instruct", "qwen2.5:14b", "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+                    "gemma3:12b", "qwen3:14b", "qwen3:8b", "qwen2.5:7b-instruct", "qwen2.5:7b", "llama3.1:latest"]
+
+
+def ollama_installed(settings: dict) -> set[str]:
     host = settings["base_url"].removesuffix("/v1")
     try:
         resp = requests.get(host + "/api/tags", timeout=10)
         resp.raise_for_status()
-        installed = {m.get("name", "") for m in resp.json().get("models", [])}
+        return {m.get("name", "") for m in resp.json().get("models", [])}
     except Exception:
         sys.exit(f"Ollama nie odpowiada pod adresem {host}. Zainstaluj ją z {settings['key_url']} "
                  "i uruchom (ikona Ollama w zasobniku systemowym), potem spróbuj ponownie.")
+
+
+def check_ollama(settings: dict) -> None:
+    """Sprawdza, czy Ollama działa i czy wybrany model jest pobrany."""
+    installed = ollama_installed(settings)
     # "gemma3" bez tagu w Ollamie oznacza "gemma3:latest"
     names = installed | {n.removesuffix(":latest") for n in installed}
     missing = [m for m in settings["models"] if m.strip() not in names]
@@ -610,6 +619,12 @@ def configure_ai(provider: str) -> None:
     """Wybiera dostawcę AI i sprawdza klucz. Kończy skrypt czytelnym komunikatem, jeśli klucza brak."""
     settings = AI_PROVIDERS[provider]
     if provider == "ollama":
+        if not os.getenv("OLLAMA_MODEL"):
+            installed = ollama_installed(settings)
+            names = installed | {n.removesuffix(":latest") for n in installed}
+            pick = next((m for m in OLLAMA_PREFERRED if m in names), None)
+            if pick:
+                settings = dict(settings, models=[pick])
         check_ollama(settings)
         AI.update(settings, key="ollama")  # Ollama nie sprawdza klucza, ale biblioteka wymaga jakiegoś
         return
