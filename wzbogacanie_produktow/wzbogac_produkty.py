@@ -71,6 +71,8 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (
 PRODUCER_SITES = {
     "AEON": ["aeon-sale.com", "aeonvalves.com", "aeon-online.com"],
 }
+# Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
+TRUSTED_SITES = ["onninen.pl", "cetel-hurtownia.pl"]
 
 # =============================================================================
 # USTAWIENIA PRZETWARZANIA
@@ -143,8 +145,8 @@ BROWSER_HEADERS = {
 SYSTEM_PROMPT = "Jesteś ekspertem SEO w branży instalacyjnej i B2B."
 
 ABBREVIATIONS = """DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
-KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = kółko ręczne,
-F4/F5 = długość zabudowy wg normy EN 558, ŻEL. = żeliwna,
+KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = krótka (krótka długość zabudowy, np. KR. F4),
+F4/F5 = długość zabudowy wg normy EN 558 (F4 krótka, F5 długa), ŻEL. = żeliwna,
 RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 lub OD63 = średnica
 zewnętrzna rury w mm, PE/PVC = do rur z polietylenu i PVC, Z PE = z końcówkami PE"""
 
@@ -385,8 +387,8 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
                          row_label: str) -> dict | None:
     """Szuka strony, na której występuje kod/EAN produktu — najpierw na stronach producenta."""
     queries = []
-    for domain in producer_sites(producer):
-        queries += [f"site:{domain} {x}" for x in (code, ean) if x]
+    if code:  # na wybranych stronach tylko po kodzie — EAN sprawdza ogólne wyszukiwanie niżej
+        queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
     if code:
         queries.append(f'"{code}" {producer}'.strip())
         queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
@@ -430,7 +432,7 @@ def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, produce
     """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
     verified: list[tuple[str, bool, str]] = []
     unverified: list[tuple[str, bool, str]] = []
-    queries = [f"site:{d} {x}" for d in producer_sites(producer) for x in (code, ean) if x]
+    queries = [f"site:{d} {code}" for d in producer_sites(producer) + TRUSTED_SITES] if code else []
     queries += [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     for query in queries:
         results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []

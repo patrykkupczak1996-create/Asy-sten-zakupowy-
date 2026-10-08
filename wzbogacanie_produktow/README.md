@@ -129,6 +129,10 @@ PRODUCER_SITES = {
 }
 ```
 
+Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami produktów (kod producenta + EAN),
+ustawione w `TRUSTED_SITES` (domyślnie `onninen.pl`, `cetel-hurtownia.pl`). Na tych stronach szuka po kodzie
+producenta; EAN sprawdza w ogólnym wyszukiwaniu.
+
 Zdjęcia mniejsze niż 400 px (krótszy bok) są odrzucane jako słabej jakości.
 
 ## Kontrola zdjęć (znak wodny, logo, czy to produkt)
