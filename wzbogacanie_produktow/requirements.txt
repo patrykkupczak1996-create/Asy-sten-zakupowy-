@@ -6,3 +6,5 @@ requests>=2.31
 ddgs>=9.0
 # Odczyt tekstu i zdjec ze stron produktow (weryfikacja kodu/EAN)
 lxml>=5.0
+# Sprawdzanie wymiarow zdjec (odrzucanie logotypow, banerow, ikon)
+Pillow>=10.0

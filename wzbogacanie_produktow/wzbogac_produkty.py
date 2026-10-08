@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import io
 import json
 import logging
 import os
@@ -396,36 +397,39 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
     return None
 
 
-def image_from_source(m: ProductMatcher, source: dict) -> str:
-    """Zdjęcie ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
-    for src, alt in source["imgs"]:
-        if is_direct_image_url(src) and m.in_short_text(src, alt):
-            return src
-    for src in source["og_images"]:
-        if is_direct_image_url(src):
-            return src
-    return ""
+def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
+    """Zdjęcia ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
+    with_code = [src for src, alt in source["imgs"] if is_direct_image_url(src) and m.in_short_text(src, alt)]
+    og = [src for src in source["og_images"] if is_direct_image_url(src)]
+    return list(dict.fromkeys(with_code + og))
 
 
-def image_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
-                      row_label: str) -> tuple[str, bool]:
-    """Zdjęcie z wyszukiwarki obrazów. Zwraca (url, czy_zweryfikowane)."""
-    first_unverified = ""
+def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
+                                 row_label: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
+    verified: list[tuple[str, bool, str]] = []
+    unverified: list[tuple[str, bool, str]] = []
     queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     for query in queries:
         results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
-        candidates = [r for r in results if is_direct_image_url(r["image"])]
+        candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])]
+        pages_checked = 0
         for r in candidates:
             if m.in_short_text(r["image"], r["title"], r["page"]):
-                return r["image"], True
-        # Kod nie występuje w tytule/adresie — sprawdzamy stronę, z której pochodzi obrazek (max 3).
-        for r in candidates[:3]:
-            page = fetch_page(r["page"]) if r["page"] else None
-            if page and m.find(page[0]) is not None:
-                return r["image"], True
-        if candidates and not first_unverified:
-            first_unverified = candidates[0]["image"]
-    return first_unverified, False
+                verified.append((r["image"], True, r["page"]))
+            elif r["page"] and pages_checked < 3:
+                # Kod nie występuje w tytule/adresie — sprawdzamy stronę, z której pochodzi obrazek.
+                pages_checked += 1
+                page = fetch_page(r["page"])
+                if page and m.find(page[0]) is not None:
+                    verified.append((r["image"], True, r["page"]))
+                else:
+                    unverified.append((r["image"], False, r["page"]))
+            else:
+                unverified.append((r["image"], False, r["page"]))
+        if verified:
+            break  # mamy potwierdzone zdjęcia — nie trzeba szukać po EAN
+    return verified + unverified[:3]
 
 
 # =============================================================================
@@ -630,39 +634,102 @@ def safe_filename(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z_-]+", "_", text).strip("_")[:80] or "produkt"
 
 
-def download_image(url: str, images_dir: str, base_name: str, referer: str = "") -> tuple[str, str]:
-    """Pobiera zdjęcie do images_dir. Zwraca (ścieżka_pliku, "") albo ("", powód_błędu)."""
-    # Plik pobrany przy wcześniejszym uruchomieniu — nie pobieramy drugi raz.
-    for ext in (".jpg", ".png", ".webp", ".gif"):
-        existing = os.path.join(images_dir, base_name + ext)
-        if os.path.exists(existing) and os.path.getsize(existing) >= MIN_IMAGE_BYTES:
-            return existing, ""
+# Fragmenty adresów typowe dla logotypów, banerów i ikon — to nie są zdjęcia produktu.
+BAD_IMAGE_WORDS = ("logo", "banner", "baner", "icon", "ikona", "favicon", "sprite", "placeholder",
+                   "noimage", "no-image", "no_image", "brak-zdjecia", "brak_zdjecia", "nophoto", "no-photo",
+                   "social", "share")
+MIN_IMAGE_SIDE = 150         # px — mniejsze to ikonki/miniaturki
+MAX_IMAGE_RATIO = 1.9        # szerokość/wysokość — szersze to zwykle banery i logotypy
+MIN_IMAGE_RATIO = 0.5
+
+
+def image_url_looks_bad(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return any(word in path for word in BAD_IMAGE_WORDS)
+
+
+def fetch_image(url: str, referer: str = "") -> tuple[bytes, str, str]:
+    """Pobiera obrazek do pamięci. Zwraca (dane, rozszerzenie, "") albo (b"", "", powód_odrzucenia)."""
     headers = dict(BROWSER_HEADERS)
     if referer:
         headers["Referer"] = referer  # część sklepów blokuje obrazki pobierane bez strony źródłowej
     try:
         with requests.get(url, headers=headers, timeout=PAGE_TIMEOUT, stream=True) as resp:
             if resp.status_code != 200:
-                return "", f"HTTP {resp.status_code}"
+                return b"", "", f"HTTP {resp.status_code}"
             data = b""
             for chunk in resp.iter_content(64 * 1024):
                 data += chunk
                 if len(data) > MAX_IMAGE_BYTES:
-                    return "", "plik za duży"
+                    return b"", "", "plik za duży"
     except Exception as exc:
-        return "", type(exc).__name__
+        return b"", "", type(exc).__name__
     ext = image_type(data[:16])
     if not ext:
-        return "", "to nie jest plik obrazu"
+        return b"", "", "to nie jest plik obrazu"
     if len(data) < MIN_IMAGE_BYTES:
-        return "", "obrazek za mały"
+        return b"", "", "obrazek za mały"
+    return data, ext, ""
+
+
+def check_image(data: bytes) -> str:
+    """Odrzuca ikonki, banery i logotypy po wymiarach. Zwraca powód odrzucenia albo ""."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""  # bez Pillow nie sprawdzimy wymiarów — zostaje filtr adresu i sygnatury pliku
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+    except Exception:
+        return "uszkodzony plik obrazu"
+    if min(width, height) < MIN_IMAGE_SIDE:
+        return f"obrazek za mały ({width}x{height})"
+    if not MIN_IMAGE_RATIO <= width / height <= MAX_IMAGE_RATIO:
+        return f"proporcje banera/logo ({width}x{height})"
+    return ""
+
+
+def save_image(data: bytes, ext: str, images_dir: str, base_name: str) -> str:
     os.makedirs(images_dir, exist_ok=True)
+    # Usuwamy plik tego produktu z poprzedniego uruchomienia (mógł mieć inne rozszerzenie albo być błędny).
+    for old_ext in (".jpg", ".png", ".webp", ".gif"):
+        old = os.path.join(images_dir, base_name + old_ext)
+        if os.path.exists(old):
+            os.remove(old)
     path = os.path.join(images_dir, base_name + ext)
-    tmp = path + ".part"
-    with open(tmp, "wb") as fh:
+    with open(path + ".part", "wb") as fh:
         fh.write(data)
-    os.replace(tmp, path)
-    return path, ""
+    os.replace(path + ".part", path)
+    return path
+
+
+MAX_IMAGE_TRIES = 6          # ilu kandydatów na zdjęcie sprawdzić na produkt
+
+
+def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
+               base_name: str, tried: set[str]) -> tuple[str, bool, str, str]:
+    """Pierwsze zdjęcie, które przejdzie wszystkie filtry.
+
+    Zwraca (url, czy_potwierdzone, ścieżka_pliku, powód_ostatniego_odrzucenia).
+    """
+    last_reason = ""
+    for url, verified, referer in candidates:
+        if url in tried or len(tried) >= MAX_IMAGE_TRIES:
+            continue
+        tried.add(url)
+        if image_url_looks_bad(url):
+            last_reason = "logo/baner w adresie"
+            continue
+        data, ext, reason = fetch_image(url, referer)
+        if not reason:
+            reason = check_image(data)
+        if reason:
+            last_reason = reason
+            continue
+        path = save_image(data, ext, images_dir, base_name) if images_dir else ""
+        return url, verified, path, ""
+    return "", False, "", last_reason
 
 
 # =============================================================================
@@ -700,25 +767,23 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
         else:
             reasons.append("nie udało się wygenerować opisu")
 
-    # 3. Zdjęcie
-    image, image_ok = "", False
+    # 3. Zdjęcie: kandydaci ze strony źródłowej, potem z wyszukiwarki obrazów. Każdy jest pobierany
+    #    i sprawdzany (sygnatura pliku, wymiary, logo/baner) — pierwszy poprawny wygrywa.
+    base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
+    tried: set[str] = set()
+    image, image_ok, image_file, rejected = "", False, "", ""
     if source:
-        image = image_from_source(m, source)
-        image_ok = bool(image)
+        image, image_ok, image_file, rejected = pick_image(
+            [(u, True, source["url"]) for u in image_candidates_from_source(m, source)],
+            images_dir, base_name, tried)
     if not image:
-        image, image_ok = image_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
+        found = image_candidates_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
+        image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried)
+        rejected = reason or rejected
     if not image:
-        reasons.append("brak zdjęcia")
+        reasons.append(f"brak poprawnego zdjęcia (odrzucone: {rejected})" if rejected else "brak zdjęcia")
     elif not image_ok:
         reasons.append("zdjęcie niepotwierdzone kodem/EAN")
-
-    # 4. Pobranie zdjęcia na dysk (jeśli link nie działa teraz, IdoSell też go nie pobierze)
-    image_file = ""
-    if image and images_dir:
-        base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
-        image_file, error = download_image(image, images_dir, base_name, source["url"] if source else "")
-        if error:
-            reasons.append(f"nie udało się pobrać zdjęcia ({error})")
 
     out = dict(record)
     out[COL_DESC] = desc
