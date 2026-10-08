@@ -116,6 +116,29 @@ możesz zacząć przeglądać produkty, zanim skończy się cała baza.
 Inne opcje: `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`,
 `--output inna_nazwa.csv`.
 
+## Kontrola zdjęć (znak wodny, logo, czy to produkt)
+
+Już przy wyborze zdjęcia skrypt odrzuca pliki z „logo/banner/icon” w adresie, ikonki (< 150 px) i obrazki
+o proporcjach banera (szersze niż 1,9:1). Znaku wodnego nie da się jednak wykryć regułami, więc jest drugi etap:
+model wizyjny w Ollamie ogląda każde zdjęcie.
+
+```powershell
+ollama pull qwen2.5vl:7b          # jednorazowo, jeśli go nie masz
+py wzbogac_produkty.py --sprawdz-zdjecia
+```
+
+* Sprawdza tylko zdjęcia, których jeszcze nie sprawdził — można przerywać (Ctrl+C) i wznawiać.
+* Odrzuca: znak wodny, nałożone logo sklepu/firmy, adres www lub telefon na zdjęciu, a także obrazki,
+  które nie są zdjęciem produktu (logo, baner, rysunek, tabela, inny przedmiot).
+* **Produkt jest PEWNY tylko wtedy, gdy jego zdjęcie przeszło tę kontrolę.** Dopóki jej nie uruchomisz,
+  produkty ze zdjęciem trafiają do akceptacji z powodem „zdjęcie niesprawdzone”.
+* Wyniki są w `produkty_wzbogacone_kontrola_zdjec.csv`; pliki `_pewne`, `_do_akceptacji` i podgląd
+  odświeżają się automatycznie.
+* Uruchamiaj ją **po** przetwarzaniu opisów (albo w przerwie) — karta graficzna z 12 GB nie pomieści naraz
+  modelu do opisów i modelu do zdjęć. Inny model wizyjny: `$env:OLLAMA_VISION_MODEL="nazwa:tag"`.
+* Model może się czasem pomylić (np. nie zauważyć bardzo bladego znaku wodnego) — przy akceptacji
+  rzuć okiem na zdjęcia w podglądzie.
+
 ## 4. Akceptacja niepewnych produktów
 
 1. Wgraj `produkty_wzbogacone_do_akceptacji.csv` do Google Sheets (Plik → Importuj).

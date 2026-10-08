@@ -797,6 +797,133 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
 
 
 # =============================================================================
+# KONTROLA ZDJĘĆ MODELEM WIZYJNYM (znak wodny, logo, czy to zdjęcie produktu)
+# =============================================================================
+VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
+VISION_MAX_SIDE = 1024       # zdjęcie zmniejszane przed wysłaniem do modelu — szybciej, wynik ten sam
+CHECK_COLUMNS = [COL_ID, COL_IMAGE, "Wynik", "Uwagi"]
+CHECK_OK, CHECK_REJECTED = "OK", "ODRZUCONE"
+
+VISION_PROMPT = """To zdjęcie ma być zdjęciem produktu w sklepie internetowym z armaturą instalacyjną.
+Produkt: {name}
+
+Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"zdjecie_produktu": true lub false,
+  "znak_wodny": true lub false,
+  "uwagi": "krótko po polsku, co jest nie tak (puste, jeśli wszystko w porządku)"}}
+
+- "zdjecie_produktu": true tylko jeśli widać fizyczny produkt (np. zasuwa, zawór, łącznik, kształtka, rura).
+  false dla: logo, banera, samego napisu, rysunku technicznego, tabeli, zrzutu strony, zdjęcia innego przedmiotu.
+- "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny, logo sklepu lub firmy, adres strony www,
+  numer telefonu albo inny napis, który nie jest częścią samego produktu (napisy odlane/nadrukowane
+  na produkcie się nie liczą)."""
+
+
+def check_file_path(output_path: str) -> str:
+    return side_path(output_path, "kontrola_zdjec")
+
+
+def load_image_checks(output_path: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """{(id, url_zdjęcia): (wynik, uwagi)} — wynik dotyczy konkretnego zdjęcia, więc zmiana zdjęcia = nowa kontrola."""
+    path = check_file_path(output_path)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {}
+    df = read_csv(path)
+    return {(r[COL_ID], r[COL_IMAGE]): (r["Wynik"], r["Uwagi"]) for r in df.to_dict("records")}
+
+
+def _image_for_vision(record: dict) -> bytes:
+    """Zdjęcie produktu zmniejszone do JPEG (z pliku na dysku albo z linku)."""
+    from PIL import Image
+
+    local = record.get(COL_IMAGE_FILE, "")
+    if local and os.path.exists(local):
+        with open(local, "rb") as fh:
+            data = fh.read()
+    else:
+        data, _, reason = fetch_image(record[COL_IMAGE])
+        if reason:
+            raise ValueError(f"nie udało się pobrać zdjęcia ({reason})")
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=90)
+        return out.getvalue()
+
+
+def _ask_vision(image_jpeg: bytes, name: str) -> dict:
+    import base64
+
+    host = AI_PROVIDERS["ollama"]["base_url"].removesuffix("/v1")
+    resp = requests.post(host + "/api/chat", timeout=300, json={
+        "model": VISION_MODEL,
+        "stream": False,
+        "format": "json",
+        "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name),
+                      "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
+        "options": {"temperature": 0, "num_ctx": 4096},
+    })
+    resp.raise_for_status()
+    return parse_json((resp.json().get("message") or {}).get("content") or "{}")
+
+
+def check_one_image(record: dict) -> tuple[str, str]:
+    """(wynik, uwagi) dla zdjęcia jednego produktu."""
+    try:
+        image = _image_for_vision(record)
+    except Exception as exc:
+        return CHECK_REJECTED, str(exc)
+    answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
+    if answer is None:
+        return CHECK_REJECTED, "model nie ocenił zdjęcia"
+    problems = []
+    if answer.get("zdjecie_produktu") is not True:
+        problems.append("to nie jest zdjęcie produktu")
+    if answer.get("znak_wodny") is not False:
+        problems.append("znak wodny / nałożone logo lub napis")
+    if problems:
+        note = str(answer.get("uwagi") or "").strip()
+        return CHECK_REJECTED, "; ".join(problems) + (f" ({note})" if note else "")
+    return CHECK_OK, ""
+
+
+def run_image_check(output_path: str) -> None:
+    """Etap 2: ogląda modelem wizyjnym każde zdjęcie, którego jeszcze nie sprawdzono."""
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path}. Najpierw uruchom przetwarzanie produktów (--input ...).")
+    check_ollama(dict(AI_PROVIDERS["ollama"], models=[VISION_MODEL]))
+    df = read_csv(output_path)
+    done = load_image_checks(output_path)
+    todo = [r for r in df.to_dict("records") if r.get(COL_IMAGE) and (r[COL_ID], r[COL_IMAGE]) not in done]
+    log.info("Kontrola zdjęć modelem %s: do sprawdzenia %d (sprawdzone wcześniej: %d).",
+             VISION_MODEL, len(todo), len(done))
+    path = check_file_path(output_path)
+    started, batch, rejected = time.time(), [], 0
+    try:
+        for i, record in enumerate(todo, 1):
+            result, note = check_one_image(record)
+            rejected += result != CHECK_OK
+            batch.append({COL_ID: record[COL_ID], COL_IMAGE: record[COL_IMAGE], "Wynik": result, "Uwagi": note})
+            log.info("[id=%s] zdjęcie %s%s", record[COL_ID], result, f" — {note}" if note else "")
+            if len(batch) >= CHECKPOINT_EVERY or i == len(todo):
+                append_batch(batch, CHECK_COLUMNS, path)
+                batch = []
+                remaining = (len(todo) - i) * (time.time() - started) / i
+                log.info("KONTROLA: %d/%d, odrzucone: %d. Pozostało ok. %.1f h.",
+                         i, len(todo), rejected, remaining / 3600)
+    except KeyboardInterrupt:
+        if batch:
+            append_batch(batch, CHECK_COLUMNS, path)
+        log.warning("Przerwano — sprawdzone zdjęcia są zapisane, kolejne uruchomienie dokończy resztę.")
+    except FatalError as exc:
+        if batch:
+            append_batch(batch, CHECK_COLUMNS, path)
+        log.error("Zatrzymuję kontrolę: %s", exc)
+    split_results(output_path)
+
+
+# =============================================================================
 # PLIKI: CHECKPOINTY, PODZIAŁ NA PEWNE / DO AKCEPTACJI, ZATWIERDZANIE
 # =============================================================================
 def side_path(output_path: str, suffix: str) -> str:
@@ -841,11 +968,27 @@ def append_batch(rows: list[dict], columns: list[str], output_path: str) -> None
         os.fsync(fh.fileno())
 
 
+def apply_image_checks(df: pd.DataFrame, checks: dict) -> pd.DataFrame:
+    """Produkt z niesprawdzonym albo odrzuconym zdjęciem nie może być PEWNY."""
+    df = df.copy()
+    for i, row in df.iterrows():
+        if not row[COL_IMAGE]:
+            continue
+        result, note = checks.get((row[COL_ID], row[COL_IMAGE]), ("", ""))
+        if result == CHECK_OK:
+            continue
+        reason = (f"zdjęcie odrzucone: {note}" if result == CHECK_REJECTED
+                  else "zdjęcie niesprawdzone (uruchom --sprawdz-zdjecia)")
+        df.at[i, COL_STATUS] = STATUS_REVIEW
+        df.at[i, COL_REASON] = "; ".join(r for r in (row[COL_REASON], reason) if r)
+    return df
+
+
 def split_results(output_path: str) -> None:
     """Dzieli plik roboczy na *_pewne.csv (do importu) i *_do_akceptacji.csv (do przejrzenia)."""
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         return
-    df = read_csv(output_path)
+    df = apply_image_checks(read_csv(output_path), load_image_checks(output_path))
     ok_path, review_path = side_path(output_path, "pewne"), side_path(output_path, "do_akceptacji")
 
     df[df[COL_STATUS] == STATUS_OK].to_csv(ok_path, index=False, encoding="utf-8-sig")
@@ -1070,6 +1213,8 @@ def main() -> None:
     parser.add_argument("--sep", default=",", help="Separator kolumn w pliku wejściowym (domyślnie przecinek)")
     parser.add_argument("--bez-pobierania", action="store_true",
                         help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
+    parser.add_argument("--sprawdz-zdjecia", action="store_true",
+                        help="Etap 2: sprawdź zdjęcia modelem wizyjnym Ollamy (znak wodny, logo, czy to produkt)")
     parser.add_argument("--aktualizuj", action="store_true",
                         help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
     parser.add_argument("--zatwierdz", metavar="PLIK",
@@ -1082,8 +1227,8 @@ def main() -> None:
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
         return
-    if not args.input:
-        parser.error("podaj --input (plik CSV z produktami) albo --zatwierdz")
+    if not args.input and not args.sprawdz_zdjecia:
+        parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia albo --zatwierdz")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1096,6 +1241,10 @@ def main() -> None:
     logging.getLogger().setLevel(logging.WARNING)
     log.setLevel(logging.INFO)
     check_for_update()
+
+    if args.sprawdz_zdjecia:
+        run_image_check(args.output)
+        return
 
     configure_ai(args.ai)
     if args.search == "serpapi" and not SERPAPI_API_KEY:
