@@ -332,6 +332,9 @@ def main() -> None:
     if not OPENAI_API_KEY:
         sys.exit("Brak klucza OpenAI. Ustaw zmienną środowiskową OPENAI_API_KEY "
                  "albo wpisz klucz w sekcji KONFIGURACJA na górze skryptu.")
+    if "TWÓJ" in OPENAI_API_KEY.upper() or "..." in OPENAI_API_KEY:
+        sys.exit("OPENAI_API_KEY zawiera przykładowy tekst zamiast prawdziwego klucza. "
+                 "Wklej swój klucz z https://platform.openai.com/api-keys.")
     if not args.no_images:
         if args.image_source == "serpapi" and not SERPAPI_API_KEY:
             sys.exit("Wybrano SerpApi, ale brak SERPAPI_API_KEY.")
@@ -339,6 +342,12 @@ def main() -> None:
             sys.exit("Wybrano Google Custom Search, ale brak GOOGLE_API_KEY lub GOOGLE_CSE_ID.")
 
     # dtype=str + keep_default_na=False: EAN-y i kody zostają tekstem (bez "5.9e+12" i "nan").
+    if "://" not in args.input and not os.path.isfile(args.input):
+        csv_files = sorted(f for f in os.listdir(".") if f.lower().endswith(".csv"))
+        sys.exit(f"Nie znaleziono pliku wejściowego '{args.input}' w folderze {os.getcwd()}.\n"
+                 f"Pliki CSV w tym folderze: {', '.join(csv_files) or 'brak'}.\n"
+                 "Skopiuj tu plik pobrany z Google Sheets albo podaj pełną ścieżkę w --input "
+                 "(w cudzysłowie, jeśli zawiera spacje).")
     df_in = pd.read_csv(args.input, dtype=str, keep_default_na=False, sep=args.sep, encoding="utf-8-sig")
     missing = [c for c in (COL_ID, COL_CODE, COL_PRODUCER, COL_EAN, COL_CATEGORY, COL_NAME)
                if c not in df_in.columns]
