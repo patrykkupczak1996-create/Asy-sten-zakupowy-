@@ -107,12 +107,12 @@ AI_PROVIDERS = {
     "openai": {"name": "OpenAI", "models": os.getenv("OPENAI_MODEL", "gpt-4o-mini").split(","),
                "base_url": None,
                "key_env": "OPENAI_API_KEY", "key_url": "https://platform.openai.com/api-keys",
-               "max_tokens": 1500},
+               "max_tokens": 3000},  # opis HTML po polsku + pola JSON (nazwa, zapytanie)
     # Ollama — model uruchomiony lokalnie na Twoim komputerze (darmowy, bez klucza, potrzebna dobra karta graficzna).
     "ollama": {"name": "Ollama", "models": os.getenv("OLLAMA_MODEL", "gemma3:12b").split(","),
                "base_url": os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/v1",
                "key_env": None, "key_url": "https://ollama.com/download",
-               "max_tokens": 1500,
+               "max_tokens": 3000,  # opis HTML po polsku + pola JSON — 1500 ucinało odpowiedź
                "timeout": 600},  # lokalny model bywa wolny, szczególnie bez karty graficznej
 }
 AI = dict(AI_PROVIDERS["gemini"], key="")  # ustawiane w main() przez configure_ai()
