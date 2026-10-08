@@ -309,7 +309,10 @@ def _ddg_call(method: str, query: str, max_results: int) -> list[dict]:
         return getattr(_ddgs(), method)(query, region="pl-pl", max_results=max_results) or []
     except Exception as exc:
         # "No results found" to odpowiedź, nie awaria — nie ma sensu ponawiać tego samego zapytania.
-        if "no results" in str(exc).lower():
+        # "malformed headers" — DuckDuckGo odrzuca tę postać zapytania; ponowienie da ten sam wynik.
+        msg = str(exc).lower()
+        if "no results" in msg or "malformed headers" in msg:
+            log.debug("DuckDuckGo (%s) '%s': %s", method, query, exc)
             return []
         raise
 
@@ -552,9 +555,9 @@ def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, produce
     """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
     verified: list[tuple[str, bool, str]] = []
     unverified: list[tuple[str, bool, str]] = []
-    queries = [f"site:{d} {code}" for d in producer_sites(producer) + TRUSTED_SITES
-               if not is_watermark_site("https://" + d)] if code else []
-    queries += [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    # Bez "site:" — wyszukiwarka obrazów DuckDuckGo odrzuca takie zapytania ("malformed headers").
+    # Zwykłe zapytanie z kodem i tak zwraca zdjęcia z hurtowni i sklepów, które ten kod mają.
+    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     for query in queries:
         results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
         candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])
