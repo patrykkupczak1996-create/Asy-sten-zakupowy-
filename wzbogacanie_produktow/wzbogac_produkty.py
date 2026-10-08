@@ -86,6 +86,7 @@ CHECKPOINT_EVERY = 10        # co ile wierszy zapisywać postęp na dysk
 RETRY_WAIT_SECONDS = 5       # ile czekać przed ponowieniem po błędzie
 MAX_RETRIES = 6              # ile razy ponawiać jedno zapytanie, zanim wiersz zostanie pominięty
 REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
+AI_TIMEOUT = 180             # timeout odpowiedzi modelu AI — przy przeciążeniu Gemini odpowiada wolno
 PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
 MAX_PAGES_PER_PRODUCT = 6    # ile stron z wyników wyszukiwania sprawdzić na produkt
 SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
@@ -443,7 +444,7 @@ def get_openai_client() -> OpenAI:
     if _openai_client is None:
         # max_retries=0 — ponawianiem zajmuje się with_retry (5 s przerwy, logowanie).
         _openai_client = OpenAI(api_key=AI["key"], base_url=AI["base_url"],
-                                timeout=REQUEST_TIMEOUT, max_retries=0)
+                                timeout=AI_TIMEOUT, max_retries=0)
     return _openai_client
 
 
@@ -474,8 +475,8 @@ def _call_openai(prompt: str) -> dict:
     for model in AI["models"]:
         try:
             return _call_model(model.strip(), prompt)
-        except (openai.InternalServerError, openai.NotFoundError) as exc:
-            # 503 "high demand" / model wycofany — od razu kolejny model, bez czekania.
+        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError) as exc:
+            # 503 "high demand" / model wycofany / brak odpowiedzi — od razu kolejny model, bez czekania.
             log.debug("Model %s niedostępny: %s", model, exc)
             last_error = exc
     raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
