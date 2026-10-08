@@ -5,7 +5,7 @@ Wzbogacanie bazy produktów B2B (armatura, zasuwy) pod import do IdoSell.
 Dla każdego wiersza pliku CSV (eksport z Google Sheets):
   1. szuka w internecie strony produktu po kodzie producenta i EAN i sprawdza,
      czy ten kod / EAN faktycznie występuje na stronie (weryfikacja),
-  2. generuje opis SEO w czystym HTML przez OpenAI (gpt-4o-mini) WYŁĄCZNIE na podstawie
+  2. generuje opis SEO w czystym HTML przez Gemini albo OpenAI WYŁĄCZNIE na podstawie
      nazwy i tekstu tej strony; model dodatkowo ocenia, czy strona opisuje ten sam produkt,
   3. bierze zdjęcie z potwierdzonej strony (albo z wyszukiwarki obrazów, jeśli jego źródło
      też zawiera kod / EAN),
@@ -47,7 +47,11 @@ import openai
 # Możesz też wpisać klucz bezpośrednio między cudzysłowy zamiast "" —
 # wtedy nie wysyłaj tego pliku nikomu i nie wrzucaj go do repozytorium.
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")          # wymagany, np. "sk-proj-..."
+# Model AI do pisania opisów — parametr --ai lub poniżej: "gemini" albo "openai".
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")          # dla "gemini", np. "AIza..."
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")          # dla "openai", np. "sk-proj-..."
 
 # Wyszukiwarka (strony produktów + zdjęcia) — parametr --search lub poniżej:
 #   "ddg"     — DuckDuckGo, darmowe, bez klucza (przy dużej liczbie zapytań potrafi blokować)
@@ -62,7 +66,20 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (
 # =============================================================================
 # USTAWIENIA PRZETWARZANIA
 # =============================================================================
-OPENAI_MODEL = "gpt-4o-mini"
+# Gemini udostępnia interfejs zgodny z OpenAI, więc oba działają przez tę samą bibliotekę `openai`.
+AI_PROVIDERS = {
+    "gemini": {"name": "Gemini", "model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+               "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+               "key_env": "GEMINI_API_KEY", "key_url": "https://aistudio.google.com/apikey",
+               # Modele Gemini 3.x "myślą" przed odpowiedzią i liczą to do limitu tokenów —
+               # mały limit uciąłby opis w połowie.
+               "max_tokens": 8000},
+    "openai": {"name": "OpenAI", "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+               "base_url": None,
+               "key_env": "OPENAI_API_KEY", "key_url": "https://platform.openai.com/api-keys",
+               "max_tokens": 1500},
+}
+AI = dict(AI_PROVIDERS["gemini"], key="")  # ustawiane w main() przez configure_ai()
 CHECKPOINT_EVERY = 10        # co ile wierszy zapisywać postęp na dysk
 RETRY_WAIT_SECONDS = 5       # ile czekać przed ponowieniem po błędzie
 MAX_RETRIES = 6              # ile razy ponawiać jedno zapytanie, zanim wiersz zostanie pominięty
@@ -182,7 +199,7 @@ def with_retry(func, *args, what: str = "zapytanie", **kwargs):
         except FatalError:
             raise
         except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
-            raise FatalError(f"OpenAI odrzuciło klucz API: {exc}") from exc
+            raise FatalError(f"{AI['name']} odrzuciło klucz API: {exc}") from exc
         except openai.BadRequestError as exc:
             # Błędne zapytanie nie naprawi się samo — nie ma sensu czekać.
             log.error("%s: błędne zapytanie, pomijam: %s", what, exc)
@@ -190,7 +207,7 @@ def with_retry(func, *args, what: str = "zapytanie", **kwargs):
         except Exception as exc:  # timeout, rate limit, błąd sieci, 5xx...
             msg = str(exc)
             if "insufficient_quota" in msg:
-                raise FatalError("Brak środków na koncie OpenAI (insufficient_quota).") from exc
+                raise FatalError(f"Brak środków na koncie {AI['name']} (insufficient_quota).") from exc
             log.warning("%s: błąd (próba %d/%d): %s: %s",
                         what, attempt, MAX_RETRIES, type(exc).__name__, msg[:200])
             if attempt < MAX_RETRIES:
@@ -390,17 +407,43 @@ def image_from_search(m: ProductMatcher, code: str, ean: str, producer: str, eng
 
 
 # =============================================================================
-# OPIS HTML (OpenAI)
+# OPIS HTML (Gemini / OpenAI)
 # =============================================================================
 _openai_client: OpenAI | None = None
+
+
+def configure_ai(provider: str) -> None:
+    """Wybiera dostawcę AI i sprawdza klucz. Kończy skrypt czytelnym komunikatem, jeśli klucza brak."""
+    settings = AI_PROVIDERS[provider]
+    key = GEMINI_API_KEY if provider == "gemini" else OPENAI_API_KEY
+    if not key:
+        sys.exit(f"Brak klucza {settings['name']}. Ustaw zmienną środowiskową {settings['key_env']} "
+                 f"(klucz z {settings['key_url']}) albo wpisz go w sekcji KONFIGURACJA na górze skryptu.")
+    if "TWÓJ" in key.upper() or "..." in key:
+        sys.exit(f"{settings['key_env']} zawiera przykładowy tekst zamiast prawdziwego klucza. "
+                 f"Wklej swój klucz z {settings['key_url']}.")
+    AI.update(settings, key=key)
 
 
 def get_openai_client() -> OpenAI:
     global _openai_client
     if _openai_client is None:
         # max_retries=0 — ponawianiem zajmuje się with_retry (5 s przerwy, logowanie).
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=REQUEST_TIMEOUT, max_retries=0)
+        _openai_client = OpenAI(api_key=AI["key"], base_url=AI["base_url"],
+                                timeout=REQUEST_TIMEOUT, max_retries=0)
     return _openai_client
+
+
+def parse_json(text: str) -> dict:
+    """JSON z odpowiedzi modelu — także gdy model owinie go w ```json ... ```."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            raise ValueError(f"Model nie zwrócił JSON: {text[:120]!r}")
+        return json.loads(match.group(0))
 
 
 def clean_html(text: str) -> str:
@@ -413,15 +456,27 @@ def clean_html(text: str) -> str:
 
 
 def _call_openai(prompt: str) -> dict:
-    response = get_openai_client().chat.completions.create(
-        model=OPENAI_MODEL,
+    """Zapytanie do wybranego modelu (Gemini lub OpenAI — ten sam interfejs)."""
+    request = dict(
+        model=AI["model"],
         temperature=0.3,
-        max_tokens=1500,
+        max_tokens=AI["max_tokens"],
         response_format={"type": "json_object"},
         messages=[{"role": "system", "content": SYSTEM_PROMPT},
                   {"role": "user", "content": prompt}],
     )
-    data = json.loads(response.choices[0].message.content or "{}")
+    try:
+        response = get_openai_client().chat.completions.create(**request)
+    except openai.BadRequestError as exc:
+        if "response_format" not in str(exc):
+            raise
+        # Model bez trybu JSON — prompt i tak każe odpowiedzieć JSON-em, parse_json sobie poradzi.
+        del request["response_format"]
+        response = get_openai_client().chat.completions.create(**request)
+    choice = response.choices[0]
+    if choice.finish_reason == "length":
+        raise ValueError("Odpowiedź ucięta (limit tokenów)")
+    data = parse_json(choice.message.content or "{}")
     data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
     if not data["opis_html"]:
         raise ValueError("Model zwrócił pusty opis")
@@ -438,7 +493,7 @@ def generate_description(row: dict, source: dict | None, row_label: str) -> dict
         prompt = PROMPT_WITH_SOURCE.format(**common, url=source["url"], source=source["excerpt"])
     else:
         prompt = PROMPT_NAME_ONLY.format(**common)
-    return with_retry(_call_openai, prompt, what=f"{row_label} OpenAI")
+    return with_retry(_call_openai, prompt, what=f"{row_label} {AI['name']}")
 
 
 # =============================================================================
@@ -740,6 +795,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Wzbogacanie produktów B2B o opisy HTML i zdjęcia.")
     parser.add_argument("--input", "-i", help="Plik CSV z Google Sheets (ścieżka lub link .../export?format=csv)")
     parser.add_argument("--output", "-o", default="produkty_wzbogacone.csv", help="Plik roboczy z wynikami")
+    parser.add_argument("--ai", choices=sorted(AI_PROVIDERS), default=AI_PROVIDER,
+                        help="Model do pisania opisów (domyślnie: %(default)s)")
     parser.add_argument("--search", choices=["ddg", "serpapi", "google"], default=SEARCH_ENGINE,
                         help="Wyszukiwarka stron i zdjęć (domyślnie: %(default)s)")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
@@ -767,12 +824,7 @@ def main() -> None:
                   logging.FileHandler("wzbogacanie.log", encoding="utf-8")],
     )
 
-    if not OPENAI_API_KEY:
-        sys.exit("Brak klucza OpenAI. Ustaw zmienną środowiskową OPENAI_API_KEY "
-                 "albo wpisz klucz w sekcji KONFIGURACJA na górze skryptu.")
-    if "TWÓJ" in OPENAI_API_KEY.upper() or "..." in OPENAI_API_KEY:
-        sys.exit("OPENAI_API_KEY zawiera przykładowy tekst zamiast prawdziwego klucza. "
-                 "Wklej swój klucz z https://platform.openai.com/api-keys.")
+    configure_ai(args.ai)
     if args.search == "serpapi" and not SERPAPI_API_KEY:
         sys.exit("Wybrano SerpApi, ale brak SERPAPI_API_KEY.")
     if args.search == "google" and not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
@@ -801,8 +853,9 @@ def main() -> None:
         log.info("Wszystkie %d wiersze są już przetworzone w %s.", total, args.output)
         split_results(args.output)
         return
-    log.info("Wierszy w pliku: %d. Start od wiersza %d%s. Wyszukiwarka: %s. Wątki: %d.",
-             total, start + 1, " (wznowienie)" if start else "", args.search, args.workers)
+    log.info("Wierszy w pliku: %d. Start od wiersza %d%s. AI: %s (%s). Wyszukiwarka: %s. Wątki: %d.",
+             total, start + 1, " (wznowienie)" if start else "", AI["name"], AI["model"],
+             args.search, args.workers)
 
     records = df_in.to_dict("records")
     images_dir = None if args.bez_pobierania else os.path.join(

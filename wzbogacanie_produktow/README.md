@@ -4,7 +4,7 @@ Skrypt `wzbogac_produkty.py` czyta CSV z Google Sheets i dla każdego produktu:
 
 1. **szuka w internecie strony produktu** po kodzie producenta (`"AG0828" AEON`) i po EAN,
    pobiera ją i **sprawdza, czy ten kod lub EAN faktycznie na niej występuje**,
-2. **pisze opis HTML** (~1000 znaków, `<h2>`, `<p>`, `<ul>`) przez OpenAI `gpt-4o-mini`
+2. **pisze opis HTML** (~1000 znaków, `<h2>`, `<p>`, `<ul>`) przez Gemini `gemini-3.8-flash` (domyślnie) albo OpenAI `gpt-4o-mini`
    **wyłącznie na podstawie nazwy i tekstu potwierdzonej strony** — model dodatkowo ocenia,
    czy strona opisuje dokładnie ten produkt (kod, DN, PN …),
 3. **bierze zdjęcie** z potwierdzonej strony, a gdy go tam nie ma — z wyszukiwarki obrazów,
@@ -33,14 +33,21 @@ py -m pip install -r requirements.txt
 
 ## 2. Klucze API
 
-**OpenAI (wymagany)** — klucz z https://platform.openai.com/api-keys (konto musi mieć doładowane środki):
+**Gemini (domyślnie)** — klucz z https://aistudio.google.com/apikey (zaczyna się od `AIza`):
 
 ```powershell
 # Windows (PowerShell) — tylko dla bieżącego okna
-$env:OPENAI_API_KEY="sk-proj-...cały klucz..."
+$env:GEMINI_API_KEY="AIza...cały klucz..."
 # albo na stałe (zadziała w NOWYCH oknach)
-setx OPENAI_API_KEY "sk-proj-...cały klucz..."
+setx GEMINI_API_KEY "AIza...cały klucz..."
 ```
+
+Darmowy limit Gemini ma ograniczoną liczbę zapytań na minutę i dzień — przy pełnej bazie włącz płatności
+w Google AI Studio, inaczej skrypt będzie często czekał na limit (to nie błąd, tylko wolniejsza praca).
+Inny model Gemini ustawisz zmienną `GEMINI_MODEL`, np. `$env:GEMINI_MODEL="gemini-3.7-flash"`.
+
+**OpenAI (opcjonalnie, zamiast Gemini)** — klucz z https://platform.openai.com/api-keys, ustawiany jako
+`OPENAI_API_KEY`; uruchamiasz wtedy skrypt z `--ai openai`.
 
 Alternatywnie wpisz klucz na górze skryptu w sekcji `KONFIGURACJA`. Wtedy nie udostępniaj tego pliku.
 
@@ -111,7 +118,7 @@ oznaczenia `TAK` — nowa lista trafi do `produkty_wzbogacone_do_akceptacji_nowe
   pierwszego niezapisanego wiersza. Jeśli plik wejściowy zmienił kolejność, odmówi wznowienia.
 * Timeout / rate limit / błąd sieci → odczekanie 5 s (przy kolejnych błędach 10 s, 15 s …) i ponowienie, do 6 prób.
   Jeśli wszystkie zawiodą, produkt trafia do akceptacji z odpowiednim powodem, a skrypt jedzie dalej.
-* Zły klucz API albo brak środków na koncie OpenAI → skrypt zatrzymuje się (postęp zostaje zapisany).
+* Zły klucz API albo brak środków na koncie Gemini/OpenAI → skrypt zatrzymuje się (postęp zostaje zapisany).
 * Pełny log trafia do `wzbogacanie.log`.
 
 ## Zdjęcia a import do IdoSell
@@ -133,8 +140,8 @@ oznaczenia `TAK` — nowa lista trafi do `produkty_wzbogacone_do_akceptacji_nowe
 
 ## Czas i koszt (orientacyjnie)
 
-* OpenAI `gpt-4o-mini`: tekst strony źródłowej zwiększa długość zapytania — rząd **kilkunastu–kilkudziesięciu USD
-  za 28 000 produktów**.
+* Koszt AI zależy od modelu i cennika dostawcy — sprawdź go po teście na 10 produktach w panelu Google AI Studio
+  (lub OpenAI) i przelicz na 28 000. Tekst strony źródłowej wydłuża każde zapytanie.
 * Każdy produkt to 1–2 wyszukiwania i pobranie kilku stron, więc pełny przebieg potrwa **od kilkudziesięciu godzin
   wzwyż**. Można przerywać i wznawiać. Przy DuckDuckGo część zapytań może być blokowana — do pełnego przebiegu
   stabilniejszy jest SerpApi.
