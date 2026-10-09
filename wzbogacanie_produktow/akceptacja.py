@@ -255,13 +255,18 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .desc{margin-top:6px;padding:8px 12px;border-left:3px solid var(--line)} .desc h2{font-size:16px;margin:4px 0}
 .src{font-size:12px;word-break:break-all}
 .more{text-align:center;padding:8px}
+.howto{flex-basis:100%;font-size:13px;color:var(--muted)}
+@media print{.top,.ghead button,.more{display:none!important}body{background:#fff}
+  .group{break-inside:auto;border:1px solid #ccc}.item{break-inside:avoid}main{max-width:none;padding:0}}
 .off{opacity:.5}
 section.sure{border-left:6px solid var(--ok)}
 </style></head><body>
 <div class="top"><span class="sum" id="sum"></span>
 <button id="all">Zaznacz wszystkie</button><button id="none">Odznacz wszystkie</button>
-<button class="primary" id="save">Zapisz akceptację</button>
-<nav id="nav"></nav></div>
+<button id="pdf">PDF / drukuj</button><button class="primary" id="save">Zapisz akceptację</button>
+<nav id="nav"></nav>
+<div class="howto">Jak zaakceptować: zaznacz produkty (albo „Zaakceptuj całą grupę”) → „Zapisz akceptację” →
+plik <b>zaakceptowane_produkty.csv</b> z folderu Pobrane odeślij osobie, która przysłała tę stronę.</div></div>
 <main id="main"></main>
 <script id="data" type="application/json">__DATA__</script>
 <script>
@@ -270,7 +275,7 @@ const KEY='akceptacja:'+D.key, PAGE=50;
 let sel=new Set(D.items.filter(i=>i.a).map(i=>i.id));
 try{const s=localStorage.getItem(KEY);if(s)sel=new Set(JSON.parse(s));}catch(e){}
 const R=D.items.filter(i=>!i.v);
-const shown={}, open={};
+const shown={}, open={}; let ALL=false;
 function persist(){try{localStorage.setItem(KEY,JSON.stringify([...sel]));}catch(e){}render();}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setMany(list,on){list.filter(i=>i.ok&&!i.v).forEach(i=>on?sel.add(i.id):sel.delete(i.id));persist();}
@@ -292,7 +297,7 @@ function render(){
     box.querySelector('[data-a=tog]').onclick=e=>{e.stopPropagation();open[g.k]=!open[g.k];render();};
     if(open[g.k]){
       const ul=document.createElement('div');ul.className='glist';
-      const lim=shown[g.k]||PAGE;
+      const lim=ALL?list.length:(shown[g.k]||PAGE);
       list.slice(0,lim).forEach(i=>{
         const row=document.createElement('label');row.className='item'+(i.ok||i.v?'':' off');
         row.innerHTML=(i.v?'':`<input type="checkbox" ${sel.has(i.id)&&i.ok?'checked':''} ${i.ok?'':'disabled'}>`)+`
@@ -325,6 +330,10 @@ D.groups.forEach(g=>{const c=D.items.filter(i=>i.g===g.k).length;if(!c)return;
   const b=document.createElement('button');if(g.v)b.className='sure';
   b.textContent=(g.v?'PEWNE':g.t.split(' — ')[0])+` (${c})`;
   b.onclick=()=>{open[g.k]=true;render();document.getElementById('g-'+g.k).scrollIntoView();};nav.appendChild(b);});
+document.getElementById('pdf').onclick=()=>{
+  if(!confirm('Do PDF trafią WSZYSTKIE produkty z rozwiniętych sekcji. Sekcje, których nie chcesz w PDF, najpierw zwiń.\nW oknie drukowania wybierz „Zapisz jako PDF”.'))return;
+  ALL=true;render();setTimeout(()=>{window.print();ALL=false;render();},300);
+};
 render();
 </script></body></html>"""
 
