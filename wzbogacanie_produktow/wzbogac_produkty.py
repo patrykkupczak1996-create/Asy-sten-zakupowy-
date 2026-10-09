@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -202,6 +203,8 @@ Zasady:
 1. Najpierw sprawdź, czy tekst ze strony dotyczy DOKŁADNIE tego produktu: ten sam kod lub EAN
    i parametry zgodne z nazwą (np. DN, PN, średnice). Jeśli cokolwiek się nie zgadza,
    ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
+   Jeśli EAN w kartotece to „brak”, NIE oceniaj EAN ze strony (my go po prostu nie mamy) —
+   o zgodności decyduje kod producenta i parametry.
 2. Opis: DO około 1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
    {abbreviations}. Wyjaśnij zastosowanie produktu. Jeśli źródło ma mało danych, opis ma być
    KRÓTSZY — 400 znaków samych faktów jest lepsze niż 1000 znaków z ogólnikami.
@@ -872,7 +875,9 @@ def _call_ollama(model: str, prompt: str) -> dict:
         "format": "json",
         "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.1, "num_predict": AI["max_tokens"]},
+        # repeat_penalty 1.15 — mniej zapętlania się modelu (powtórzenia, puste/ucięte odpowiedzi)
+        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.1, "num_predict": AI["max_tokens"],
+                    "repeat_penalty": 1.15},
     })
     resp.raise_for_status()
     data = resp.json()
@@ -1169,27 +1174,56 @@ def filter_generic_claims(desc_html: str, source_text: str) -> tuple[str, list[s
     return out, removed
 
 
-def product_type_word(name: str) -> str:
-    """Rodzaj produktu = pierwsze słowo nazwy złożone z liter (np. „ZASUWA”, „Trójnik”, „Grzejnik”)."""
-    for word in re.findall(r"[^\W\d_]+", name):
-        if len(word) >= 3:
-            return word.lower()
-    return ""
+# Typowe końcówki przymiotników i imiesłowów (kołnierzowa, ręczny, natynkowy, równoważący, mosiężna…) —
+# takie słowa z nazwy nie są brane pod uwagę przy sprawdzaniu nagłówka.
+ADJECTIVE_ENDINGS = ("owy", "owa", "owe", "owej", "owego", "owych", "ny", "ne", "ni", "nej", "nego", "nych",
+                     "ący", "ąca", "ące", "ski", "ska", "skie", "cki", "cka", "ckie", "ły", "ła", "łe",
+                     "wy", "we")
 
 
-def heading_has_type(desc_html: str, name: str) -> bool:
-    """Czy <h2> zawiera rodzaj produktu z nazwy (odmiana dozwolona: zasuwa/zasuwy, łącznik/łącznika).
+def name_nouns(name: str, producer: str = "") -> list[str]:
+    """Słowa z nazwy, które mogą być rzeczownikiem: min. 4 litery, bez przymiotników, skrótów z kropką
+    (KOŁN., KR.) i nazwy producenta."""
+    skip = {w.lower() for w in re.findall(r"[^\W\d_]+", producer)}
+    nouns = []
+    for match in re.finditer(r"([^\W\d_]+)(\.?)", name):
+        word, dot = match.group(1).lower(), match.group(2)
+        if len(word) < 4 or dot or word in skip or word.endswith(ADJECTIVE_ENDINGS):
+            continue
+        if word not in nouns:
+            nouns.append(word)
+    return nouns
 
-    Rdzeń bez ostatniej litery łapie literówki modelu typu „Zasuga” zamiast „Zasuwa”.
+
+def _stem(word: str) -> str:
+    return word[:5] if len(word) >= 6 else word[:4]
+
+
+def heading_has_type(desc_html: str, name: str, producer: str = "") -> bool:
+    """Czy <h2> ma wspólny rdzeń (4–5 liter) z którymkolwiek rzeczownikiem z nazwy.
+
+    Rdzeń z początku słowa: literówka w bazie („Termostst”) nie karze poprawnego nagłówka („Termostat”),
+    a odmiana jest dozwolona (zasuwa/zasuwy, łącznik/łącznika).
     """
-    word = product_type_word(name)
     h2 = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.IGNORECASE | re.DOTALL)
-    if not word:
-        return True  # nazwa bez słowa — nie ma czego sprawdzać
     if not h2:
         return False
-    stem = word[:-1] if len(word) > 4 else word
-    return stem in _plain(h2.group(1)).lower()
+    nouns = name_nouns(name, producer)
+    if not nouns:
+        return True  # nazwa bez rzeczowników do sprawdzenia
+    heading = _plain(h2.group(1)).lower()
+    return any(_stem(w) in heading for w in nouns)
+
+
+# Słowa w uwagach AI, które wskazują na niezgodność INNĄ niż sam EAN (wtedy odrzucenie zostaje).
+NON_EAN_MISMATCH = re.compile(r"kod\w*\s+(?:\w+\s+){0,6}?(?:niezgodn|inn|różn|nie\s+zgadza)|niezgodn\w*\s+kod|"
+                              r"\bDN\b|\bPN\b|średnic|wymiar|inn\w*\s+(?:produkt|model|seri|rodzaj)|"
+                              r"materiał|gwint|ciśnieni", re.IGNORECASE)
+
+
+def ean_only_mismatch(uwagi: str) -> bool:
+    """Czy AI odrzuciło stronę wyłącznie z powodu EAN (bez niezgodności kodu, wymiarów, rodzaju…)."""
+    return bool(re.search(r"\bEAN\b|\bGTIN\b|kod\w*\s+kreskow", uwagi, re.IGNORECASE)) and not NON_EAN_MISMATCH.search(uwagi)
 
 
 def _numbers(text: str) -> set[str]:
@@ -1230,10 +1264,16 @@ def review_description(desc_html: str, row: dict, source: dict | None, row_label
         length = len(_plain(desc_html))
         if length < MIN_DESC_CHARS:
             reasons.append(f"opis po usunięciu ogólników za krótki ({length} znaków)")
-    if not heading_has_type(desc_html, row["name"]):
-        reasons.append(f"nagłówek opisu nie zawiera rodzaju produktu („{product_type_word(row['name'])}”) "
-                       "— możliwa literówka")
+    if not heading_has_type(desc_html, row["name"], row["producer"]):
+        reasons.append(heading_reason(row["name"], row["producer"]))
     return desc_html, reasons
+
+
+HEADING_REASON_PREFIX = "nagłówek opisu nie zawiera rodzaju produktu"
+
+
+def heading_reason(name: str, producer: str) -> str:
+    return f"{HEADING_REASON_PREFIX} („{', '.join(name_nouns(name, producer)[:3])}”) — możliwa literówka"
 
 
 # =============================================================================
@@ -1268,8 +1308,13 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
         if result:
             desc = result["opis_html"]
             if source and result.get("ten_sam_produkt") is not True:
-                reasons.append("AI: strona nie pasuje do produktu"
-                               + (f" ({result.get('uwagi')})" if result.get("uwagi") else ""))
+                uwagi = str(result.get("uwagi") or "")
+                if not row["ean"] and ean_only_mismatch(uwagi):
+                    # Nie mamy EAN w danych — EAN na stronie nie może być powodem odrzucenia; liczy się kod.
+                    log.info("%s AI zgłosiło tylko niezgodność EAN, a produkt nie ma EAN w danych — "
+                             "pomijam (%s)", row_label, uwagi)
+                else:
+                    reasons.append("AI: strona nie pasuje do produktu" + (f" ({uwagi})" if uwagi else ""))
             desc, desc_reasons = review_description(desc, row, source, row_label)
             reasons += desc_reasons
         else:
@@ -1840,6 +1885,45 @@ def save_dataframe(df: pd.DataFrame, path: str) -> None:
     os.replace(tmp, path)
 
 
+def recheck_statuses(output_path: str) -> None:
+    """--przelicz-statusy: ponowna kontrola zapisanych opisów bez generowania, statusy poprawiane na miejscu.
+
+    Sprawdza na nowo nagłówek (rdzeń rzeczownika z nazwy) i zdejmuje odrzucenie „AI: strona nie pasuje”,
+    jeśli dotyczyło tylko EAN, a produkt nie ma EAN w danych. Opisów nie zmienia. Przed zmianą robi kopię pliku.
+    """
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path}.")
+    df = read_csv(output_path)
+    backup = f"{os.path.splitext(output_path)[0]}_kopia_przed_przeliczeniem_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    shutil.copy2(output_path, backup)
+    changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
+    for i in df.index:
+        row = df.loc[i]
+        old_reasons = [r for r in row[COL_REASON].split("; ") if r]
+        reasons = []
+        for reason in old_reasons:
+            if reason.startswith(HEADING_REASON_PREFIX):
+                continue  # nagłówek sprawdzamy na nowo poniżej
+            if (reason.startswith("AI: strona nie pasuje") and not row[COL_EAN].strip()
+                    and ean_only_mismatch(reason)):
+                continue  # tylko EAN, którego nie mamy w danych — liczy się kod producenta
+            reasons.append(reason)
+        if row[COL_DESC] and not heading_has_type(row[COL_DESC], row[COL_NAME], row[COL_PRODUCER]):
+            reasons.append(heading_reason(row[COL_NAME], row[COL_PRODUCER]))
+        status = STATUS_REVIEW if reasons else STATUS_OK
+        if reasons != old_reasons:
+            changes["zmieniony powód"] += 1
+            if status != row[COL_STATUS]:
+                changes[f"→ {status}"] += 1
+            df.at[i, COL_REASON] = "; ".join(reasons)
+            df.at[i, COL_STATUS] = status
+    save_dataframe(df, output_path)
+    log.info("PRZELICZ: %d wierszy, zmienione powody: %d, %s → PEWNY: %d, → DO_AKCEPTACJI: %d. Kopia: %s",
+             len(df), changes["zmieniony powód"], STATUS_REVIEW, changes["→ PEWNY"],
+             changes["→ DO_AKCEPTACJI"], backup)
+    split_results(output_path)
+
+
 def reprocess_missing_sources(args) -> None:
     """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony”, resztę pliku zostawia bez zmian."""
     if not os.path.exists(args.output):
@@ -1920,6 +2004,9 @@ def main() -> None:
                         help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
     parser.add_argument("--bez-zdjec", action="store_true",
                         help="Tylko opisy: bez szukania i pobierania zdjęć; PEWNY zależy od źródła i opisu")
+    parser.add_argument("--przelicz-statusy", action="store_true",
+                        help="Ponowna kontrola zapisanych opisów w --output bez generowania; poprawia statusy "
+                             "na miejscu (przed zmianą robi kopię pliku)")
     parser.add_argument("--ponow-brak-strony", action="store_true",
                         help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony”; "
                              "pozostałe wiersze zostają bez zmian")
@@ -1939,7 +2026,7 @@ def main() -> None:
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
         return
-    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony:
+    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony and not args.przelicz_statusy:
         parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia, --ponow-brak-strony albo --zatwierdz")
 
     logging.basicConfig(
@@ -1955,6 +2042,10 @@ def main() -> None:
     check_for_update()
     # Jeden przebieg naraz na tym samym pliku wyników — dwa dopisywałyby/nadpisywały te same wiersze.
     _lock = lock_output(args.output)  # noqa: F841 — trzymamy uchwyt do końca procesu
+
+    if args.przelicz_statusy:
+        recheck_statuses(args.output)
+        return
 
     if args.ponow_brak_strony:
         configure_ai(args.ai)
