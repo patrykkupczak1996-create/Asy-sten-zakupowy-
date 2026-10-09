@@ -133,7 +133,28 @@ def newest_download() -> str | None:
     return max(files, key=os.path.getmtime) if files else None
 
 
+def load_photos(output_path: str, page_path: str) -> dict[str, tuple[str, str, str]]:
+    """{id: (zdjęcie lokalne lub link, link z internetu, status)} z wyników zdjecia.py, jeśli już były robione."""
+    photos_path = side_path(output_path, "zdjecia")
+    if not os.path.isfile(photos_path):
+        return {}
+    try:
+        photos = read_csv(photos_path).drop_duplicates(subset=[COL_ID], keep="last")
+    except Exception:
+        return {}
+    base = os.path.dirname(os.path.abspath(page_path))
+    out = {}
+    for r in photos.to_dict("records"):
+        url, local = r.get("Zdjecie_URL", ""), r.get("Zdjecie_plik", "")
+        if local and os.path.exists(local):
+            local = os.path.relpath(os.path.abspath(local), base).replace(os.sep, "/")
+        if url or local:
+            out[r[COL_ID]] = (local or url, url, r.get("Status_zdjecia", ""))
+    return out
+
+
 def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str) -> None:
+    photos = load_photos(storage_key, path)
     items = []
     for _, row in df.iterrows():
         sure = row[COL_STATUS] == STATUS_OK
@@ -143,6 +164,8 @@ def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str
             "r": row[COL_REASON], "s": row[COL_SOURCE],
             "d": safe_html(row[COL_DESC]), "ok": bool(row[COL_DESC].strip()),
             "a": row[COL_ID] in accepted,
+            "img": photos.get(row[COL_ID], ("", "", ""))[0], "imgu": photos.get(row[COL_ID], ("", "", ""))[1],
+            "imgs": photos.get(row[COL_ID], ("", "", ""))[2],
         })
     groups = [{"k": k, "t": t} for k, t, _ in GROUPS]
     groups.append({"k": "pewne", "t": "PEWNE — idą do importu bez akceptacji (tylko podgląd)", "v": True})
@@ -250,6 +273,10 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .item:last-child{border-bottom:0}
 .item input{width:20px;height:20px;margin-top:2px;flex:none}
 .item .main{flex:1;min-width:0}
+.item .ph{width:160px;flex:none;text-align:center;font-size:11px;color:var(--muted)}
+.item .ph img{width:160px;height:160px;object-fit:contain;background:#fff;border:1px solid #eee;border-radius:6px;display:block}
+.item .ph .noimg{width:160px;height:100px;display:flex;align-items:center;justify-content:center;background:#f0f0f0;border-radius:6px}
+@media (max-width:640px){.item{flex-wrap:wrap}.item .ph,.item .ph img{width:100%}}
 .item small{display:block;color:var(--muted)}
 .reason{color:var(--warn);background:var(--warnbg);padding:4px 8px;border-radius:6px;font-size:13px;margin:6px 0}
 .desc{margin-top:6px;padding:8px 12px;border-left:3px solid var(--line)} .desc h2{font-size:16px;margin:4px 0}
@@ -301,6 +328,7 @@ function render(){
       list.slice(0,lim).forEach(i=>{
         const row=document.createElement('label');row.className='item'+(i.ok||i.v?'':' off');
         row.innerHTML=(i.v?'':`<input type="checkbox" ${sel.has(i.id)&&i.ok?'checked':''} ${i.ok?'':'disabled'}>`)+`
+          <div class="ph">${i.img?`<a href="${esc(i.img)}" target="_blank"><img loading="lazy" src="${esc(i.img)}" data-u="${esc(i.imgu)}" onerror="if(this.dataset.u&&this.src!==this.dataset.u)this.src=this.dataset.u" alt=""></a>${i.imgs==='PEWNE'?'':esc(i.imgs.replace('_',' ').toLowerCase())}`:'<div class="noimg">brak zdjęcia</div>'}</div>
           <div class="main"><b>${esc(i.n)}</b><small>id ${esc(i.id)} · ${esc(i.p)} · kod ${esc(i.c)} · EAN ${esc(i.e)||'—'}</small>
           ${i.r?`<div class="reason">⚠ ${esc(i.r)}</div>`:''}
           <div class="desc">${i.ok?i.d:'<i>brak opisu — nie można zaakceptować</i>'}</div>
