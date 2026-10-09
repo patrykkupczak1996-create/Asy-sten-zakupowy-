@@ -1517,6 +1517,25 @@ def fix_typos(desc_html: str, name: str) -> tuple[str, list[str]]:
     return out, list(dict.fromkeys(fixes))
 
 
+# qwen (chiński model) potrafi w środku polskiego zdania wstawić słowo po chińsku, czasem po rosyjsku.
+# Znaki CJK, kana, hangul, cyrylica, tajski, arabski — w opisie polskiego sklepu nie mają prawa wystąpić.
+FOREIGN_SCRIPT_RE = re.compile(r"[\u0400-\u04ff\u0600-\u06ff\u0e00-\u0e7f\u3000-\u30ff\u3400-\u4dbf"
+                               r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+")
+FOREIGN_REASON_PREFIX = "opis zawierał znaki obcego alfabetu (np. chińskie) — usunięte, sprawdź zdanie"
+
+
+def strip_foreign_script(desc_html: str) -> tuple[str, list[str]]:
+    """Usuwa wtrącenia w obcym alfabecie. Zwraca (opis, usunięte fragmenty) — produkt idzie wtedy do akceptacji."""
+    found = FOREIGN_SCRIPT_RE.findall(desc_html)
+    if not found:
+        return desc_html, []
+    out = FOREIGN_SCRIPT_RE.sub("", desc_html)
+    out = re.sub(r"\(\s*\)", "", out)              # puste nawiasy po usuniętym słowie
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:])", r"\1", out)
+    return out, list(dict.fromkeys(found))
+
+
 def status_for(reasons: list[str]) -> str:
     """PEWNY, gdy wszystkie powody są tylko informacyjne (np. poprawiona literówka)."""
     return STATUS_REVIEW if any(not r.startswith(INFO_REASON_PREFIXES) for r in reasons) else STATUS_OK
@@ -1525,6 +1544,10 @@ def status_for(reasons: list[str]) -> str:
 def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
     """Poprawka literówek + filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody)."""
     reasons: list[str] = []
+    desc_html, foreign = strip_foreign_script(desc_html)
+    if foreign:
+        log.info("%s obce znaki w opisie (usunięte): %s", row_label, " ".join(foreign)[:80])
+        reasons.append(f"{FOREIGN_REASON_PREFIX}: {' '.join(foreign)[:40]}")
     desc_html, typo_fixes = fix_typos(desc_html, row["name"])
     if typo_fixes:
         log.info("%s poprawione literówki: %s", row_label, ", ".join(typo_fixes))
@@ -2182,11 +2205,20 @@ def recheck_statuses(output_path: str) -> None:
     shutil.copy2(output_path, backup)
     changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
     typo_rows, typo_examples = 0, []
+    foreign_rows, foreign_examples = 0, []
     for i in df.index:
         row = df.loc[i]
         old_reasons = [r for r in row[COL_REASON].split("; ") if r]
         reasons = []
         if row[COL_DESC]:
+            clean_desc, foreign = strip_foreign_script(row[COL_DESC])
+            if foreign:
+                df.at[i, COL_DESC] = clean_desc
+                foreign_rows += 1
+                foreign_examples.append(f"id {row[COL_ID]}: {' '.join(foreign)[:30]}")
+                if not any(r.startswith(FOREIGN_REASON_PREFIX) for r in old_reasons):
+                    reasons.append(f"{FOREIGN_REASON_PREFIX}: {' '.join(foreign)[:40]}")
+                row = df.loc[i]
             fixed_desc, typo_fixes = fix_typos(row[COL_DESC], row[COL_NAME])
             if typo_fixes:
                 df.at[i, COL_DESC] = fixed_desc
@@ -2217,6 +2249,8 @@ def recheck_statuses(output_path: str) -> None:
     log.info("PRZELICZ: poprawione literówki w %d opisach. Przykłady:", typo_rows)
     for example in typo_examples[:10]:
         log.info("   %s", example)
+    log.info("PRZELICZ: usunięte obce znaki (np. chińskie) w %d opisach — te produkty są do akceptacji.%s",
+             foreign_rows, (" Np. " + "; ".join(foreign_examples[:5])) if foreign_examples else "")
     split_results(output_path)
 
 
