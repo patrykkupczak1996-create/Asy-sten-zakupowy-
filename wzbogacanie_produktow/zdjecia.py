@@ -70,7 +70,7 @@ w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 30)
 w.BAD_IMAGE_WORDS = tuple(dict.fromkeys(w.BAD_IMAGE_WORDS + (
     "sparepart", "spare-part", "spare_part", "drawing", "rysunek", "schemat", "scheme", "wymiar",
     "dimension", "technical", "/cad/", "_cad", "-cad", ".dwg", "diagram", "certyfikat", "certificate", "pictogram",
-    "piktogram")))
+    "piktogram", "zrzut-ekranu", "zrzut_ekranu", "screenshot", "screen-shot", "screen_shot")))
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")  # „Palette images with Transparency…”
 
 
