@@ -63,6 +63,8 @@ for site in ("mateomarket.pl",):
         w.WATERMARK_SITES.append(site)
 # Wysokie produkty (hydranty, zasuwy z trzpieniem) mają zdjęcia ok. 1:2 — 0,5 odrzucało je jako „baner”.
 w.MIN_IMAGE_RATIO = min(w.MIN_IMAGE_RATIO, 0.4)
+# Kilka etapów (źródło, producent, wyszukiwarka) + większe wersje miniatur — 15 prób to za mało.
+w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 30)
 
 
 def side(output: str, suffix: str, ext: str = ".csv") -> str:
@@ -199,9 +201,43 @@ def producer_shop_candidates(record: dict) -> tuple[list[tuple[str, bool, str]],
     return [(u, False, url) for u in w.image_candidates_from_source(w.ProductMatcher("", "", ""), shop)], title
 
 
+# Sklepy pokazują miniatury, a pełny rozmiar leży pod podobnym adresem:
+# WordPress „zdjecie-150x150.jpg” → „zdjecie.jpg”, „/thumb/”, „_small” → „/large/”, „_large”, parametry „?w=100”.
+SIZE_WORDS = [("thumbnail", "large"), ("thumbs", "large"), ("thumb", "large"), ("small", "large"),
+              ("mini", "large"), ("medium", "large"), ("_min", "_max"), ("/s/", "/l/"), ("/m/", "/l/")]
+
+
+def bigger_variants(url: str) -> list[str]:
+    """Adresy możliwych większych wersji miniatury (sprawdzane tymi samymi filtrami co oryginał)."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    path = parts.path
+    variants = []
+    stripped = re.sub(r"-\d{2,4}x\d{2,4}(?=\.[A-Za-z]{3,4}$)", "", path)  # WordPress/WooCommerce
+    if stripped != path:
+        variants.append(stripped)
+    for small, big in SIZE_WORDS:
+        if small in path.lower():
+            variants.append(re.sub(re.escape(small), big, path, flags=re.IGNORECASE))
+    out = [urlunsplit((parts.scheme, parts.netloc, v, parts.query, "")) for v in variants]
+    if parts.query and re.search(r"(^|&)(w|h|width|height|size|resize)=", parts.query, re.I):
+        out.append(urlunsplit((parts.scheme, parts.netloc, path, "", "")))  # bez parametrów zmniejszania
+    return [u for u in dict.fromkeys(out) if u != url]
+
+
+def with_bigger_variants(cands: list[tuple[str, bool, str]]) -> list[tuple[str, bool, str]]:
+    """Najpierw możliwe większe wersje, potem oryginał — większa wersja tego samego zdjęcia ma pierwszeństwo."""
+    out: list[tuple[str, bool, str]] = []
+    for url, verified, page in cands:
+        out += [(v, verified, page) for v in bigger_variants(url)] + [(url, verified, page)]
+    return list(dict.fromkeys(out))
+
+
 def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
                  tried: set[str], notes: list[str]) -> tuple[str, bool, bytes, str, str]:
     """Pierwsze zdjęcie, które przejdzie filtry i model wizyjny: (url, potwierdzone, dane, rozszerzenie, strona)."""
+    cands = with_bigger_variants(cands)
     pages = {u: p for u, _, p in cands}
     base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
     for _ in range(VISION_TRIES):
