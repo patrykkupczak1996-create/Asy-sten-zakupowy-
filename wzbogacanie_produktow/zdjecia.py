@@ -11,6 +11,7 @@ czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
   py zdjecia.py --limit 20          test na 20 produktach
   py zdjecia.py                     cała baza (wznawia od miejsca przerwania, Ctrl+C = przerwa)
   py zdjecia.py --szukaj            produkty bez zdjęcia na stronie źródłowej: także wyszukiwarka obrazów
+  py zdjecia.py --ponow-brak --szukaj   jeszcze raz produkty, które zostały bez zdjęcia
   py zdjecia.py --podglad           strona z miniaturami: PEWNE do obejrzenia, wątpliwe do akceptacji
   py zdjecia.py --zapisz            plik dla IdoSell: @id + link do zdjęcia (pewne + zaakceptowane)
 
@@ -49,6 +50,13 @@ VISION_TRIES = 3             # ile zdjęć jednego produktu obejrzeć modelem, z
 DOWNLOAD_NAME = "zaakceptowane_zdjecia"
 IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
 log = w.log
+
+# Sklepy, które nakładają znak wodny na zdjęcia — szkoda czasu modelu, od razu szukamy gdzie indziej.
+for site in ("mateomarket.pl",):
+    if site not in w.WATERMARK_SITES:
+        w.WATERMARK_SITES.append(site)
+# Wysokie produkty (hydranty, zasuwy z trzpieniem) mają zdjęcia ok. 1:2 — 0,5 odrzucało je jako „baner”.
+w.MIN_IMAGE_RATIO = min(w.MIN_IMAGE_RATIO, 0.4)
 
 
 def side(output: str, suffix: str, ext: str = ".csv") -> str:
@@ -129,7 +137,10 @@ def run(args) -> None:
     result_path = side(args.output, "zdjecia")
     done = set()
     if os.path.isfile(result_path) and os.path.getsize(result_path):
-        done = set(w.read_csv(result_path)[COL_ID])
+        prev = w.read_csv(result_path).drop_duplicates(subset=[COL_ID], keep="last")
+        if args.ponow_brak:
+            prev = prev[prev[COL_IMG_STATUS] != NONE]  # bez zdjęcia -> do ponownego przetworzenia
+        done = set(prev[COL_ID])
     records = [r for r in todo.to_dict("records") if r[COL_ID] not in done]
     if args.limit:
         records = records[:args.limit]
@@ -234,6 +245,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Zdjęcia produktów ze stron źródłowych + kontrola modelem wizyjnym.")
     p.add_argument("--output", "-o", default="opisy_wszystkie.csv", help="Plik z wynikami opisów")
     p.add_argument("--limit", type=int, help="Tylko N produktów (test)")
+    p.add_argument("--ponow-brak", action="store_true",
+                   help="Przetwórz ponownie produkty, które zostały bez zdjęcia (np. z --szukaj)")
     p.add_argument("--szukaj", action="store_true",
                    help="Gdy strona źródłowa nie ma zdjęcia — szukaj w wyszukiwarce obrazów")
     p.add_argument("--search", choices=["ddg", "serpapi", "google"], default=w.SEARCH_ENGINE)
