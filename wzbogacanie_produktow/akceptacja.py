@@ -4,7 +4,8 @@ Szybka akceptacja produktów DO_AKCEPTACJI — grupami, jednym kliknięciem.
 
 Krok 1 — strona do przeglądania (można w trakcie przebiegu, plik roboczy jest tylko czytany):
     py akceptacja.py
-  Otwiera w przeglądarce opisy_wszystkie_akceptacja.html. Produkty są pogrupowane po
+  Otwiera w przeglądarce opisy_wszystkie_akceptacja.html z opisami wszystkich produktów
+  (PEWNE na końcu, tylko do podglądu). Produkty do akceptacji są pogrupowane po
   powodzie (np. „nagłówek bez rodzaju produktu”, „brak strony źródłowej”). Przy każdej
   grupie jest przycisk „Zaakceptuj całą grupę”, pojedyncze produkty można odznaczyć.
   Przycisk „Zapisz akceptację” pobiera plik zaakceptowane_produkty.csv (do Pobranych).
@@ -132,17 +133,19 @@ def newest_download() -> str | None:
     return max(files, key=os.path.getmtime) if files else None
 
 
-def write_page(review: pd.DataFrame, accepted: set[str], path: str, storage_key: str) -> None:
+def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str) -> None:
     items = []
-    for _, row in review.iterrows():
+    for _, row in df.iterrows():
+        sure = row[COL_STATUS] == STATUS_OK
         items.append({
-            "id": row[COL_ID], "g": group_of(row[COL_REASON]),
+            "id": row[COL_ID], "g": "pewne" if sure else group_of(row[COL_REASON]), "v": sure,
             "n": row[COL_NAME], "p": row[COL_PRODUCER], "c": row[COL_CODE], "e": row[COL_EAN],
             "r": row[COL_REASON], "s": row[COL_SOURCE],
             "d": safe_html(row[COL_DESC]), "ok": bool(row[COL_DESC].strip()),
             "a": row[COL_ID] in accepted,
         })
     groups = [{"k": k, "t": t} for k, t, _ in GROUPS]
+    groups.append({"k": "pewne", "t": "PEWNE — idą do importu bez akceptacji (tylko podgląd)", "v": True})
     data = json.dumps({"items": items, "groups": groups, "key": storage_key,
                        "file": DOWNLOAD_NAME + ".csv"}, ensure_ascii=False).replace("</", "<\\/")
     page = PAGE.replace("__DATA__", data)
@@ -212,7 +215,7 @@ def main() -> None:
         return
 
     page_path = side_path(args.output, "akceptacja").rsplit(".", 1)[0] + ".html"
-    write_page(review, accepted, page_path, os.path.abspath(args.output))
+    write_page(df, accepted, page_path, os.path.abspath(args.output))
     counts = review[COL_REASON].map(group_of).value_counts()
     print(f"Do akceptacji: {len(review)} produktów (już zaakceptowane: {len(accepted & set(review[COL_ID]))}).")
     for key, title, _ in GROUPS:
@@ -250,6 +253,7 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .src{font-size:12px;word-break:break-all}
 .more{text-align:center;padding:8px}
 .off{opacity:.5}
+.sure{border-left:6px solid var(--ok)}
 </style></head><body>
 <div class="top"><span class="sum" id="sum"></span>
 <button id="all">Zaznacz wszystkie</button><button id="none">Odznacz wszystkie</button>
@@ -261,36 +265,38 @@ const D=JSON.parse(document.getElementById('data').textContent);
 const KEY='akceptacja:'+D.key, PAGE=50;
 let sel=new Set(D.items.filter(i=>i.a).map(i=>i.id));
 try{const s=localStorage.getItem(KEY);if(s)sel=new Set(JSON.parse(s));}catch(e){}
-const byId=new Map(D.items.map(i=>[i.id,i]));
+const R=D.items.filter(i=>!i.v);
 const shown={}, open={};
 function persist(){try{localStorage.setItem(KEY,JSON.stringify([...sel]));}catch(e){}render();}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function setMany(list,on){list.filter(i=>i.ok).forEach(i=>on?sel.add(i.id):sel.delete(i.id));persist();}
+function setMany(list,on){list.filter(i=>i.ok&&!i.v).forEach(i=>on?sel.add(i.id):sel.delete(i.id));persist();}
 function render(){
-  const accN=D.items.filter(i=>sel.has(i.id)&&i.ok).length;
-  document.getElementById('sum').textContent=`Zaakceptowane: ${accN} z ${D.items.length}`;
+  const accN=R.filter(i=>sel.has(i.id)&&i.ok).length;
+  document.getElementById('sum').textContent=`Zaakceptowane: ${accN} z ${R.length} do akceptacji · pewne: ${D.items.length-R.length}`;
   const main=document.getElementById('main');main.innerHTML='';
   D.groups.forEach(g=>{
     const list=D.items.filter(i=>i.g===g.k); if(!list.length)return;
     const n=list.filter(i=>sel.has(i.id)&&i.ok).length;
-    const box=document.createElement('section');box.className='group';
-    box.innerHTML=`<div class="ghead"><h2>${esc(g.t)}</h2><span class="cnt">${n} / ${list.length} zaakceptowanych</span>
-      <button data-a="on">Zaakceptuj całą grupę</button><button data-a="off">Odznacz grupę</button>
-      <button data-a="tog">${open[g.k]?'Zwiń':'Pokaż produkty'}</button></div>`;
-    box.querySelector('[data-a=on]').onclick=e=>{e.stopPropagation();setMany(list,true);};
-    box.querySelector('[data-a=off]').onclick=e=>{e.stopPropagation();setMany(list,false);};
+    if(!(g.k in open))open[g.k]=true;
+    const box=document.createElement('section');box.className='group'+(g.v?' sure':'');
+    box.innerHTML=`<div class="ghead"><h2>${esc(g.t)}</h2>`+(g.v?`<span class="cnt">${list.length} produktów</span>`:
+      `<span class="cnt">${n} / ${list.length} zaakceptowanych</span>
+      <button data-a="on">Zaakceptuj całą grupę</button><button data-a="off">Odznacz grupę</button>`)+
+      `<button data-a="tog">${open[g.k]?'Zwiń':'Pokaż produkty'}</button></div>`;
+    if(!g.v){box.querySelector('[data-a=on]').onclick=e=>{e.stopPropagation();setMany(list,true);};
+    box.querySelector('[data-a=off]').onclick=e=>{e.stopPropagation();setMany(list,false);};}
     box.querySelector('[data-a=tog]').onclick=e=>{e.stopPropagation();open[g.k]=!open[g.k];render();};
     if(open[g.k]){
       const ul=document.createElement('div');ul.className='glist';
       const lim=shown[g.k]||PAGE;
       list.slice(0,lim).forEach(i=>{
-        const row=document.createElement('label');row.className='item'+(i.ok?'':' off');
-        row.innerHTML=`<input type="checkbox" ${sel.has(i.id)&&i.ok?'checked':''} ${i.ok?'':'disabled'}>
+        const row=document.createElement('label');row.className='item'+(i.ok||i.v?'':' off');
+        row.innerHTML=(i.v?'':`<input type="checkbox" ${sel.has(i.id)&&i.ok?'checked':''} ${i.ok?'':'disabled'}>`)+`
           <div class="main"><b>${esc(i.n)}</b><small>id ${esc(i.id)} · ${esc(i.p)} · kod ${esc(i.c)} · EAN ${esc(i.e)||'—'}</small>
-          <div class="reason">⚠ ${esc(i.r)}</div>
+          ${i.r?`<div class="reason">⚠ ${esc(i.r)}</div>`:''}
           <div class="desc">${i.ok?i.d:'<i>brak opisu — nie można zaakceptować</i>'}</div>
           ${i.s?`<div class="src">Źródło: <a href="${esc(i.s)}" target="_blank" rel="noreferrer">${esc(i.s)}</a></div>`:''}</div>`;
-        row.querySelector('input').onchange=e=>{e.target.checked?sel.add(i.id):sel.delete(i.id);persist();};
+        if(!i.v)row.querySelector('input').onchange=e=>{e.target.checked?sel.add(i.id):sel.delete(i.id);persist();};
         ul.appendChild(row);
       });
       if(list.length>lim){const m=document.createElement('div');m.className='more';
@@ -301,10 +307,10 @@ function render(){
     main.appendChild(box);
   });
 }
-document.getElementById('all').onclick=()=>setMany(D.items,true);
-document.getElementById('none').onclick=()=>setMany(D.items,false);
+document.getElementById('all').onclick=()=>setMany(R,true);
+document.getElementById('none').onclick=()=>setMany(R,false);
 document.getElementById('save').onclick=()=>{
-  const ids=D.items.filter(i=>sel.has(i.id)&&i.ok).map(i=>i.id);
+  const ids=R.filter(i=>sel.has(i.id)&&i.ok).map(i=>i.id);
   const csv='﻿@id\n'+ids.join('\n')+'\n';
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download=D.file;document.body.appendChild(a);a.click();a.remove();
