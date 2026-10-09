@@ -147,8 +147,9 @@ Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami prod
 ustawione w `TRUSTED_SITES` (domyślnie `cetel-hurtownia.pl`, `mateomarket.pl`). Na tych stronach szuka po kodzie
 producenta; EAN sprawdza w ogólnym wyszukiwaniu.
 
-**Sklep producenta bez kodów (np. AEON)** — w `PRODUCER_SEARCH` jest adres wewnętrznej wyszukiwarki sklepu
-(`https://aeon-sale.com/?s={q}&post_type=product`). Gdy hurtownia potwierdzi produkt po kodzie, model AI
+**Sklep producenta po nazwie (AEON, Valvex, Gebo)** — w `PRODUCER_SEARCH` jest wyszukiwarka sklepu i fragment adresu
+karty produktu, np. `{"url": "https://aeon-sale.com/?s={q}&post_type=product", "link": "/product/"}` (Valvex: `/produkt/`,
+Gebo: `/p/`). Gdy hurtownia potwierdzi produkt po kodzie, model AI
 wyciąga z jej karty pełną nazwę serii (np. „zasuwa gaz OptiValve typ A kołnierzowa”), skrypt wpisuje ją
 w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycję tej samej serii (rodzaj,
 gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
@@ -162,9 +163,20 @@ producentów; karta z wyników i tak przechodzi zwykłą weryfikację kodu/EAN. 
 |---|---|---|
 | AFRISO | `afriso.pl/wyszukiwanie?search=KOD` | szuka po kodzie (nie po EAN); adres karty zaczyna się od kodu, EAN jest w danych JSON-LD karty |
 | CONEX | `conexbanninger.com/products/?lang=en&srch=KOD` | karta `/product/…` zawiera kod |
+| GEBERIT | API `catalog.geberit.pl/api/suggest?brand=geberit&locale=pl-PL&term=KOD` | katalog działa w JavaScript; pole `exactMatches`; karta produktu `PRO_…` ma pierwszeństwo przed stroną części zamiennej `SPT_…` |
+| VALVEX | `valvex.com/?s=KOD` | karta `/produkt/…` zawiera kod |
+| GEBO | `gebo.group/de-DE/search?search=KOD` | tylko wersja niemiecka (pl-PL nie istnieje); kod w adresie karty |
+| FERRO | API Meilisearch (publiczny klucz z HTML ferro.pl) | pola `part_number`, `ean`; karta z pola `url` |
+| DANFOSS | API `store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore?term=KOD` | tylko produkty ze sklepu Danfoss (np. 003Z1031 nie ma) |
 
-Sprawdzone i nieprzydatne: Onninen i Armacell (HTTP 403), Bohamet, AGRU, Alca, Awenta (wyszukiwarka nie zna kodów),
-De Dietrich (błąd certyfikatu), Apator-Powogaz (brak wyszukiwarki). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
+Wpis z API JSON (`"api": {...}`) obsługuje: metodę, parametry/JSON z `{q}`, klucz pobierany ze strony (`key_from`),
+listę wyników (`items`, `None` = lista na najwyższym poziomie), pola z kodem/EAN (`code_fields`) i adres karty (`url_field`
++ `base` albo `url_from_id`). Brane są tylko pozycje, które w polach kodu mają NASZ kod albo EAN.
+
+Sprawdzone i nieprzydatne (październik 2026): blokują skrypty (HTTP 403) — Onninen, Armacell, Flamco; wyszukiwarka nie
+zna kodów — Kaczmarek (kaczmarek2.pl), Bohamet, AGRU, Alca, Awenta, KAN-therm (także API WordPressa CMS); wyniki tylko
+w JavaScript, bez znalezionego otwartego API — Wavin (Contentstack), Galmet, Rothenberger; brak wyszukiwarki lub strona nie
+odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich (certyfikat), Apator-Powogaz. Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
 `py wzbogac_produkty.py --test-wyszukiwarki KOD`. Strony, które kilka razy z rzędu odmówią dostępu (403), są pomijane
 do końca przebiegu. Skrypt czyta też dane strukturalne JSON-LD stron (sku, gtin = EAN) — wiele sklepów pokazuje EAN tylko tam.
 
@@ -233,6 +245,8 @@ Próbka proporcjonalna do producentów (najwięcej z największych, min. 1 z ka�
 
 ```powershell
 py wzbogac_produkty.py --input produkty.csv --utworz-probke 50
+# albo tylko wybrani producenci:
+py wzbogac_produkty.py --input produkty.csv --utworz-probke 50 --producenci "GEBERIT,WAVIN,VALVEX"
 py wzbogac_produkty.py --input produkty_probka.csv --output wyniki_probka.csv
 py wzbogac_produkty.py --sprawdz-zdjecia --output wyniki_probka.csv
 start wyniki_probka_podglad.html

@@ -77,9 +77,13 @@ PRODUCER_SITES = {
 # Wyszukiwarki sklepów producentów, w których kodów nie ma, ale są dobre zdjęcia serii. Skrypt szuka tam
 # po nazwie serii (z karty hurtowni), a model AI wybiera z wyników pozycję zgodną z produktem.
 # {q} = zapytanie. Strona nie musi być w indeksie DuckDuckGo — skrypt używa jej własnej wyszukiwarki.
+# Wartość: sam adres (karty rozpoznawane po „/product/”) albo {"url": adres, "link": fragment adresu karty}.
 PRODUCER_SEARCH = {
-    "AEON": "https://aeon-sale.com/?s={q}&post_type=product",
+    "AEON": {"url": "https://aeon-sale.com/?s={q}&post_type=product", "link": "/product/"},
+    "VALVEX": {"url": "https://valvex.com/?s={q}", "link": "/produkt/"},
+    "GEBO": {"url": "https://www.gebo.group/de-DE/search?search={q}", "link": "/p/"},
 }
+DEFAULT_SHOP_LINK = "/product/"
 # Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
 # jest powtarzalny i szybszy. Karta z wyników i tak przechodzi zwykłą weryfikację (kod/EAN na stronie).
 #   "url":         adres strony wyników ({q} = kod producenta),
@@ -87,16 +91,47 @@ PRODUCER_SEARCH = {
 #   "code_in_url": True — brać tylko karty z kodem w adresie (warianty z innymi kodami odpadają);
 #                  False — brać pierwsze karty z wyników (kod sprawdzany na samej karcie),
 #   "producers":   dla których producentów (nazwa jak w /producer@name); brak klucza = dla wszystkich.
+#   "api":         zamiast "url"/"link" — wyszukiwarka z API JSON (patrz direct_search_api).
 # Sprawdzone wyszukiwarki (październik 2026), test: py wzbogac_produkty.py --test-wyszukiwarki KOD
-#   AFRISO — afriso.pl szuka po kodzie (nie po EAN), adres karty zaczyna się od kodu, EAN jest w JSON-LD karty.
-#   CONEX  — conexbanninger.com szuka po kodzie, karta (/product/…) zawiera kod.
-# Sprawdzone i NIEprzydatne: Onninen (HTTP 403), Bohamet / AGRU / Alca / Awenta (wyszukiwarka nie zna kodów),
-#   Armacell (HTTP 403), De Dietrich (błąd certyfikatu SSL), Apator-Powogaz (brak wyszukiwarki).
+#   AFRISO  — afriso.pl szuka po kodzie (nie po EAN), adres karty zaczyna się od kodu, EAN jest w JSON-LD karty.
+#   CONEX   — conexbanninger.com szuka po kodzie, karta (/product/…) zawiera kod.
+#   GEBERIT — katalog to aplikacja JavaScript; API podpowiedzi catalog.geberit.pl/api/suggest?brand=geberit&
+#             locale=pl-PL&term=KOD, pole exactMatches z kodem; karta /pl-PL/product/PRO_… (produkt) albo
+#             /pl-PL/spare-part/SPT_… (część zamienna — strona spłuczki, w której część występuje).
+#   VALVEX  — valvex.com/?s=KOD (WordPress), karta /produkt/… zawiera kod.
+#   GEBO    — gebo.group/pl-PL/search?search=KOD, kod w adresie karty (/p/…/01.260.28.02).
+#   FERRO   — wyszukiwarka Meilisearch (publiczny klucz tylko do wyszukiwania, podany w HTML ferro.pl):
+#             pola part_number i ean, karta pod adresem z pola url.
+#   DANFOSS — store.danfoss.com: podpowiedzi JSON (…/search/autocomplete/SearchBoxNextStore?term=KOD),
+#             pole code, karta /p/KOD. Nie każdy produkt Danfoss jest w sklepie (np. 003Z1031 nie ma).
+# Sprawdzone i NIEprzydatne (październik 2026):
+#   blokują skrypty (HTTP 403): Onninen, Armacell, Flamco (flamco.aalberts-hfc.com);
+#   wyszukiwarka nie zna kodów: Kaczmarek (kaczmarek2.pl), Bohamet, AGRU, Alca, Awenta;
+#   wyniki tylko przez JavaScript, bez znalezionego API: Wavin, KAN-therm, Galmet, Rothenberger;
+#   brak wyszukiwarki / strona nie odpowiada: Purmo, Georg Fischer (gfps.com), Vesbo, Grundfos (przekroczony czas),
+#   De Dietrich (błąd certyfikatu SSL), Apator-Powogaz.
 DIRECT_SEARCH = {
     "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
                   "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
     "conexbanninger.com": {"url": "https://conexbanninger.com/products/?lang=en&srch={q}",
                            "link": "/product/", "code_in_url": False, "producers": ["CONEX"]},
+    "catalog.geberit.pl": {"producers": ["GEBERIT"], "api": {
+        "url": "https://catalog.geberit.pl/api/suggest", "params": {"brand": "geberit", "locale": "pl-PL", "term": "{q}"},
+        "items": None, "code_fields": ["exactMatches"],
+        "url_from_id": {"PRO_": "https://catalog.geberit.pl/pl-PL/product/",
+                        "SPT_": "https://catalog.geberit.pl/pl-PL/spare-part/"}}},
+    "valvex.com": {"url": "https://valvex.com/?s={q}",
+                   "link": "/produkt/", "code_in_url": False, "producers": ["VALVEX"]},
+    "gebo.group": {"url": "https://www.gebo.group/de-DE/search?search={q}",  # pl-PL/en-GB: HTTP 404
+                   "link": "/p/", "code_in_url": True, "producers": ["GEBO"]},
+    "ferro.pl": {"producers": ["FERRO"], "api": {
+        "method": "POST", "url": "https://meilisearch-pl.pr.uc.ferro.unitymsp.it/indexes/products_pl/search",
+        "json": {"q": "{q}", "limit": 5}, "headers": {"Authorization": "Bearer {key}"},
+        "key_from": {"page": "https://www.ferro.pl/", "regex": r'engine-api-key="([^"]+)"'},
+        "items": "hits", "url_field": "url", "code_fields": ["part_number", "ean"], "base": "https://www.ferro.pl"}},
+    "store.danfoss.com": {"producers": ["DANFOSS"], "api": {
+        "url": "https://store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore", "params": {"term": "{q}"},
+        "items": "products", "url_field": "url", "code_fields": ["code"], "base": "https://store.danfoss.com/pl/pl"}},
 }
 MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
@@ -412,6 +447,25 @@ def is_direct_image_url(url: str) -> bool:
     return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
 
 
+NOT_IMAGE_EXTENSIONS = (".svg", ".gif", ".ico", ".html", ".htm", ".js", ".css", ".pdf", ".json", ".xml")
+
+
+def is_image_candidate_url(url: str) -> bool:
+    """Łagodniejsze niż is_direct_image_url — dla og:image i galerii produktu. Serwery zdjęć (Scene7 Castoramy,
+    Cloudinary, Sanitino…) podają adresy bez rozszerzenia; to, czy to naprawdę obraz, sprawdza fetch_image
+    po zawartości pliku."""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    return is_direct_image_url(url) or not urlparse(url).path.lower().endswith(NOT_IMAGE_EXTENSIONS)
+
+
+# Strony bez og:image i bez rozpoznawalnej galerii: wzorzec adresu, po którym rozpoznać zdjęcia produktu
+# wśród zwykłych <img> na karcie (domena karty → wyrażenie regularne na adres zdjęcia).
+PRODUCT_IMAGE_HINTS = {
+    "catalog.geberit.pl": r"images\.data\.geberit\.com/image/upload/[^/]*t_Product(?:Large|Medium|Detail)",
+}
+
+
 def html_doc(resp: requests.Response):
     """Drzewo HTML z poprawnym kodowaniem (polskie znaki) także dla stron, które go nie deklarują."""
     import lxml.html
@@ -524,6 +578,106 @@ def direct_search_applies(cfg: dict, producer: str | None) -> bool:
     return producer is None or not producers or producer.strip().upper() in {p.upper() for p in producers}
 
 
+def _result_links(resp, link_fragment: str) -> list[str]:
+    """Adresy z fragmentem `link_fragment` w całym kodzie strony (także w danych JSON dla JavaScriptu)."""
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    page = resp.text.replace("\\/", "/")  # JSON zapisuje ukośniki jako \/
+    link = re.escape(link_fragment)
+    out = []
+    for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
+        url = urljoin(resp.url, found).split("#")[0]
+        if url not in out:
+            out.append(url)
+    return out
+
+
+_common_links: dict[str, set[str]] = {}
+_common_links_lock = threading.Lock()
+NONSENSE_QUERY = "zzqx0000qxzz"
+
+
+def _common_result_links(domain: str, cfg: dict) -> set[str]:
+    """Linki do kart, które strona wyników pokazuje ZAWSZE (menu, polecane) — sprawdzone na bezsensownym
+    zapytaniu. Bez tego np. katalog Geberit zwracałby stałe linki z menu zamiast wyników."""
+    from urllib.parse import quote_plus
+
+    with _common_links_lock:
+        if domain in _common_links:
+            return _common_links[domain]
+    try:
+        resp = requests.get(cfg["url"].format(q=quote_plus(NONSENSE_QUERY)), headers=BROWSER_HEADERS,
+                            timeout=PAGE_TIMEOUT)
+        links = set(_result_links(resp, cfg["link"])) if resp.status_code == 200 else set()
+    except Exception:
+        links = set()
+    with _common_links_lock:
+        _common_links[domain] = links
+    return links
+
+
+_api_keys: dict[str, str] = {}
+_api_keys_lock = threading.Lock()
+
+
+def _api_key(domain: str, spec: dict) -> str:
+    """Publiczny klucz wyszukiwarki, który strona sama podaje w HTML (np. Meilisearch na ferro.pl)."""
+    with _api_keys_lock:
+        if domain in _api_keys:
+            return _api_keys[domain]
+    page = requests.get(spec["page"], headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT).text
+    found = re.search(spec["regex"], page)
+    key = found.group(1) if found else ""
+    with _api_keys_lock:
+        _api_keys[domain] = key
+    return key
+
+
+def direct_search_api(domain: str, cfg: dict, m: ProductMatcher, code: str) -> list[str]:
+    """Wyszukiwarka z API JSON (strony, które wyniki ładują JavaScriptem). Karty z kodem/EAN produktu.
+
+    cfg["api"]: method, url ({q}), params/json (z {q}), headers (z {key}), key_from {page, regex},
+    items (klucz z listą wyników), url_field, code_fields (pola z kodem/EAN), base (adres do dołączenia).
+    """
+    api = cfg["api"]
+
+    def fill(value):
+        if isinstance(value, str):
+            return value.replace("{q}", code).replace("{key}", key)
+        if isinstance(value, dict):
+            return {k: fill(v) for k, v in value.items()}
+        return value
+
+    try:
+        key = _api_key(domain, api["key_from"]) if "key_from" in api else ""
+        resp = requests.request(api.get("method", "GET"), fill(api["url"]),
+                                params=fill(api.get("params")), json=fill(api.get("json")),
+                                headers={**BROWSER_HEADERS, **fill(api.get("headers", {}))}, timeout=PAGE_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        items = (data if api.get("items") is None else data.get(api["items"], [])) or []
+    except Exception as exc:
+        log.debug("API wyszukiwarki %s niedostępne: %s", domain, exc)
+        return []
+    urls = []
+    id_paths = api.get("url_from_id")  # {prefiks id: adres karty} — np. Geberit PRO_… / SPT_…
+    for item in items:
+        values = " ".join(json.dumps(item.get(f, ""), ensure_ascii=False) for f in api.get("code_fields", []))
+        # Tylko pozycje, które w polach kodu/EAN mają NASZ kod albo EAN (warianty z innymi kodami odpadają).
+        if not m.in_short_text(values):
+            continue
+        if id_paths:
+            item_id = str(item.get(api.get("id_field", "id"), ""))
+            for order, (prefix, base) in enumerate(id_paths.items()):
+                if item_id.startswith(prefix):
+                    urls.append((order, base + item_id))
+                    break
+        elif item.get(api["url_field"]):
+            urls.append((0, urljoin(api["base"].rstrip("/") + "/", str(item[api["url_field"]]).lstrip("/"))))
+    # Kolejność z url_from_id: np. karta produktu przed stroną części zamiennej.
+    return [u for _, u in sorted(urls, key=lambda x: x[0])][:MAX_DIRECT_RESULTS]
+
+
 def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None) -> list[str]:
     """Karty produktów z wyszukiwarek producentów/hurtowni (DIRECT_SEARCH) dla tego producenta."""
     from urllib.parse import quote_plus
@@ -532,21 +686,19 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
     for domain, cfg in DIRECT_SEARCH.items():
         if not direct_search_applies(cfg, producer):
             continue
+        if "api" in cfg:
+            urls += [u for u in direct_search_api(domain, cfg, m, code) if u not in urls]
+            continue
         try:
             resp = requests.get(cfg["url"].format(q=quote_plus(code)), headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
             resp.raise_for_status()
         except Exception as exc:
             log.debug("Wyszukiwarka %s niedostępna: %s", domain, exc)
             continue
-        if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
-            resp.encoding = resp.apparent_encoding or "utf-8"
-        # Szukamy adresów w całym kodzie strony — działa też, gdy wyniki są w danych JSON dla JavaScriptu.
-        link = re.escape(cfg["link"])
-        page = resp.text.replace("\\/", "/")  # JSON zapisuje ukośniki jako \/
         found_here: list[str] = []
-        for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
-            url = urljoin(resp.url, found).split("#")[0]
-            if url in urls or url in found_here or urlparse(url).netloc.removeprefix("www.") != domain:
+        common = _common_result_links(domain, cfg)
+        for url in _result_links(resp, cfg["link"]):
+            if url in urls or url in found_here or url in common or urlparse(url).netloc.removeprefix("www.") != domain:
                 continue
             if cfg.get("code_in_url", True) and not m.in_short_text(url):
                 continue
@@ -555,9 +707,19 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
     return urls
 
 
-def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produkty_probka.csv") -> None:
-    """Losowa próbka proporcjonalna do liczby produktów producenta (każdy z 15 największych ma min. 1)."""
+def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produkty_probka.csv",
+                producers: list[str] | None = None) -> None:
+    """Losowa próbka proporcjonalna do liczby produktów producenta (każdy z 15 największych ma min. 1).
+
+    producers: tylko ci producenci (nazwy jak w /producer@name, wielkość liter bez znaczenia).
+    """
     df = pd.read_csv(input_path, dtype=str, keep_default_na=False, sep=sep, encoding="utf-8-sig")
+    if producers:
+        wanted = {p.strip().upper() for p in producers if p.strip()}
+        df = df[df[COL_PRODUCER].str.strip().str.upper().isin(wanted)]
+        missing = wanted - set(df[COL_PRODUCER].str.strip().str.upper())
+        if missing:
+            print(f"Uwaga: brak w bazie producentów: {', '.join(sorted(missing))}")
     counts = df[COL_PRODUCER].value_counts()
     quota = {p: max(1 if i < 15 else 0, round(n * c / len(df))) for i, (p, c) in enumerate(counts.items())}
     parts = [df[df[COL_PRODUCER] == p].sample(min(q, counts[p]), random_state=42)
@@ -577,6 +739,10 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
     m = ProductMatcher(code, "", producer or "")
     for domain, cfg in DIRECT_SEARCH.items():
         if not direct_search_applies(cfg, producer):
+            continue
+        if "api" in cfg:
+            print(f"\n{domain}: API JSON {cfg['api']['url']} — karty: "
+                  f"{direct_search_api(domain, cfg, ProductMatcher(code, '', ''), code) or 'brak'}")
             continue
         url = cfg["url"].format(q=quote_plus(code))
         print(f"\n{domain}: {url}")
@@ -653,24 +819,32 @@ def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
     """Zdjęcia ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
     if is_watermark_site(source["url"]):
         return []  # strona ze znakami wodnymi — zdjęcie znajdzie wyszukiwarka obrazów
-    with_code = [src for src, alt in source["imgs"] if is_direct_image_url(src) and m.in_short_text(src, alt)]
-    og = [src for src in source["og_images"] if is_direct_image_url(src)]
+    with_code = [src for src, alt in source["imgs"] if is_image_candidate_url(src) and m.in_short_text(src, alt)]
+    og = [src for src in source["og_images"] if is_image_candidate_url(src)]
     # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku — na jego
     # stronie bierzemy też zdjęcia z GALERII produktu (nie wszystkie obrazki: „podobne produkty” to inne towary).
-    rest = ([src for src in source.get("gallery", []) if is_direct_image_url(src)]
+    rest = ([src for src in source.get("gallery", []) if is_image_candidate_url(src)]
             if source.get("producer_site") else [])
-    return list(dict.fromkeys(with_code + og + rest))
+    host = urlparse(source["url"]).netloc.lower().removeprefix("www.")
+    hint = PRODUCT_IMAGE_HINTS.get(host)
+    hinted = [src for src, _ in source["imgs"] if hint and re.search(hint, src)]
+    return list(dict.fromkeys(with_code + og + rest + hinted))
 
 
 _shop_cache: dict[str, list[tuple[str, str]]] = {}
 _shop_cache_lock = threading.Lock()
 
 
-def search_producer_shop(template: str, query: str) -> list[tuple[str, str]]:
-    """[(tytuł, adres)] produktów z wyników wewnętrznej wyszukiwarki sklepu producenta (z pamięcią podręczną)."""
+def search_producer_shop(template: str | dict, query: str) -> list[tuple[str, str]]:
+    """[(tytuł, adres)] produktów z wyników wewnętrznej wyszukiwarki sklepu producenta (z pamięcią podręczną).
+
+    template: adres z {q} albo wpis z PRODUCER_SEARCH {"url": …, "link": fragment adresu karty produktu}.
+    """
     from urllib.parse import quote_plus
 
-    url = template.format(q=quote_plus(query))
+    cfg = template if isinstance(template, dict) else {"url": template}
+    link = cfg.get("link") or DEFAULT_SHOP_LINK
+    url = cfg["url"].format(q=quote_plus(query))
     with _shop_cache_lock:
         if url in _shop_cache:
             return _shop_cache[url]
@@ -680,7 +854,7 @@ def search_producer_shop(template: str, query: str) -> list[tuple[str, str]]:
     found: dict[str, str] = {}
     for a in doc.xpath("//a[@href]"):
         href = urljoin(url, a.get("href"))
-        if "/product/" not in href or "add-to-cart" in href:
+        if link not in href or "add-to-cart" in href:
             continue
         title = re.sub(r"\s+", " ", a.text_content()).strip()
         if len(title) > len(found.get(href, "")):
@@ -1996,6 +2170,8 @@ def main() -> None:
     parser.add_argument("--utworz-probke", type=int, metavar="N",
                         help="Zapisz losową próbkę ok. N produktów z --input do produkty_probka.csv "
                              "(proporcjonalnie do producentów) — do testów na całej bazie")
+    parser.add_argument("--producenci", metavar="LISTA",
+                        help="Z --utworz-probke: tylko ci producenci, po przecinku (np. \"GEBERIT,WAVIN\")")
     parser.add_argument("--test-wyszukiwarki", metavar="KOD",
                         help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
     parser.add_argument("--aktualizuj", action="store_true",
@@ -2018,7 +2194,8 @@ def main() -> None:
     if args.utworz_probke:
         if not args.input:
             parser.error("--utworz-probke wymaga --input")
-        make_sample(args.input, args.utworz_probke, args.sep)
+        make_sample(args.input, args.utworz_probke, args.sep,
+                    producers=args.producenci.split(",") if args.producenci else None)
         return
     if args.test_wyszukiwarki:
         test_direct_search(args.test_wyszukiwarki)
