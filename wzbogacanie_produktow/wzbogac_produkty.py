@@ -178,8 +178,11 @@ SYSTEM_PROMPT = "Jesteś ekspertem SEO w branży instalacyjnej i B2B."
 ABBREVIATIONS = """DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
 KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = krótka (krótka długość zabudowy, np. KR. F4),
 F4/F5 = długość zabudowy wg normy EN 558 (F4 krótka, F5 długa), ŻEL. = żeliwna,
-RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 lub OD63 = średnica
-zewnętrzna rury w mm, PE/PVC = do rur z polietylenu i PVC, Z PE = z końcówkami PE"""
+RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 = średnica zewnętrzna rury 225 mm,
+PE = polietylen, PVC = polichlorek winylu (nie poliwęglan), PE/PVC = do rur z polietylenu
+i polichlorku winylu, Z PE = z końcówkami z polietylenu"""
+# Liczby, które słownik skrótów wprowadza sam z siebie (np. „wg normy EN 558”) — nie są zmyśleniem modelu.
+ABBREVIATION_NUMBERS = {"558"}
 
 PROMPT_WITH_SOURCE = """Napisz opis produktu do sklepu internetowego B2B.
 
@@ -241,14 +244,15 @@ DANE Z KARTOTEKI:
 - Kod producenta: {code}
 - Kategoria: {category}
 
-Nie mamy karty katalogowej tego produktu, więc:
-1. Opis: DO około 600 znaków (bez znaczników HTML) — krótko. Rozwiń skróty techniczne z nazwy, np.
-   {abbreviations}. Wyjaśnij typowe zastosowanie tego rodzaju produktu.
-2. Używaj WYŁĄCZNIE informacji wynikających z nazwy i kategorii. NIE podawaj materiałów,
-   norm, masy, wymiarów ani certyfikatów, których nie ma w nazwie. ZAKAZANE są ogólniki o jakości,
-   trwałości, odporności, zgodności z normami, łatwości montażu i niezawodności.
-3. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
-   Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
+Nie mamy karty katalogowej tego produktu, więc NIE piszemy opisu, tylko listę parametrów z nazwy:
+1. <h2> — pełna nazwa produktu po polsku: rozwinięte skróty z nazwy, normalna pisownia (nie WIELKIE LITERY).
+2. Pod nagłówkiem jedna lista <ul> z punktami <li> w formie „<strong>Parametr:</strong> wartość”,
+   wyłącznie dla parametrów, które WPROST wynikają z nazwy, np.: rodzaj produktu, średnica nominalna (DN),
+   ciśnienie nominalne (PN), średnica zewnętrzna rury, gwint / typ złącza, materiał, przeznaczenie (woda/gaz).
+   Skróty rozwijaj według słownika: {abbreviations}.
+3. ZAKAZANE: akapity <p>, zdania o zastosowaniu, zalety, ogólniki, parametry i liczby, których nie ma w nazwie.
+   Jeśli nie wiesz, co znaczy skrót, przepisz go bez rozwijania.
+4. Wyłącznie czysty HTML z tagami <h2>, <ul>, <li>, <strong>. Bez <html>, <body>, stylów i Markdown.
 
 Odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"opis_html": "..."}}"""
@@ -1115,7 +1119,10 @@ BANNED_PHRASES = [
      r"\bPN-|\bEN\s?\d|\bISO\b|norm|standard|DVGW|atest|certyfikat"),
     (r"(?:najnowsz|nowoczesn)\w*\s+(?:standard\w*|technologi\w*|rozwiązan\w*)", r"standard|technologi"),
     (r"(?:łatw|prost|szybk|bezproblemow)\w*\s+(?:i\s+\w+\s+)?(?:montaż\w*|instalacj\w*|w\s+montażu|"
-     r"w\s+instalacji|do\s+zamontowania|zamontowa\w*)", r"montaż|instalacj"),
+     r"w\s+instalacji|do\s+zamontowania|zamontowa\w*)",
+     # samo słowo „montaż” w źródle nie wystarczy — źródło musi mówić o ŁATWYM/szybkim montażu
+     r"(?:łatw|prost|szybk|bezproblemow)\w*\s+(?:\w+\s+)?(?:montaż|instalacj|zamontowa)|"
+     r"montaż\w*\s+(?:jest\s+)?(?:łatw|prost|szybk)"),
     (r"(?:dług[oi]?\w*\s*)?trwał(?:ość|ości|y|a|e|ego|ej|ym|ych)\b|długotrwał\w*|żywotnoś\w*", r"trwał|żywotnoś"),
 ]
 MIN_DESC_CHARS = 200          # opis krótszy po usunięciu ogólników idzie do akceptacji
@@ -1185,9 +1192,37 @@ def heading_has_type(desc_html: str, name: str) -> bool:
     return stem in _plain(h2.group(1)).lower()
 
 
+def _numbers(text: str) -> set[str]:
+    return {n.replace(",", ".") for n in re.findall(r"\d+(?:[.,]\d+)?", text)}
+
+
+def strip_name_only_extras(desc_html: str, name: str) -> tuple[str, list[str]]:
+    """Opis „tylko z nazwy”: usuwa akapity i punkty listy z liczbami spoza nazwy (np. zmyślone „OD63”)."""
+    removed: list[str] = []
+    allowed = _numbers(name) | ABBREVIATION_NUMBERS
+
+    def check_li(match: re.Match) -> str:
+        invented = _numbers(_plain(match.group(1))) - allowed
+        if invented:
+            removed.append(f"liczby spoza nazwy {sorted(invented)}: {_plain(match.group(1))[:60]}")
+            return ""
+        return match.group(0)
+
+    out = re.sub(r"<p>.*?</p>", lambda mt: removed.append("akapit") or "", desc_html, flags=re.I | re.S)
+    out = re.sub(r"<li>(.*?)</li>", check_li, out, flags=re.I | re.S)
+    out = re.sub(r"<ul>\s*</ul>", "", out, flags=re.I)
+    return out, removed
+
+
 def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
     """Filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody do akceptacji)."""
     reasons: list[str] = []
+    if not source:
+        desc_html, extras = strip_name_only_extras(desc_html, row["name"])
+        if extras:
+            log.info("%s opis z nazwy — usunięte: %s", row_label, "; ".join(extras))
+        if not re.search(r"<li>", desc_html, flags=re.I):
+            reasons.append("opis z nazwy bez listy parametrów")
     source_text = " ".join([row["name"], row["category"], (source or {}).get("excerpt", "")])
     desc_html, removed = filter_generic_claims(desc_html, source_text)
     if removed:
