@@ -34,6 +34,7 @@ import re
 import sys
 import time
 import unicodedata
+import warnings
 import webbrowser
 
 import pandas as pd
@@ -52,7 +53,7 @@ COLUMNS = [COL_ID, COL_NAME, COL_CODE, COL_PRODUCER, COL_IMG_URL, COL_IMG_FILE, 
 OK, REVIEW, NONE = "PEWNE", "DO_AKCEPTACJI", "BRAK"
 SHOP_MIN_NAME = 0.85         # min. część słów nazwy produktu obecna w tytule ze sklepu producenta
 SHOP_MIN_TITLE = 0.5         # min. część słów tytułu ze sklepu producenta obecna w nazwie produktu
-VISION_TRIES = 3             # ile zdjęć jednego produktu obejrzeć modelem, zanim zostanie bez zdjęcia
+VISION_TRIES = 4             # ile zdjęć jednego produktu obejrzeć modelem, zanim zostanie bez zdjęcia
 DOWNLOAD_NAME = "zaakceptowane_zdjecia"
 IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
 log = w.log
@@ -65,6 +66,12 @@ for site in ("mateomarket.pl",):
 w.MIN_IMAGE_RATIO = min(w.MIN_IMAGE_RATIO, 0.4)
 # Kilka etapów (źródło, producent, wyszukiwarka) + większe wersje miniatur — 15 prób to za mało.
 w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 30)
+# Rysunki techniczne, części zamienne i schematy wymiarowe to nie zdjęcia produktu (np. ALCA: /spareparts/).
+w.BAD_IMAGE_WORDS = tuple(dict.fromkeys(w.BAD_IMAGE_WORDS + (
+    "sparepart", "spare-part", "spare_part", "drawing", "rysunek", "schemat", "scheme", "wymiar",
+    "dimension", "technical", "/cad/", "_cad", "-cad", ".dwg", "diagram", "certyfikat", "certificate", "pictogram",
+    "piktogram")))
+warnings.filterwarnings("ignore", category=UserWarning, module="PIL")  # „Palette images with Transparency…”
 
 
 def side(output: str, suffix: str, ext: str = ".csv") -> str:
