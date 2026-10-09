@@ -82,6 +82,10 @@ PRODUCER_SEARCH = {
     "AEON": {"url": "https://aeon-sale.com/?s={q}&post_type=product", "link": "/product/"},
     "VALVEX": {"url": "https://valvex.com/?s={q}", "link": "/produkt/"},
     "GEBO": {"url": "https://www.gebo.group/de-DE/search?search={q}", "link": "/p/"},
+    # Karty bez kodów producenta — wyszukiwarka działa tylko po nazwie serii (np. „Heat Monitor”, „ELF 2”).
+    "AURATON": {"url": "https://www.auraton.pl/szukaj?s={q}", "link": "/oferta/"},
+    "APATOR-POWOGAZ": {"url": "https://www.apator.com/wyszukiwarka?search={q}", "link": "/produkty-i-uslugi/"},
+    "AWENTA": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/"},
 }
 DEFAULT_SHOP_LINK = "/product/"
 # Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
@@ -92,6 +96,11 @@ DEFAULT_SHOP_LINK = "/product/"
 #                  False — brać pierwsze karty z wyników (kod sprawdzany na samej karcie),
 #   "producers":   dla których producentów (nazwa jak w /producer@name); brak klucza = dla wszystkich.
 #   "api":         zamiast "url"/"link" — wyszukiwarka z API JSON (patrz direct_search_api).
+#   "woo_catalog": zamiast "url"/"api" — adres WooCommerce Store API; skrypt pobiera raz cały katalog (z wariantami)
+#                  i dopasowuje kod do SKU, także do wzorców typu 21.550.DN.1 / 10.100.X (patrz woo_catalog_match).
+#   "trusted":     True — strona producenta nie pokazuje kodu na karcie, ale jej wyszukiwarka zna kody: gdy zwróci
+#                  DOKŁADNIE jedną kartę, karta jest źródłem opisu, a produkt idzie do akceptacji
+#                  (powód SEARCH_ONLY_REASON).
 # Sprawdzone wyszukiwarki (październik 2026), test: py wzbogac_produkty.py --test-wyszukiwarki KOD
 #   AFRISO  — afriso.pl szuka po kodzie (nie po EAN), adres karty zaczyna się od kodu, EAN jest w JSON-LD karty.
 #   CONEX   — conexbanninger.com szuka po kodzie, karta (/product/…) zawiera kod.
@@ -104,12 +113,20 @@ DEFAULT_SHOP_LINK = "/product/"
 #             pola part_number i ean, karta pod adresem z pola url.
 #   DANFOSS — store.danfoss.com: podpowiedzi JSON (…/search/autocomplete/SearchBoxNextStore?term=KOD),
 #             pole code, karta /p/KOD. Nie każdy produkt Danfoss jest w sklepie (np. 003Z1031 nie ma).
+#   BOHAMET-ARMATURA — bohamet-armatura.pl (NIE bohamet.pl — to inna firma, okna okrętowe): WooCommerce Store API.
+#             SKU wariantów to często wzorce (21.550.DN.1, 10.100.X, 10.310.2000 | 10.310.2001) — kod dopasowany
+#             do wzorca nie występuje na karcie, więc taki produkt idzie do akceptacji (SEARCH_ONLY_REASON).
+#   ALCA    — alcadrain.pl: JSON wyszukiwarki Joomla (com_search, searchphrase=exact), kod w tytule wyniku.
+#             alcaplast.pl nie działa (błąd SSL / 500).
+#   AWENTA  — awenta.pl/search/query:KOD (Grav) zwraca kartę serii, ale karta nie pokazuje kodu → "trusted".
 # Sprawdzone i NIEprzydatne (październik 2026):
 #   blokują skrypty (HTTP 403): Onninen, Armacell, Flamco (flamco.aalberts-hfc.com);
-#   wyszukiwarka nie zna kodów: Kaczmarek (kaczmarek2.pl), Bohamet, AGRU, Alca, Awenta;
-#   wyniki tylko przez JavaScript, bez znalezionego API: Wavin, KAN-therm, Galmet, Rothenberger;
+#   wyszukiwarka nie zna kodów: Kaczmarek (kaczmarek2.pl), KAN-therm; tylko po nazwie (PRODUCER_SEARCH,
+#   zdjęcia): Auraton (karty bez kodów AUR… i EAN), Apator-Powogaz (apator.com/wyszukiwarka, kody 60-… nieznane);
+#   AGRU (agru.at, TYPO3) — brak działającej wyszukiwarki, kody tylko w katalogach PDF;
+#   wyniki tylko przez JavaScript, bez znalezionego API: Wavin, Galmet, Rothenberger;
 #   brak wyszukiwarki / strona nie odpowiada: Purmo, Georg Fischer (gfps.com), Vesbo, Grundfos (przekroczony czas),
-#   De Dietrich (błąd certyfikatu SSL), Apator-Powogaz.
+#   De Dietrich (błąd certyfikatu SSL).
 DIRECT_SEARCH = {
     "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
                   "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
@@ -132,7 +149,17 @@ DIRECT_SEARCH = {
     "store.danfoss.com": {"producers": ["DANFOSS"], "api": {
         "url": "https://store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore", "params": {"term": "{q}"},
         "items": "products", "url_field": "url", "code_fields": ["code"], "base": "https://store.danfoss.com/pl/pl"}},
+    "bohamet-armatura.pl": {"producers": ["BOHAMET-ARMATURA"],
+                            "woo_catalog": "https://bohamet-armatura.pl/wp-json/wc/store/v1/products"},
+    "alcadrain.pl": {"producers": ["ALCA"], "api": {
+        "url": "https://www.alcadrain.pl/index.php",
+        "params": {"option": "com_search", "searchphrase": "exact", "tmpl": "raw", "type": "json",
+                   "ordering": "alpha", "searchword": "{q}"},
+        "items": "results", "url_field": "url", "code_fields": ["Title"], "base": "https://www.alcadrain.pl"}},
+    "awenta.pl": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/", "code_in_url": False,
+                  "trusted": True, "producers": ["AWENTA"]},
 }
+SEARCH_ONLY_REASON = "kod potwierdzony tylko wyszukiwarką producenta (karta bez kodu)"
 MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["cetel-hurtownia.pl", "mateomarket.pl"]  # Onninen odpada — blokuje skrypty (HTTP 403)
@@ -686,6 +713,14 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
     for domain, cfg in DIRECT_SEARCH.items():
         if not direct_search_applies(cfg, producer):
             continue
+        if "woo_catalog" in cfg:
+            url, exact = woo_catalog_match(cfg["woo_catalog"], code)
+            if url and url not in urls:
+                urls.append(url)
+                if not exact:
+                    with _trusted_lock:
+                        _trusted_results.add((code.lower(), url))
+            continue
         if "api" in cfg:
             urls += [u for u in direct_search_api(domain, cfg, m, code) if u not in urls]
             continue
@@ -703,8 +738,83 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
             if cfg.get("code_in_url", True) and not m.in_short_text(url):
                 continue
             found_here.append(url)
+        if cfg.get("trusted") and len(found_here) == 1:
+            with _trusted_lock:
+                _trusted_results.add((code.lower(), found_here[0]))
         urls += found_here if cfg.get("code_in_url", True) else found_here[:MAX_DIRECT_RESULTS]
     return urls
+
+
+_woo_catalogs: dict[str, list[tuple[re.Pattern, int, str]]] = {}
+_woo_lock = threading.Lock()
+SKU_WILDCARD = re.compile(r"\b(?:DN|dn|X|Y)\b")
+
+
+def _woo_catalog(api_url: str) -> list[tuple[re.Pattern, int, str]]:
+    """[(wzorzec SKU, liczba stałych znaków, karta)] całego sklepu WooCommerce — pobierane raz na przebieg."""
+    with _woo_lock:
+        if api_url in _woo_catalogs:
+            return _woo_catalogs[api_url]
+        items: list[dict] = []
+        try:
+            for page in range(1, 30):
+                batch = requests.get(api_url, params={"per_page": 100, "page": page}, headers=BROWSER_HEADERS,
+                                     timeout=PAGE_TIMEOUT).json()
+                if not batch:
+                    break
+                items += batch
+            var_ids = [v["id"] for p in items for v in p.get("variations", [])]
+            for i in range(0, len(var_ids), 100):
+                items += requests.get(api_url, params={"include": ",".join(map(str, var_ids[i:i + 100])),
+                                                       "per_page": 100, "type": "variation"},
+                                      headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT).json()
+        except Exception as exc:
+            log.warning("Katalog sklepu %s niedostępny: %s", api_url, exc)
+        catalog = []
+        for item in items:
+            for alt in str(item.get("sku") or "").split("|"):  # „10.310.2000 | 10.310.2001” — kilka kodów
+                alt = alt.strip()
+                if len(alt) < 4 or not item.get("permalink"):
+                    continue
+                parts = SKU_WILDCARD.split(alt)
+                literal = sum(len(p) for p in parts)
+                if len(parts) > 1 and literal < 6:
+                    continue  # „05.X” pasowałby do połowy katalogu
+                pattern = re.compile("[0-9A-Za-z]+".join(re.escape(p) for p in parts), re.I)
+                catalog.append((pattern, literal + (100 if len(parts) == 1 else 0), item["permalink"]))
+        log.info("Katalog sklepu %s: %d kodów/wzorców SKU", urlparse(api_url).netloc, len(catalog))
+        _woo_catalogs[api_url] = catalog
+        return catalog
+
+
+def woo_catalog_match(api_url: str, code: str) -> tuple[str, bool]:
+    """(karta, czy SKU dokładnie równe kodowi) — najdokładniejszy pasujący wzorzec; remis różnych kart = brak."""
+    best: list[tuple[int, str]] = []
+    for pattern, score, url in _woo_catalog(api_url):
+        if pattern.fullmatch(code.strip()):
+            best.append((score, url))
+    if not best:
+        return "", False
+    best.sort(reverse=True)
+    tied = list(dict.fromkeys(u for s, u in best if s == best[0][0]))
+    if len(tied) > 1:
+        paths = {u.split("?")[0] for u in tied}
+        if len(paths) > 1:
+            return "", False  # różne produkty pasują tak samo dobrze
+        # Warianty jednego produktu (…?attribute_pa_srednica-rury=100) — ten, którego średnica jest w kodzie.
+        numbers = {int(n) for n in re.findall(r"\d+", code)}
+        sized = [u for u in tied if "?" in u and any(int(n) in numbers for n in re.findall(r"=(?:dn-?)?(\d+)", u))]
+        tied = sized if len(sized) == 1 else [paths.pop()]
+    return tied[0], best[0][0] >= 100
+
+
+_trusted_results: set[tuple[str, str]] = set()  # (kod, karta) — jedyny wynik wyszukiwarki "trusted" dla kodu
+_trusted_lock = threading.Lock()
+
+
+def found_only_by_search(code: str, url: str) -> bool:
+    with _trusted_lock:
+        return (code.lower(), url) in _trusted_results
 
 
 def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produkty_probka.csv",
@@ -740,6 +850,11 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
     for domain, cfg in DIRECT_SEARCH.items():
         if not direct_search_applies(cfg, producer):
             continue
+        if "woo_catalog" in cfg:
+            url, exact = woo_catalog_match(cfg["woo_catalog"], code)
+            print(f"\n{domain}: katalog WooCommerce — karta: {url or 'brak'}"
+                  + ("" if not url else " (SKU = kod)" if exact else " (wzorzec SKU — produkt do akceptacji)"))
+            continue
         if "api" in cfg:
             print(f"\n{domain}: API JSON {cfg['api']['url']} — karty: "
                   f"{direct_search_api(domain, cfg, ProductMatcher(code, '', ''), code) or 'brak'}")
@@ -759,7 +874,9 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
     for url in urls:
         page = fetch_page(url)
         ok = page is not None and m.find(page[0]) is not None
-        print(f"  {url}\n    kod na stronie karty: {'TAK' if ok else 'NIE'}")
+        trusted = "" if ok or not found_only_by_search(code, url) else \
+            " — karta przyjęta jako jedyny wynik wyszukiwarki producenta (produkt do akceptacji)"
+        print(f"  {url}\n    kod na stronie karty: {'TAK' if ok else 'NIE'}{trusted}")
     if not urls:
         print("  Brak — wyszukiwarka pewnie ładuje wyniki przez JavaScript; skrypt użyje wtedy DuckDuckGo.")
 
@@ -801,10 +918,11 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
                 continue
             text, og_images, imgs = page[0], page[1], page[2]
             pos = m.find(text)
-            if pos is None:
+            search_only = pos is None and query is None and code and found_only_by_search(code, url)
+            if pos is None and not search_only:
                 continue
-            start = max(0, pos - SOURCE_EXCERPT_CHARS // 3)
-            return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS],
+            start = max(0, (pos or 0) - SOURCE_EXCERPT_CHARS // 3)
+            return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS], "search_only": bool(search_only),
                     "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
                     "title": page[3] if len(page) > 3 else "", "gallery": page[4] if len(page) > 4 else []}
     return None
@@ -851,15 +969,25 @@ def search_producer_shop(template: str | dict, query: str) -> list[tuple[str, st
     resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
     resp.raise_for_status()
     doc = html_doc(resp)
-    found: dict[str, str] = {}
-    for a in doc.xpath("//a[@href]"):
-        href = urljoin(url, a.get("href"))
-        if link not in href or "add-to-cart" in href:
-            continue
-        title = re.sub(r"\s+", " ", a.text_content()).strip()
-        if len(title) > len(found.get(href, "")):
-            found[href] = title
-    items = [(t, h) for h, t in found.items() if len(t) >= 5][:40]
+    # Linki z menu (np. /oferta/… na auraton.pl) są przy każdym zapytaniu — to nie wyniki.
+    common = _common_result_links("sklep:" + cfg["url"], {"url": cfg["url"], "link": link})
+    def collect(anchors) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for raw_href, text in anchors:
+            href = urljoin(url, html.unescape(raw_href or ""))
+            if link not in href or "add-to-cart" in href or href.split("#")[0] in common:
+                continue
+            title = re.sub(r"\s+", " ", html.unescape(text)).strip()
+            if len(title) > len(found.get(href, "")):
+                found[href] = title
+        return found
+
+    found = collect((a.get("href"), a.text_content()) for a in doc.xpath("//a[@href]"))
+    if not found:
+        # lxml gubi część linków na stronach z błędnym HTML (np. apator.com) — wtedy wprost z kodu strony.
+        found = collect((h, re.sub(r"<[^>]+>", " ", inner)) for h, inner in
+                        re.findall(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', resp.text, re.S))
+    items = [(t, h) for h, t in found.items() if len(t) >= 3][:40]
     with _shop_cache_lock:
         _shop_cache[url] = items
     return items
@@ -1598,6 +1726,8 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
         source = find_verified_source(m, row["code"], row["ean"], row["producer"], engine, row_label)
     if not source:
         reasons.append("nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy")
+    elif source.get("search_only"):
+        reasons.append(SEARCH_ONLY_REASON)
 
     # 2. Opis
     desc = ""

@@ -180,15 +180,26 @@ producentów; karta z wyników i tak przechodzi zwykłą weryfikację kodu/EAN. 
 | GEBO | `gebo.group/de-DE/search?search=KOD` | tylko wersja niemiecka (pl-PL nie istnieje); kod w adresie karty |
 | FERRO | API Meilisearch (publiczny klucz z HTML ferro.pl) | pola `part_number`, `ean`; karta z pola `url` |
 | DANFOSS | API `store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore?term=KOD` | tylko produkty ze sklepu Danfoss (np. 003Z1031 nie ma) |
+| BOHAMET-ARMATURA | katalog WooCommerce `bohamet-armatura.pl/wp-json/wc/store/v1/products` (pobierany raz) | to NIE bohamet.pl (inna firma). SKU to często wzorce (`21.550.DN.1`, `10.100.X`) — kod dopasowany do wzorca, wariant wybierany po średnicy; ok. 1/3 kodów jest w sklepie |
+| ALCA | JSON `alcadrain.pl/index.php?option=com_search&searchphrase=exact&tmpl=raw&type=json&searchword=KOD` | kod w tytule wyniku i na karcie; ok. 1/4 kodów (alcaplast.pl nie działa) |
+| AWENTA | `awenta.pl/search/query:KOD` | karta serii BEZ kodu — przyjmowana tylko, gdy to jedyny wynik (`"trusted"`); ok. 40% kodów |
+
+Gdy kod jest potwierdzony tylko wyszukiwarką producenta (karta Awenty bez kodu albo wzorzec SKU Bohamet), opis
+powstaje z tej karty, ale produkt idzie do akceptacji z powodem „kod potwierdzony tylko wyszukiwarką producenta”.
+
+`PRODUCER_SEARCH` (zdjęcie z karty serii po nazwie, gdy hurtownia potwierdzi kod): AEON, Valvex, Gebo, Auraton
+(`auraton.pl/szukaj?s=`), Apator-Powogaz (`apator.com/wyszukiwarka?search=`), Awenta. Linki z menu (widoczne przy
+każdym zapytaniu) są pomijane.
 
 Wpis z API JSON (`"api": {...}`) obsługuje: metodę, parametry/JSON z `{q}`, klucz pobierany ze strony (`key_from`),
 listę wyników (`items`, `None` = lista na najwyższym poziomie), pola z kodem/EAN (`code_fields`) i adres karty (`url_field`
 + `base` albo `url_from_id`). Brane są tylko pozycje, które w polach kodu mają NASZ kod albo EAN.
 
-Sprawdzone i nieprzydatne (październik 2026): blokują skrypty (HTTP 403) — Onninen, Armacell, Flamco; wyszukiwarka nie
-zna kodów — Kaczmarek (kaczmarek2.pl), Bohamet, AGRU, Alca, Awenta, KAN-therm (także API WordPressa CMS); wyniki tylko
-w JavaScript, bez znalezionego otwartego API — Wavin (Contentstack), Galmet, Rothenberger; brak wyszukiwarki lub strona nie
-odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich (certyfikat), Apator-Powogaz. Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
+Sprawdzone i nieprzydatne do szukania po kodzie (październik 2026): blokują skrypty (HTTP 403) — Onninen, Armacell,
+Flamco; wyszukiwarka nie zna kodów — Kaczmarek (kaczmarek2.pl), KAN-therm (także API WordPressa CMS), Auraton i
+Apator-Powogaz (tylko po nazwie — są w `PRODUCER_SEARCH`); AGRU (agru.at) — brak działającej wyszukiwarki, kody tylko
+w katalogach PDF; wyniki tylko w JavaScript, bez znalezionego otwartego API — Wavin (Contentstack), Galmet,
+Rothenberger; brak wyszukiwarki lub strona nie odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich (certyfikat). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
 `py wzbogac_produkty.py --test-wyszukiwarki KOD`. Strony, które kilka razy z rzędu odmówią dostępu (403), są pomijane
 do końca przebiegu. Skrypt czyta też dane strukturalne JSON-LD stron (sku, gtin = EAN) — wiele sklepów pokazuje EAN tylko tam.
 
