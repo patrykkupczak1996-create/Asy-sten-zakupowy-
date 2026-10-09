@@ -154,11 +154,28 @@ w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycj�
 gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
 pasuje na pewno, skrypt bierze zdjęcie z innych stron.
 
-**Bezpośrednie wyszukiwanie w hurtowni** — `DIRECT_SEARCH` może zawierać adres wyszukiwarki hurtowni; skrypt
-wpisuje tam kod i bierze kartę z tym kodem w adresie, bez DuckDuckGo. Onninen blokuje automatyczne pobieranie
-(HTTP 403), więc domyślnie lista jest pusta. Czy wyszukiwarka danej hurtowni odpowiada skryptowi, sprawdzisz:
-`py wzbogac_produkty.py --test-wyszukiwarki AG0828`. Strony, które kilka razy z rzędu odmówią dostępu (403),
-są pomijane do końca przebiegu.
+**Bezpośrednie wyszukiwanie u producenta / w hurtowni** — `DIRECT_SEARCH` zawiera adresy wyszukiwarek, w które
+skrypt wpisuje kod producenta (bez DuckDuckGo, więc wynik jest powtarzalny). Każdy wpis działa tylko dla podanych
+producentów; karta z wyników i tak przechodzi zwykłą weryfikację kodu/EAN. Obecnie:
+
+| Producent | Wyszukiwarka | Uwagi |
+|---|---|---|
+| AFRISO | `afriso.pl/wyszukiwanie?search=KOD` | szuka po kodzie (nie po EAN); adres karty zaczyna się od kodu, EAN jest w danych JSON-LD karty |
+| CONEX | `conexbanninger.com/products/?lang=en&srch=KOD` | karta `/product/…` zawiera kod |
+
+Sprawdzone i nieprzydatne: Onninen i Armacell (HTTP 403), Bohamet, AGRU, Alca, Awenta (wyszukiwarka nie zna kodów),
+De Dietrich (błąd certyfikatu), Apator-Powogaz (brak wyszukiwarki). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
+`py wzbogac_produkty.py --test-wyszukiwarki KOD`. Strony, które kilka razy z rzędu odmówią dostępu (403), są pomijane
+do końca przebiegu. Skrypt czyta też dane strukturalne JSON-LD stron (sku, gtin = EAN) — wiele sklepów pokazuje EAN tylko tam.
+
+**Ponowne przetworzenie produktów bez źródła** — gdy dojdą nowe wyszukiwarki albo DuckDuckGo miał gorszy dzień:
+
+```powershell
+py wzbogac_produkty.py --ponow-brak-strony --output opisy_wszystkie.csv --bez-zdjec
+```
+
+Przetwarza tylko wiersze z powodem „nie znaleziono strony”; pozostałe zostają bez zmian. Plik jest zapisywany
+co 50 produktów, przerwanie niczego nie psuje. Dwa przebiegi na tym samym pliku nie ruszą naraz (blokada `*.lock`).
 
 Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
 Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej

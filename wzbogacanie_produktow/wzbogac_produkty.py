@@ -79,14 +79,25 @@ PRODUCER_SITES = {
 PRODUCER_SEARCH = {
     "AEON": "https://aeon-sale.com/?s={q}&post_type=product",
 }
-# Bezpośrednie wyszukiwanie po kodzie we własnej wyszukiwarce hurtowni — bez DuckDuckGo, więc wynik jest
-# powtarzalny i szybszy. "url": adres strony wyników ({q} = kod), "link": fragment adresu karty produktu.
-# Skrypt bierze tylko karty, w których adresie jest kod produktu (warianty z innymi kodami odpadają).
+# Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
+# jest powtarzalny i szybszy. Karta z wyników i tak przechodzi zwykłą weryfikację (kod/EAN na stronie).
+#   "url":         adres strony wyników ({q} = kod producenta),
+#   "link":        fragment adresu karty produktu w wynikach,
+#   "code_in_url": True — brać tylko karty z kodem w adresie (warianty z innymi kodami odpadają);
+#                  False — brać pierwsze karty z wyników (kod sprawdzany na samej karcie),
+#   "producers":   dla których producentów (nazwa jak w /producer@name); brak klucza = dla wszystkich.
+# Sprawdzone wyszukiwarki (październik 2026), test: py wzbogac_produkty.py --test-wyszukiwarki KOD
+#   AFRISO — afriso.pl szuka po kodzie (nie po EAN), adres karty zaczyna się od kodu, EAN jest w JSON-LD karty.
+#   CONEX  — conexbanninger.com szuka po kodzie, karta (/product/…) zawiera kod.
+# Sprawdzone i NIEprzydatne: Onninen (HTTP 403), Bohamet / AGRU / Alca / Awenta (wyszukiwarka nie zna kodów),
+#   Armacell (HTTP 403), De Dietrich (błąd certyfikatu SSL), Apator-Powogaz (brak wyszukiwarki).
 DIRECT_SEARCH = {
-    # Onninen (https://onninen.pl/szukaj-produktow?query=/szukaj:{q}) blokuje automatyczne pobieranie
-    # (HTTP 403), więc go tu nie ma. Dopisuj hurtownie, których wyszukiwarka odpowiada skryptowi —
-    # sprawdzisz to komendą:  py wzbogac_produkty.py --test-wyszukiwarki AG0828
+    "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
+                  "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
+    "conexbanninger.com": {"url": "https://conexbanninger.com/products/?lang=en&srch={q}",
+                           "link": "/product/", "code_in_url": False, "producers": ["CONEX"]},
 }
+MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["cetel-hurtownia.pl", "mateomarket.pl"]  # Onninen odpada — blokuje skrypty (HTTP 403)
 # Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
@@ -481,10 +492,13 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, li
                                                   "recent", "widget", "footer", "header", "menu", "banner"))
             if in_gallery and not elsewhere:
                 gallery.append(urljoin(url, src))
+    # Dane strukturalne (JSON-LD: sku, gtin = EAN, mpn) — wiele sklepów pokazuje EAN tylko tam,
+    # np. afriso.pl. Dopisujemy je do tekstu, zanim skrypty zostaną usunięte.
+    structured = " ".join(s.text_content() for s in doc.xpath('//script[@type="application/ld+json"]'))
     for bad in doc.xpath("//script|//style|//noscript|//svg"):
         bad.drop_tree()
     # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
-    text = re.sub(r"\s+", " ", " ".join(doc.itertext())).strip()
+    text = re.sub(r"\s+", " ", " ".join(doc.itertext()) + " " + structured).strip()
     return text, og_images, imgs, title, gallery
 
 
@@ -497,12 +511,20 @@ def is_producer_url(url: str, producer: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in producer_sites(producer))
 
 
-def direct_search_urls(m: ProductMatcher, code: str) -> list[str]:
-    """Karty produktów z wyszukiwarek hurtowni (DIRECT_SEARCH), które mają kod produktu w adresie."""
+def direct_search_applies(cfg: dict, producer: str | None) -> bool:
+    """producer=None — wszystkie wyszukiwarki (diagnostyka)."""
+    producers = cfg.get("producers")
+    return producer is None or not producers or producer.strip().upper() in {p.upper() for p in producers}
+
+
+def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None) -> list[str]:
+    """Karty produktów z wyszukiwarek producentów/hurtowni (DIRECT_SEARCH) dla tego producenta."""
     from urllib.parse import quote_plus
 
     urls: list[str] = []
     for domain, cfg in DIRECT_SEARCH.items():
+        if not direct_search_applies(cfg, producer):
+            continue
         try:
             resp = requests.get(cfg["url"].format(q=quote_plus(code)), headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
             resp.raise_for_status()
@@ -514,10 +536,15 @@ def direct_search_urls(m: ProductMatcher, code: str) -> list[str]:
         # Szukamy adresów w całym kodzie strony — działa też, gdy wyniki są w danych JSON dla JavaScriptu.
         link = re.escape(cfg["link"])
         page = resp.text.replace("\\/", "/")  # JSON zapisuje ukośniki jako \/
+        found_here: list[str] = []
         for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
-            url = urljoin(f"https://{domain}/", found)
-            if m.in_short_text(url) and url not in urls:
-                urls.append(url)
+            url = urljoin(resp.url, found).split("#")[0]
+            if url in urls or url in found_here or urlparse(url).netloc.removeprefix("www.") != domain:
+                continue
+            if cfg.get("code_in_url", True) and not m.in_short_text(url):
+                continue
+            found_here.append(url)
+        urls += found_here if cfg.get("code_in_url", True) else found_here[:MAX_DIRECT_RESULTS]
     return urls
 
 
@@ -536,12 +563,14 @@ def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produk
     print(f"Test:  py wzbogac_produkty.py --input {out_path} --output wyniki_probka.csv")
 
 
-def test_direct_search(code: str) -> None:
+def test_direct_search(code: str, producer: str | None = None) -> None:
     """Diagnostyka: co zwracają wyszukiwarki hurtowni dla kodu i czy karta zawiera ten kod."""
     from urllib.parse import quote_plus
 
-    m = ProductMatcher(code, "", "")
+    m = ProductMatcher(code, "", producer or "")
     for domain, cfg in DIRECT_SEARCH.items():
+        if not direct_search_applies(cfg, producer):
+            continue
         url = cfg["url"].format(q=quote_plus(code))
         print(f"\n{domain}: {url}")
         try:
@@ -552,7 +581,7 @@ def test_direct_search(code: str) -> None:
         except Exception as exc:
             print(f"  błąd: {exc}")
             continue
-    urls = direct_search_urls(m, code)
+    urls = direct_search_urls(m, code, producer)
     print(f"\nZnalezione karty z kodem {code}: {len(urls)}")
     for url in urls:
         page = fetch_page(url)
@@ -577,7 +606,7 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
         queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
 
     checked: set[str] = set()
-    direct = direct_search_urls(m, code) if code else []
+    direct = direct_search_urls(m, code, producer) if code else []
     for query in ([None] if direct else []) + queries:
         if query is None:
             urls = direct  # wyniki z wyszukiwarek hurtowni — sprawdzane przed DuckDuckGo
@@ -1746,6 +1775,86 @@ def self_update() -> None:
 
 
 # =============================================================================
+# BLOKADA PLIKU WYNIKÓW I PONOWNE PRZETWARZANIE PRODUKTÓW BEZ ŹRÓDŁA
+# =============================================================================
+NO_SOURCE_REASON = "nie znaleziono strony"
+REPROCESS_SAVE_EVERY = 50    # co ile ponownie przetworzonych wierszy zapisać cały plik
+
+
+def lock_output(output_path: str):
+    """Blokada <plik>.lock na czas działania procesu. System zwalnia ją sam, gdy proces się zakończy."""
+    handle = open(output_path + ".lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(f"Plik {output_path} jest już przetwarzany przez inne uruchomienie skryptu. "
+                 "Poczekaj, aż skończy, albo zatrzymaj je, zanim uruchomisz kolejne.")
+    return handle
+
+
+def save_dataframe(df: pd.DataFrame, path: str) -> None:
+    """Zapis całego pliku przez plik tymczasowy — przerwanie w trakcie nie uszkodzi wyników."""
+    tmp = path + ".tmp"
+    df.to_csv(tmp, index=False, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def reprocess_missing_sources(args) -> None:
+    """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony”, resztę pliku zostawia bez zmian."""
+    if not os.path.exists(args.output):
+        sys.exit(f"Nie ma pliku {args.output}.")
+    df = read_csv(args.output)
+    todo = [i for i in df.index if NO_SOURCE_REASON in df.at[i, COL_REASON]]
+    if args.limit:
+        todo = todo[:args.limit]
+    log.info("PONÓW: %d z %d produktów bez potwierdzonej strony. AI: %s (%s).%s",
+             len(todo), len(df), AI["name"], ", ".join(AI["models"]),
+             " Tryb --bez-zdjec." if args.bez_zdjec else "")
+    if not todo:
+        split_results(args.output)
+        return
+    images_dir = None if (args.bez_pobierania or args.bez_zdjec) else os.path.relpath(
+        os.path.join(os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR))
+    started, found, unsaved, exit_code = time.time(), 0, 0, 0
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            for b in range(0, len(todo), CHECKPOINT_EVERY):
+                batch = todo[b:b + CHECKPOINT_EVERY]
+                results = list(pool.map(
+                    lambda i: process_row(df.loc[i].to_dict(), i, args.search, images_dir, not args.bez_zdjec),
+                    batch))
+                for i, out in zip(batch, results):
+                    for col in NEW_COLUMNS:
+                        df.at[i, col] = out[col]
+                    found += NO_SOURCE_REASON not in out[COL_REASON]
+                unsaved += len(batch)
+                if unsaved >= REPROCESS_SAVE_EVERY or b + CHECKPOINT_EVERY >= len(todo):
+                    save_dataframe(df, args.output)
+                    unsaved = 0
+                done = b + len(batch)
+                log.info("PONÓW: %d/%d, znalezione strony: %d. Pozostało ok. %.1f h.", done, len(todo), found,
+                         (len(todo) - done) * (time.time() - started) / done / 3600)
+    except FatalError as exc:
+        log.error("Zatrzymuję: %s", exc)
+        exit_code = 1
+    except KeyboardInterrupt:
+        log.warning("Przerwano (Ctrl+C) — zapisuję to, co już przetworzone.")
+        exit_code = 130
+    if unsaved:
+        save_dataframe(df, args.output)
+    split_results(args.output)
+    log.info("PONÓW: koniec. Znaleziono strony dla %d produktów.", found)
+    if exit_code:
+        sys.exit(exit_code)
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main() -> None:
@@ -1776,6 +1885,9 @@ def main() -> None:
                         help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
     parser.add_argument("--bez-zdjec", action="store_true",
                         help="Tylko opisy: bez szukania i pobierania zdjęć; PEWNY zależy od źródła i opisu")
+    parser.add_argument("--ponow-brak-strony", action="store_true",
+                        help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony”; "
+                             "pozostałe wiersze zostają bez zmian")
     args = parser.parse_args()
 
     if args.aktualizuj:
@@ -1792,8 +1904,8 @@ def main() -> None:
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
         return
-    if not args.input and not args.sprawdz_zdjecia:
-        parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia albo --zatwierdz")
+    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony:
+        parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia, --ponow-brak-strony albo --zatwierdz")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1806,6 +1918,13 @@ def main() -> None:
     logging.getLogger().setLevel(logging.WARNING)
     log.setLevel(logging.INFO)
     check_for_update()
+    # Jeden przebieg naraz na tym samym pliku wyników — dwa dopisywałyby/nadpisywały te same wiersze.
+    _lock = lock_output(args.output)  # noqa: F841 — trzymamy uchwyt do końca procesu
+
+    if args.ponow_brak_strony:
+        configure_ai(args.ai)
+        reprocess_missing_sources(args)
+        return
 
     if args.sprawdz_zdjecia:
         images_dir = None if args.bez_pobierania else os.path.relpath(
