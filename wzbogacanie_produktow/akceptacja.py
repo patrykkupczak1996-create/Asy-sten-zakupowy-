@@ -235,6 +235,9 @@ body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--
 .top{position:sticky;top:0;background:var(--card);padding:10px 16px;border-bottom:1px solid var(--line);z-index:2;
   display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .top .sum{font-weight:600;margin-right:auto}
+#nav{flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px}
+#nav button{padding:4px 10px;font-size:13px} #nav button.sure{border-color:var(--ok);color:var(--ok);font-weight:600}
+.group{scroll-margin-top:110px}
 button{padding:7px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;color:var(--fg);cursor:pointer;font:inherit}
 button.primary{background:var(--ok);border-color:var(--ok);color:#fff;font-weight:600}
 main{max-width:1100px;margin:0 auto;padding:16px}
@@ -253,11 +256,12 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .src{font-size:12px;word-break:break-all}
 .more{text-align:center;padding:8px}
 .off{opacity:.5}
-.sure{border-left:6px solid var(--ok)}
+section.sure{border-left:6px solid var(--ok)}
 </style></head><body>
 <div class="top"><span class="sum" id="sum"></span>
 <button id="all">Zaznacz wszystkie</button><button id="none">Odznacz wszystkie</button>
-<button class="primary" id="save">Zapisz akceptację</button></div>
+<button class="primary" id="save">Zapisz akceptację</button>
+<nav id="nav"></nav></div>
 <main id="main"></main>
 <script id="data" type="application/json">__DATA__</script>
 <script>
@@ -278,7 +282,7 @@ function render(){
     const list=D.items.filter(i=>i.g===g.k); if(!list.length)return;
     const n=list.filter(i=>sel.has(i.id)&&i.ok).length;
     if(!(g.k in open))open[g.k]=true;
-    const box=document.createElement('section');box.className='group'+(g.v?' sure':'');
+    const box=document.createElement('section');box.className='group'+(g.v?' sure':'');box.id='g-'+g.k;
     box.innerHTML=`<div class="ghead"><h2>${esc(g.t)}</h2>`+(g.v?`<span class="cnt">${list.length} produktów</span>`:
       `<span class="cnt">${n} / ${list.length} zaakceptowanych</span>
       <button data-a="on">Zaakceptuj całą grupę</button><button data-a="off">Odznacz grupę</button>`)+
@@ -316,6 +320,11 @@ document.getElementById('save').onclick=()=>{
   a.download=D.file;document.body.appendChild(a);a.click();a.remove();
   alert(`Zapisano ${ids.length} produktów do pliku ${D.file} (folder Pobrane).\nTeraz w PowerShell: py akceptacja.py --zapisz`);
 };
+const nav=document.getElementById('nav');
+D.groups.forEach(g=>{const c=D.items.filter(i=>i.g===g.k).length;if(!c)return;
+  const b=document.createElement('button');if(g.v)b.className='sure';
+  b.textContent=(g.v?'PEWNE':g.t.split(' — ')[0])+` (${c})`;
+  b.onclick=()=>{open[g.k]=true;render();document.getElementById('g-'+g.k).scrollIntoView();};nav.appendChild(b);});
 render();
 </script></body></html>"""
 
