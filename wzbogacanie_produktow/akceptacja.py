@@ -52,6 +52,7 @@ COL_ACCEPT = "Akceptacja"
 STATUS_OK = "PEWNY"
 STATUS_ACCEPTED = "ZAAKCEPTOWANY"
 IDOSELL_DESC_COLUMN = "/description/long_desc[pol]"
+IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
 DOWNLOAD_NAME = "zaakceptowane_produkty"
 
 # (klucz, etykieta, czy domyślnie warto akceptować, wzorzec w kolumnie Powod)
@@ -153,8 +154,19 @@ def load_photos(output_path: str, page_path: str) -> dict[str, tuple[str, str, s
     return out
 
 
+def load_photo_accepted(output_path: str) -> set[str]:
+    """Id produktów, których zdjęcia zaakceptowano w zdjecia.py --podglad / --zapisz."""
+    path = side_path(output_path, "zdjecia_zaakceptowane").rsplit(".", 1)[0] + ".txt"
+    return load_accepted(path)
+
+
+def photo_ready(status: str, product_id: str, photo_accepted: set[str]) -> bool:
+    return status == "PEWNE" or (status == "DO_AKCEPTACJI" and product_id in photo_accepted)
+
+
 def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str) -> None:
     photos = load_photos(storage_key, path)
+    photo_accepted = load_photo_accepted(storage_key)
     items = []
     for _, row in df.iterrows():
         sure = row[COL_STATUS] == STATUS_OK
@@ -166,8 +178,10 @@ def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str
             "a": row[COL_ID] in accepted,
             "img": photos.get(row[COL_ID], ("", "", ""))[0], "imgu": photos.get(row[COL_ID], ("", "", ""))[1],
             "imgs": photos.get(row[COL_ID], ("", "", ""))[2],
+            "pr": photo_ready(photos.get(row[COL_ID], ("", "", ""))[2], row[COL_ID], photo_accepted),
         })
-    groups = [{"k": k, "t": t} for k, t, _ in GROUPS]
+    groups = [{"k": "gotowe", "t": "GOTOWE — opis i zdjęcie zatwierdzone, to pójdzie do sklepu", "v": True}]
+    groups += [{"k": k, "t": t} for k, t, _ in GROUPS]
     groups.append({"k": "pewne", "t": "PEWNE — idą do importu bez akceptacji (tylko podgląd)", "v": True})
     data = json.dumps({"items": items, "groups": groups, "key": storage_key,
                        "file": DOWNLOAD_NAME + ".csv"}, ensure_ascii=False).replace("</", "<\\/")
@@ -176,7 +190,8 @@ def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str
         fh.write(page)
 
 
-def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_column: str) -> str:
+def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_column: str,
+                 image_column: str = IDOSELL_IMAGE_COLUMN) -> str:
     ok = df[df[COL_STATUS] == STATUS_OK]
     acc = df[(df[COL_STATUS] != STATUS_OK) & df[COL_ID].isin(accepted) & df[COL_DESC].str.strip().ne("")].copy()
     acc[COL_STATUS] = STATUS_ACCEPTED
@@ -191,6 +206,18 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_co
         idosell_path, index=False, encoding="utf-8-sig")
     print(f"Plik do importu (pełny): {import_path}")
     print(f"Plik do IdoSell (@id + opis w kolumnie {desc_column}): {idosell_path}")
+    # GOTOWE = opis pewny/zaakceptowany + zdjęcie pewne/zaakceptowane — jeden plik z opisem i linkiem do zdjęcia.
+    photos_path = side_path(output_path, "zdjecia")
+    if os.path.isfile(photos_path):
+        photos = read_csv(photos_path).drop_duplicates(subset=[COL_ID], keep="last")
+        photo_accepted = load_photo_accepted(output_path)
+        photos = photos[[photo_ready(st, pid, photo_accepted) and bool(url.strip())
+                         for st, pid, url in zip(photos["Status_zdjecia"], photos[COL_ID], photos["Zdjecie_URL"])]]
+        ready = result[[COL_ID, COL_DESC]].merge(photos[[COL_ID, "Zdjecie_URL"]], on=COL_ID)
+        ready_path = side_path(output_path, "gotowe_idosell")
+        ready.rename(columns={COL_DESC: desc_column, "Zdjecie_URL": image_column}).to_csv(
+            ready_path, index=False, encoding="utf-8-sig")
+        print(f"GOTOWE (opis + zdjęcie): {len(ready)} -> {ready_path}")
     return import_path
 
 
@@ -205,6 +232,8 @@ def main() -> None:
                         choices=[k for k, _, _ in GROUPS], help="Zaakceptuj całe grupy bez przeglądarki")
     parser.add_argument("--kolumna-opisu", default=IDOSELL_DESC_COLUMN,
                         help="Nagłówek kolumny opisu w pliku dla IdoSell (jak w eksporcie IdoSell)")
+    parser.add_argument("--kolumna-zdjecia", default=IDOSELL_IMAGE_COLUMN,
+                        help="Nagłówek kolumny zdjęcia w pliku GOTOWE dla IdoSell (jak w eksporcie IdoSell)")
     parser.add_argument("--bez-otwierania", action="store_true", help="Nie otwieraj przeglądarki")
     args = parser.parse_args()
 
@@ -234,7 +263,7 @@ def main() -> None:
         save_accepted(store_path, accepted)
 
     if args.zapisz:
-        build_import(df, accepted, args.output, args.kolumna_opisu)
+        build_import(df, accepted, args.output, args.kolumna_opisu, args.kolumna_zdjecia)
         return
 
     page_path = side_path(args.output, "akceptacja").rsplit(".", 1)[0] + ".html"
@@ -306,12 +335,20 @@ const shown={}, open={}; let ALL=false;
 function persist(){try{localStorage.setItem(KEY,JSON.stringify([...sel]));}catch(e){}render();}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function setMany(list,on){list.filter(i=>i.ok&&!i.v).forEach(i=>on?sel.add(i.id):sel.delete(i.id));persist();}
+function ready(i){return i.ok&&(i.v||sel.has(i.id))&&i.pr&&i.img;}
+function members(g){return g.k==='gotowe'?D.items.filter(ready):D.items.filter(i=>i.g===g.k);}
+function buildNav(){const nav=document.getElementById('nav');nav.innerHTML='';
+  D.groups.forEach(g=>{const c=members(g).length;if(!c&&g.k!=='gotowe')return;
+  const b=document.createElement('button');if(g.v)b.className='sure';
+  b.textContent=(g.k==='gotowe'?'GOTOWE':g.v?'PEWNE':g.t.split(' — ')[0])+` (${c})`;
+  b.onclick=()=>{open[g.k]=true;render();const el=document.getElementById('g-'+g.k);if(el)el.scrollIntoView();};nav.appendChild(b);});}
 function render(){
+  buildNav();
   const accN=R.filter(i=>sel.has(i.id)&&i.ok).length;
   document.getElementById('sum').textContent=`Zaakceptowane: ${accN} z ${R.length} do akceptacji · pewne: ${D.items.length-R.length}`;
   const main=document.getElementById('main');main.innerHTML='';
   D.groups.forEach(g=>{
-    const list=D.items.filter(i=>i.g===g.k); if(!list.length)return;
+    const list=members(g); if(!list.length)return;
     const n=list.filter(i=>sel.has(i.id)&&i.ok).length;
     if(!(g.k in open))open[g.k]=true;
     const box=document.createElement('section');box.className='group'+(g.v?' sure':'');box.id='g-'+g.k;
@@ -353,11 +390,6 @@ document.getElementById('save').onclick=()=>{
   a.download=D.file;document.body.appendChild(a);a.click();a.remove();
   alert(`Zapisano ${ids.length} produktów do pliku ${D.file} (folder Pobrane).\nTeraz w PowerShell: py akceptacja.py --zapisz`);
 };
-const nav=document.getElementById('nav');
-D.groups.forEach(g=>{const c=D.items.filter(i=>i.g===g.k).length;if(!c)return;
-  const b=document.createElement('button');if(g.v)b.className='sure';
-  b.textContent=(g.v?'PEWNE':g.t.split(' — ')[0])+` (${c})`;
-  b.onclick=()=>{open[g.k]=true;render();document.getElementById('g-'+g.k).scrollIntoView();};nav.appendChild(b);});
 document.getElementById('pdf').onclick=()=>{
   if(!confirm('Do PDF trafią WSZYSTKIE produkty z rozwiniętych sekcji. Sekcje, których nie chcesz w PDF, najpierw zwiń.\nW oknie drukowania wybierz „Zapisz jako PDF”.'))return;
   ALL=true;render();setTimeout(()=>{window.print();ALL=false;render();},300);
