@@ -218,7 +218,42 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_co
         ready.rename(columns={COL_DESC: desc_column, "Zdjecie_URL": image_column}).to_csv(
             ready_path, index=False, encoding="utf-8-sig")
         print(f"GOTOWE (opis + zdjęcie): {len(ready)} -> {ready_path}")
+        write_sheet(result.merge(photos[[COL_ID, "Zdjecie_URL"]], on=COL_ID), output_path)
     return import_path
+
+
+def html_to_text(fragment: str) -> str:
+    """Opis HTML jako czytelny tekst do komórki arkusza: akapity w nowych liniach, lista z kropkami."""
+    text = re.sub(r"(?i)<li[^>]*>", "\n• ", fragment)
+    text = re.sub(r"(?i)</(p|h2|h3|ul|ol)>|<br\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return ("'" + text) if text[:1] in "=+-@" else text  # arkusz nie potraktuje opisu jako formuły
+
+
+def as_text(value: str) -> str:
+    value = str(value or "").strip()
+    return f'="{value.replace(chr(34), chr(34) * 2)}"' if value else ""
+
+
+def write_sheet(ready: pd.DataFrame, output_path: str) -> str:
+    """CSV do zaimportowania w Arkuszach Google: zdjęcie jako =IMAGE(link) i opis jako tekst — do podglądu i wysyłki."""
+    def image_formula(url: str) -> str:
+        return f'=IMAGE("{url.replace(chr(34), "%22")}")' if url.strip() else ""
+
+    sheet = pd.DataFrame({
+        "Zdjęcie": [image_formula(u) for u in ready["Zdjecie_URL"]],
+        "Nazwa": ready[COL_NAME], "Producent": ready[COL_PRODUCER],
+        # ="…" — arkusz nie zamieni EAN na 5,9E+12 ani kodu 01.260.28.02 na datę
+        "Kod": [as_text(v) for v in ready[COL_CODE]], "EAN": [as_text(v) for v in ready[COL_EAN]], "Opis": [html_to_text(d) for d in ready[COL_DESC]],
+        "@id": ready[COL_ID], "Link do zdjęcia": ready["Zdjecie_URL"],
+    })
+    path = side_path(output_path, "gotowe_arkusz")
+    sheet.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"Do Arkuszy Google (zdjęcia + opisy, {len(sheet)} produktów): {path}")
+    return path
 
 
 def main() -> None:
