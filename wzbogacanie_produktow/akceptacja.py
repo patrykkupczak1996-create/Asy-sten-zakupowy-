@@ -12,7 +12,9 @@ Krok 1 — strona do przeglądania (można w trakcie przebiegu, plik roboczy jes
 Krok 2 — plik do importu:
     py akceptacja.py --zapisz
   Bierze najnowszy zaakceptowane_produkty*.csv z folderu Pobrane (albo --plik ŚCIEŻKA)
-  i tworzy opisy_wszystkie_do_importu.csv = produkty PEWNE + zaakceptowane.
+  i tworzy opisy_wszystkie_do_importu.csv = produkty PEWNE + zaakceptowane
+  oraz opisy_wszystkie_idosell.csv — tylko @id + opis, gotowy do importu w IdoSell
+  (nazwę kolumny opisu ustawisz przez --kolumna-opisu, musi być taka jak w eksporcie IdoSell).
 
 Bez przeglądarki — cała grupa od razu:
     py akceptacja.py --akceptuj-grupe naglowek --zapisz
@@ -48,6 +50,7 @@ COL_REASON = "Powod"
 COL_ACCEPT = "Akceptacja"
 STATUS_OK = "PEWNY"
 STATUS_ACCEPTED = "ZAAKCEPTOWANY"
+IDOSELL_DESC_COLUMN = "/description/long_desc[pol]"
 DOWNLOAD_NAME = "zaakceptowane_produkty"
 
 # (klucz, etykieta, czy domyślnie warto akceptować, wzorzec w kolumnie Powod)
@@ -147,7 +150,7 @@ def write_page(review: pd.DataFrame, accepted: set[str], path: str, storage_key:
         fh.write(page)
 
 
-def build_import(df: pd.DataFrame, accepted: set[str], output_path: str) -> str:
+def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_column: str) -> str:
     ok = df[df[COL_STATUS] == STATUS_OK]
     acc = df[(df[COL_STATUS] != STATUS_OK) & df[COL_ID].isin(accepted) & df[COL_DESC].str.strip().ne("")].copy()
     acc[COL_STATUS] = STATUS_ACCEPTED
@@ -156,7 +159,12 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str) -> str:
     result.to_csv(import_path, index=False, encoding="utf-8-sig")
     print(f"Pewne: {len(ok)}, zaakceptowane: {len(acc)}, "
           f"pominięte: {int((df[COL_STATUS] != STATUS_OK).sum()) - len(acc)}.")
-    print(f"Plik do importu: {import_path}")
+    # Do IdoSell tylko id + opis: import nie ruszy nazw, cen ani innych pól.
+    idosell_path = side_path(output_path, "idosell")
+    result[[COL_ID, COL_DESC]].rename(columns={COL_DESC: desc_column}).to_csv(
+        idosell_path, index=False, encoding="utf-8-sig")
+    print(f"Plik do importu (pełny): {import_path}")
+    print(f"Plik do IdoSell (@id + opis w kolumnie {desc_column}): {idosell_path}")
     return import_path
 
 
@@ -169,6 +177,8 @@ def main() -> None:
     parser.add_argument("--plik", help="Plik pobrany ze strony akceptacji (domyślnie najnowszy z Pobranych)")
     parser.add_argument("--akceptuj-grupe", nargs="+", metavar="GRUPA", default=[],
                         choices=[k for k, _, _ in GROUPS], help="Zaakceptuj całe grupy bez przeglądarki")
+    parser.add_argument("--kolumna-opisu", default=IDOSELL_DESC_COLUMN,
+                        help="Nagłówek kolumny opisu w pliku dla IdoSell (jak w eksporcie IdoSell)")
     parser.add_argument("--bez-otwierania", action="store_true", help="Nie otwieraj przeglądarki")
     args = parser.parse_args()
 
@@ -198,7 +208,7 @@ def main() -> None:
         save_accepted(store_path, accepted)
 
     if args.zapisz:
-        build_import(df, accepted, args.output)
+        build_import(df, accepted, args.output, args.kolumna_opisu)
         return
 
     page_path = side_path(args.output, "akceptacja").rsplit(".", 1)[0] + ".html"
