@@ -3,6 +3,8 @@
 Zdjęcia produktów — osobny przebieg po opisach.
 
 Dla produktów PEWNYCH (i zaakceptowanych w akceptacja.py) bierze zdjęcie ze strony źródłowej,
+a gdy jej brak albo zdjęcie odpada — z karty produktu w sklepie producenta (AEON), znalezionej po nazwie
+(takie zdjęcie serii trafia do akceptacji),
 którą skrypt opisów już znalazł i potwierdził kodem/EAN (kolumna Zrodlo_URL) — bez ponownego
 wyszukiwania. Każde zdjęcie przechodzi filtry (logo/baner w adresie, rozmiar min. 400 px,
 proporcje, prawdziwy plik obrazu) i model wizyjny Ollamy (czy to produkt, czy ten rodzaj,
@@ -28,8 +30,10 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 import time
+import unicodedata
 import webbrowser
 
 import pandas as pd
@@ -46,6 +50,8 @@ COL_IMG_STATUS, COL_IMG_REASON = "Status_zdjecia", "Powod_zdjecia"
 COLUMNS = [COL_ID, COL_NAME, COL_CODE, COL_PRODUCER, COL_IMG_URL, COL_IMG_FILE, COL_IMG_PAGE,
            COL_IMG_STATUS, COL_IMG_REASON]
 OK, REVIEW, NONE = "PEWNE", "DO_AKCEPTACJI", "BRAK"
+SHOP_MIN_NAME = 0.85         # min. część słów nazwy produktu obecna w tytule ze sklepu producenta
+SHOP_MIN_TITLE = 0.5         # min. część słów tytułu ze sklepu producenta obecna w nazwie produktu
 VISION_TRIES = 3             # ile zdjęć jednego produktu obejrzeć modelem, zanim zostanie bez zdjęcia
 DOWNLOAD_NAME = "zaakceptowane_zdjecia"
 IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
@@ -74,38 +80,109 @@ def products_to_do(output: str) -> pd.DataFrame:
     return df[keep]
 
 
-def candidates_for(record: dict, search: bool, engine: str) -> list[tuple[str, bool, str]]:
-    """[(url_zdjęcia, czy_potwierdzone, strona)] — najpierw strona źródłowa, opcjonalnie wyszukiwarka."""
+def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
+    """Zdjęcia ze strony źródłowej potwierdzonej kodem/EAN przy opisach."""
     m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
-    found: list[tuple[str, bool, str]] = []
     src = record.get(COL_SOURCE, "")
-    if src and not w.is_watermark_site(src):
-        page = w.fetch_page(src)
-        if page:
-            source = {"url": src, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
-                      "producer_site": True}  # strona potwierdzona kodem/EAN — galeria to ten produkt
-            found += [(u, True, src) for u in w.image_candidates_from_source(m, source)]
-    if search and not found:
-        found += w.image_candidates_from_search(m, record.get(COL_CODE, ""), record.get(COL_EAN, ""),
-                                                record.get(COL_PRODUCER, ""), engine, f"[id={record[COL_ID]}]")
-    return found
+    if not src or w.is_watermark_site(src):
+        return []
+    page = w.fetch_page(src)
+    if not page:
+        return []
+    source = {"url": src, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
+              "producer_site": True}  # strona potwierdzona kodem/EAN — galeria to ten produkt
+    return [(u, True, src) for u in w.image_candidates_from_source(m, source)]
 
 
-def process(record: dict, images_dir: str, search: bool, engine: str, vision: bool) -> dict:
-    out = {c: record.get(c, "") for c in (COL_ID, COL_NAME, COL_CODE, COL_PRODUCER)}
-    out.update({COL_IMG_URL: "", COL_IMG_FILE: "", COL_IMG_PAGE: "", COL_IMG_STATUS: NONE, COL_IMG_REASON: ""})
-    cands = candidates_for(record, search, engine)
-    if not cands:
-        out[COL_IMG_REASON] = "brak zdjęcia na stronie źródłowej" if record.get(COL_SOURCE) else "brak strony źródłowej"
-        return out
-    base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
+STOP_WORDS = {"typ", "do", "dla", "z", "ze", "i", "w", "na", "od", "bez", "the", "and", "with"}
+
+
+def _tokens(text: str) -> list[str]:
+    plain = unicodedata.normalize("NFKD", text.lower().replace("ł", "l")).encode("ascii", "ignore").decode()
+    return [t for t in re.findall(r"[a-z]+\d+|[a-z]+|\d+", plain) if len(t) >= 2 and t not in STOP_WORDS]
+
+
+def _key_words(tokens: list[str]) -> list[str]:
+    """Słowa rozróżniające produkty: litery (też skróty „kr”, „rk”) i oznaczenia typu F4/F5 — bez wymiarów DN80, D225."""
+    return [t for t in tokens if t.isalpha() or re.fullmatch(r"[a-z]\d", t)]
+
+
+def _same_word(a: str, b: str) -> bool:
+    """„nadz” = „nadziemny”, „kr” = „krotka” — skróty z nazw w bazie to początki pełnych słów."""
+    if a == b:
+        return True
+    if a.isdigit() or b.isdigit():
+        num, other = (a, b) if a.isdigit() else (b, a)
+        return re.match(r"\d*", other).group() == num  # „2018” = „2018c”
+    if not (a.isalpha() and b.isalpha()):
+        return False  # F4 ≠ F5
+    short, long_ = sorted((a, b), key=len)
+    return long_.startswith(short[:5])
+
+
+def name_match(name: str, title: str) -> tuple[float, float]:
+    """(część słów nazwy obecnych w tytule, część słów tytułu obecnych w nazwie) — obie 0–1.
+
+    Pierwsza liczba pilnuje, żeby „hydrant nadziemny” nie trafił na „hydrant podziemny”, a „KR. F4” na „długa F5”;
+    druga — żeby krótka nazwa („łącznik RK”) nie trafiła na inny wariant („łącznik rurowy RR”).
+    """
+    title_t, name_t = _tokens(title), _tokens(name)
+    name_words = _key_words(name_t)
+    if not title_t or not name_words:
+        return 0.0, 0.0
+    name_cov = sum(any(_same_word(n, t) for t in title_t) for n in name_words) / len(name_words)
+    title_cov = sum(any(_same_word(t, n) for n in name_t) for t in title_t) / len(title_t)
+    return name_cov, title_cov
+
+
+def producer_shop_candidates(record: dict) -> tuple[list[tuple[str, bool, str]], str]:
+    """Zdjęcia z karty produktu w sklepie producenta (AEON…), znalezionej po nazwie. Zwraca (kandydaci, tytuł)."""
+    template = w.PRODUCER_SEARCH.get(record.get(COL_PRODUCER, "").strip().upper())
+    name = record.get(COL_NAME, "")
+    words = [t for t in re.findall(r"[^\W\d_]{4,}", name)]  # słowa z liter — bez DN80, PN16, skrótów
+    if not template or not words:
+        return [], ""
+    items: list[tuple[str, str]] = []
+    for n in (3, 2, 1):  # sklep szuka wszystkich słów naraz — przy braku wyników krótsze zapytanie
+        query = " ".join(words[:n])
+        try:
+            items = w.search_producer_shop(template, query)
+        except Exception as exc:
+            log.info("[id=%s] sklep producenta '%s': %s", record[COL_ID], query, exc)
+            items = []
+        if items:
+            break
+    scored = []
+    for t, u in items:
+        name_cov, title_cov = name_match(name, t)
+        if name_cov >= SHOP_MIN_NAME and title_cov >= SHOP_MIN_TITLE:
+            scored.append((round(name_cov + title_cov, 3), t, u))
+    scored.sort(reverse=True)
+    if not scored:
+        return [], ""
+    if len(scored) > 1 and scored[1][0] == scored[0][0] and scored[1][1] != scored[0][1]:
+        log.info("[id=%s] sklep producenta: kilka równie pasujących pozycji (%s / %s) — pomijam",
+                 record[COL_ID], scored[0][1], scored[1][1])
+        return [], ""
+    _, title, url = scored[0]
+    page = w.fetch_page(url)
+    if not page:
+        return [], ""
+    shop = {"url": url, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
+            "producer_site": True}
+    return [(u, False, url) for u in w.image_candidates_from_source(w.ProductMatcher("", "", ""), shop)], title
+
+
+def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
+                 tried: set[str], notes: list[str]) -> tuple[str, bool, bytes, str, str]:
+    """Pierwsze zdjęcie, które przejdzie filtry i model wizyjny: (url, potwierdzone, dane, rozszerzenie, strona)."""
     pages = {u: p for u, _, p in cands}
-    tried: set[str] = set()
-    notes: list[str] = []
+    base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
     for _ in range(VISION_TRIES):
         url, verified, _, reason = w.pick_image(cands, None, base, tried)  # pobiera + filtry wymiarów/logo
         if not url:
-            notes.append(f"brak poprawnego zdjęcia ({reason})" if reason else "brak kolejnych zdjęć")
+            if reason:
+                notes.append(f"brak poprawnego zdjęcia ({reason})")
             break
         data, ext, err = w.fetch_image(url, pages.get(url, ""))
         if err:
@@ -117,14 +194,51 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
                 notes.append(note)
                 log.info("[id=%s] odrzucone — %s: %s", record[COL_ID], note, url)
                 continue
-        out.update({COL_IMG_URL: url, COL_IMG_PAGE: pages.get(url, ""),
+        return url, verified, data, ext, pages.get(url, "")
+    return "", False, b"", "", ""
+
+
+def process(record: dict, images_dir: str, search: bool, engine: str, vision: bool) -> dict:
+    out = {c: record.get(c, "") for c in (COL_ID, COL_NAME, COL_CODE, COL_PRODUCER)}
+    out.update({COL_IMG_URL: "", COL_IMG_FILE: "", COL_IMG_PAGE: "", COL_IMG_STATUS: NONE, COL_IMG_REASON: ""})
+    tried: set[str] = set()
+    notes: list[str] = []
+    # Kolejność: strona źródłowa (potwierdzona kodem) → sklep producenta (seria po nazwie) → wyszukiwarka obrazów.
+    stages = [("źródło", lambda: (source_candidates(record), ""))]
+    stages.append(("producent", lambda: producer_shop_candidates(record)))
+    if search:
+        m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
+        stages.append(("wyszukiwarka", lambda: (w.image_candidates_from_search(
+            m, record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""), engine,
+            f"[id={record[COL_ID]}]"), "")))
+    any_candidates = False
+    for stage, get in stages:
+        cands, shop_title = get()
+        if not cands:
+            continue
+        any_candidates = True
+        url, verified, data, ext, page = pick_checked(record, cands, vision, tried, notes)
+        if not url:
+            continue
+        base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
+        out.update({COL_IMG_URL: url, COL_IMG_PAGE: page,
                     COL_IMG_FILE: w.save_image(data, ext, images_dir, base).replace(os.sep, "/")})
-        problems = ([] if verified else ["zdjęcie niepotwierdzone kodem/EAN"]) + \
-                   ([] if vision else ["nie sprawdzone modelem wizyjnym"])
+        problems = []
+        if stage == "producent":
+            problems.append(f"zdjęcie serii ze strony producenta, dopasowane po nazwie („{shop_title}”)")
+        elif not verified:
+            problems.append("zdjęcie niepotwierdzone kodem/EAN")
+        if not vision:
+            problems.append("nie sprawdzone modelem wizyjnym")
         out[COL_IMG_STATUS] = REVIEW if problems else OK
         out[COL_IMG_REASON] = "; ".join(problems)
         return out
-    out[COL_IMG_REASON] = "; ".join(n for n in notes if n) or "brak poprawnego zdjęcia"
+    if not any_candidates:
+        out[COL_IMG_REASON] = "brak zdjęcia na stronie źródłowej" if record.get(COL_SOURCE) else "brak strony źródłowej"
+        if w.PRODUCER_SEARCH.get(record.get(COL_PRODUCER, "").strip().upper()):
+            out[COL_IMG_REASON] += "; brak pasującej pozycji w sklepie producenta"
+    else:
+        out[COL_IMG_REASON] = "; ".join(dict.fromkeys(n for n in notes if n)) or "brak poprawnego zdjęcia"
     return out
 
 
