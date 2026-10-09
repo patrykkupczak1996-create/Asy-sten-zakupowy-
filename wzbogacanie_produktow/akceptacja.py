@@ -218,7 +218,9 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_co
         ready.rename(columns={COL_DESC: desc_column, "Zdjecie_URL": image_column}).to_csv(
             ready_path, index=False, encoding="utf-8-sig")
         print(f"GOTOWE (opis + zdjęcie): {len(ready)} -> {ready_path}")
-        write_sheet(result.merge(photos[[COL_ID, "Zdjecie_URL"]], on=COL_ID), output_path)
+        # Plik opisów ma własne (puste przy --bez-zdjec) kolumny zdjęć — bierzemy te z wyników zdjecia.py.
+        base = result.drop(columns=["Zdjecie_URL", "Zdjecie_plik"], errors="ignore")
+        write_sheet(base.merge(photos[[COL_ID, "Zdjecie_URL"]], on=COL_ID), output_path)
     return import_path
 
 
