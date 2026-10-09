@@ -119,14 +119,26 @@ naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`, `--output inna_naz
 
 ### Kontrola opisu
 
-Każdy wygenerowany opis przechodzi dwie kontrole:
+Każdy wygenerowany opis przechodzi kontrole:
 
+* **Literówki w słowach z nazwy** są poprawiane automatycznie: słowo, które różni się o jedną literę od słowa z nazwy
+  produktu albo jego odmiany (-a/-y/-ę/-ą/-i/-e/-ie), np. „Zasuga” → „Zasuwa”, „żyliwo” → „żeliwo”. Wielkość liter
+  zostaje, w kolumnie Powod pojawia się „poprawiona literówka: Zasuga→Zasuwa” (sama poprawka nie zmienia statusu).
+  Pomijane, żeby nie psuć poprawnych słów: różnice tylko w ogonku (ó/o, ł/l…), odmiana (zaworem, nakrętce, żeliwne),
+  inny przedrostek (zbudowany/wbudowany), krótkie rdzenie (stal, woda) i słowa częste w nazwach bazy.
 * **Zakazane ogólniki** (`BANNED_PHRASES` w skrypcie): wysoka jakość, niezawodność, odporność na korozję /
   chemikalia / warunki atmosferyczne, zgodność z normami / standardami, łatwy montaż, trwałość. Zdanie (albo punkt
   listy) z taką frazą jest usuwane, chyba że źródło mówi o tym samym (np. „korozja” jest w tekście strony
   źródłowej). Jeśli po usunięciu opis ma mniej niż 200 znaków, produkt idzie do akceptacji.
 * **Nagłówek `<h2>`** musi zawierać rodzaj produktu z nazwy (pierwsze słowo, np. „zasuwa”, „trójnik”; odmiana
-  dozwolona). Łapie literówki modelu typu „Zasuga” — taki produkt idzie do akceptacji.
+  dozwolona; wystarczy rdzeń dowolnego rzeczownika z nazwy).
+
+Zapisane już opisy można poprawić i przeliczyć bez generowania od nowa (najpierw powstaje kopia
+`*_kopia_przed_przeliczeniem_*.csv`):
+
+```powershell
+py wzbogac_produkty.py --przelicz-statusy --output opisy_wszystkie.csv
+```
 
 ## Strony producentów (najlepsze zdjęcia i dane)
 

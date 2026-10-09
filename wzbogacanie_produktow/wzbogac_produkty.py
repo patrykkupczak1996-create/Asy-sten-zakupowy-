@@ -1422,9 +1422,113 @@ def strip_name_only_extras(desc_html: str, name: str) -> tuple[str, list[str]]:
     return out, removed
 
 
+# --- Automatyczna poprawka literówek modelu (np. „Zasuga” zamiast „Zasuwa” z nazwy produktu) ---
+TYPO_REASON_PREFIX = "poprawiona literówka"
+INFO_REASON_PREFIXES = (TYPO_REASON_PREFIX,)   # powody informacyjne — nie odbierają statusu PEWNY
+INFLECTION_ENDINGS = ("ie", "a", "y", "ę", "ą", "i", "e")
+MIN_TYPO_WORD = 5            # krótsze słowa pomijamy — za dużo przypadkowych „poprawek”
+MIN_TYPO_STEM = 5            # minimalny rdzeń słowa z nazwy (bez końcówki)
+VOWELS = set("aąeęioóuy")
+ALTERNATIONS = {frozenset(p) for p in ("kc", "gz", "rz", "tc", "dz", "ch", "zż", "sś", "lł")}
+FOREIGN_FIRST_LETTERS = set("cvqx")  # pierwsza litera z angielskiej pisowni (ventylator, clips)
+DIACRITIC_PAIRS = {"ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n", "ó": "o", "ś": "s", "ź": "z", "ż": "z"}
+# Częstość słów w NAZWACH całej bazy (nie w opisach — tam powtarzają się błędy modelu). Ustawiane w main()
+# i w --przelicz-statusy. Chroni przed „poprawianiem” dobrego słowa na literówkę z nazwy (Termostst).
+NAME_WORD_FREQ: dict[str, int] = {}
+
+
+def build_name_word_freq(names) -> None:
+    from collections import Counter
+    NAME_WORD_FREQ.clear()
+    NAME_WORD_FREQ.update(Counter(w.lower() for n in names for w in re.findall(r"[^\W\d_]+", str(n))))
+
+
+def _word_stem(word: str) -> str:
+    for ending in INFLECTION_ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 4:
+            return word[: -len(ending)]
+    return word
+
+
+def _fit_ending(stem: str, ending: str) -> str:
+    """Końcówka zgodna z pisownią po zmianie ostatniej litery rdzenia: zasuG+i → zasuW+y, łączniK+y → łączniK+i."""
+    if ending == "i" and stem[-1:] not in ("k", "g", "l", "j") and not stem.endswith(("cz", "sz", "rz", "ż", "c", "dz")):
+        return "y"
+    if ending == "y" and stem[-1:] in ("k", "g"):
+        return "i"
+    return ending
+
+
+def _same_case(template: str, word: str) -> str:
+    if template.isupper():
+        return word.upper()
+    if template[:1].isupper():
+        return word[:1].upper() + word[1:]
+    return word
+
+
+def fix_typos(desc_html: str, name: str) -> tuple[str, list[str]]:
+    """Poprawia w tekście opisu (h2 i treść, bez znaczników) słowa różniące się o JEDNĄ literę od słowa z nazwy
+    produktu albo jego odmiany (-a/-y/-ę/-ą/-i/-e/-ie). Zwraca (opis, ["Zasuga→Zasuwa", …]).
+
+    Zabezpieczenia: różnica nie może być na ostatniej literze (tam są legalne końcówki: gazu/gazy) i słowo
+    z nazwy musi być w nazwach bazy częstsze niż słowo z opisu (gdy literówka jest w nazwie — „Termostst” —
+    poprawny „Termostat” w opisie zostaje).
+    """
+    stems = {}
+    for word in re.findall(r"[^\W\d_]+", name):
+        w = word.lower()
+        stem = _word_stem(w)
+        if len(stem) >= MIN_TYPO_STEM:  # „stal”, „wody” — za krótkie, pasowałyby do zwykłych słów (stanie, wodne)
+            stems.setdefault(stem, w)
+    fixes: list[str] = []
+
+    def fix_word(match: re.Match) -> str:
+        original = match.group(0)
+        t = original.lower()
+        if len(t) < MIN_TYPO_WORD or t in stems.values():
+            return original
+        for stem, base in stems.items():
+            ending = t[len(stem):]
+            if len(t) < len(stem) or (ending and ending not in INFLECTION_ENDINGS):
+                continue
+            diffs = [k for k in range(len(stem)) if t[k] != stem[k]]
+            if len(diffs) != 1 or diffs[0] == len(t) - 1:
+                continue
+            k = diffs[0]
+            a, b = t[k], stem[k]
+            if k == 0 and a not in FOREIGN_FIRST_LETTERS:
+                continue  # inny przedrostek to zwykle inne słowo (zbudowany/wbudowany); poprawiamy tylko ventylator, clips
+            if DIACRITIC_PAIRS.get(a) == b or DIACRITIC_PAIRS.get(b) == a:
+                continue  # sam ogonek: nazwy w bazie bywają bez polskich znaków, a ó/o wymienia się w odmianie
+            if a in VOWELS and b in VOWELS and k >= len(stem) - 3:
+                continue  # zmiana samogłoski przy końcu rdzenia to zwykle odmiana (zaworem/zaworami)
+            if k == len(stem) - 1 and ending != base[len(stem):] and (
+                    a in VOWELS or b in VOWELS or frozenset((a, b)) in ALTERNATIONS):
+                continue  # inna forma (żeliwo/żeliwne) albo oboczność (nakrętka/nakrętce), nie literówka
+            if NAME_WORD_FREQ and NAME_WORD_FREQ.get(t, 0) >= NAME_WORD_FREQ.get(base, 0):
+                continue  # słowo z opisu jest w nazwach bazy co najmniej tak częste — to nie literówka
+            fixed = _same_case(original, stem + _fit_ending(stem, ending))
+            fixes.append(f"{original}→{fixed}")
+            return fixed
+        return original
+
+    out = re.sub(r"(?<=>)[^<]+", lambda seg: re.sub(r"[^\W\d_]+", fix_word, seg.group(0)), desc_html)
+    return out, list(dict.fromkeys(fixes))
+
+
+def status_for(reasons: list[str]) -> str:
+    """PEWNY, gdy wszystkie powody są tylko informacyjne (np. poprawiona literówka)."""
+    return STATUS_REVIEW if any(not r.startswith(INFO_REASON_PREFIXES) for r in reasons) else STATUS_OK
+
+
 def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
-    """Filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody do akceptacji)."""
+    """Poprawka literówek + filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody)."""
     reasons: list[str] = []
+    desc_html, typo_fixes = fix_typos(desc_html, row["name"])
+    if typo_fixes:
+        log.info("%s poprawione literówki: %s", row_label, ", ".join(typo_fixes))
+        reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
     if not source:
         desc_html, extras = strip_name_only_extras(desc_html, row["name"])
         if extras:
@@ -1529,7 +1633,7 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
     out[COL_IMAGE] = image
     out[COL_IMAGE_FILE] = image_file.replace(os.sep, "/")
     out[COL_SOURCE] = source["url"] if source else ""
-    out[COL_STATUS] = STATUS_REVIEW if reasons else STATUS_OK
+    out[COL_STATUS] = status_for(reasons)
     out[COL_REASON] = "; ".join(reasons)
     log.info("%s %s%s", row_label, out[COL_STATUS], f" — {out[COL_REASON]}" if reasons else "")
     return out
@@ -2062,19 +2166,34 @@ def save_dataframe(df: pd.DataFrame, path: str) -> None:
 def recheck_statuses(output_path: str) -> None:
     """--przelicz-statusy: ponowna kontrola zapisanych opisów bez generowania, statusy poprawiane na miejscu.
 
-    Sprawdza na nowo nagłówek (rdzeń rzeczownika z nazwy) i zdejmuje odrzucenie „AI: strona nie pasuje”,
-    jeśli dotyczyło tylko EAN, a produkt nie ma EAN w danych. Opisów nie zmienia. Przed zmianą robi kopię pliku.
+    Poprawia literówki w opisach (słowa o jedną literę różne od nazwy produktu), sprawdza na nowo nagłówek
+    (rdzeń rzeczownika z nazwy) i zdejmuje odrzucenie „AI: strona nie pasuje”, jeśli dotyczyło tylko EAN,
+    a produkt nie ma EAN w danych. Przed zmianą robi kopię pliku.
     """
     if not os.path.exists(output_path):
         sys.exit(f"Nie ma pliku {output_path}.")
     df = read_csv(output_path)
+    if not NAME_WORD_FREQ:
+        # Statystyka słów z pełnej bazy (produkty.csv obok pliku wyników), a gdy jej brak — z nazw w wynikach.
+        full = os.path.join(os.path.dirname(os.path.abspath(output_path)), "produkty.csv")
+        names = read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME]
+        build_name_word_freq(names)
     backup = f"{os.path.splitext(output_path)[0]}_kopia_przed_przeliczeniem_{time.strftime('%Y%m%d_%H%M%S')}.csv"
     shutil.copy2(output_path, backup)
     changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
+    typo_rows, typo_examples = 0, []
     for i in df.index:
         row = df.loc[i]
         old_reasons = [r for r in row[COL_REASON].split("; ") if r]
         reasons = []
+        if row[COL_DESC]:
+            fixed_desc, typo_fixes = fix_typos(row[COL_DESC], row[COL_NAME])
+            if typo_fixes:
+                df.at[i, COL_DESC] = fixed_desc
+                typo_rows += 1
+                typo_examples.append(f"id {row[COL_ID]}: {', '.join(typo_fixes)} („{row[COL_NAME][:50]}”)")
+                reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
+                row = df.loc[i]
         for reason in old_reasons:
             if reason.startswith(HEADING_REASON_PREFIX):
                 continue  # nagłówek sprawdzamy na nowo poniżej
@@ -2084,8 +2203,8 @@ def recheck_statuses(output_path: str) -> None:
             reasons.append(reason)
         if row[COL_DESC] and not heading_has_type(row[COL_DESC], row[COL_NAME], row[COL_PRODUCER]):
             reasons.append(heading_reason(row[COL_NAME], row[COL_PRODUCER]))
-        status = STATUS_REVIEW if reasons else STATUS_OK
-        if reasons != old_reasons:
+        status = status_for(reasons)
+        if reasons != old_reasons or status != row[COL_STATUS]:
             changes["zmieniony powód"] += 1
             if status != row[COL_STATUS]:
                 changes[f"→ {status}"] += 1
@@ -2095,6 +2214,9 @@ def recheck_statuses(output_path: str) -> None:
     log.info("PRZELICZ: %d wierszy, zmienione powody: %d, %s → PEWNY: %d, → DO_AKCEPTACJI: %d. Kopia: %s",
              len(df), changes["zmieniony powód"], STATUS_REVIEW, changes["→ PEWNY"],
              changes["→ DO_AKCEPTACJI"], backup)
+    log.info("PRZELICZ: poprawione literówki w %d opisach. Przykłady:", typo_rows)
+    for example in typo_examples[:10]:
+        log.info("   %s", example)
     split_results(output_path)
 
 
@@ -2103,6 +2225,8 @@ def reprocess_missing_sources(args) -> None:
     if not os.path.exists(args.output):
         sys.exit(f"Nie ma pliku {args.output}.")
     df = read_csv(args.output)
+    full = os.path.join(os.path.dirname(os.path.abspath(args.output)), "produkty.csv")
+    build_name_word_freq(read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME])
     todo = [i for i in df.index if NO_SOURCE_REASON in df.at[i, COL_REASON]]
     if args.limit:
         todo = todo[:args.limit]
@@ -2248,6 +2372,8 @@ def main() -> None:
                  "Skopiuj tu plik pobrany z Google Sheets albo podaj pełną ścieżkę w --input "
                  "(w cudzysłowie, jeśli zawiera spacje).")
     df_in = pd.read_csv(args.input, dtype=str, keep_default_na=False, sep=args.sep, encoding="utf-8-sig")
+    if COL_NAME in df_in.columns:
+        build_name_word_freq(df_in[COL_NAME])  # do poprawiania literówek modelu (fix_typos)
     missing = [c for c in (COL_ID, COL_CODE, COL_PRODUCER, COL_EAN, COL_CATEGORY, COL_NAME)
                if c not in df_in.columns]
     if missing:
