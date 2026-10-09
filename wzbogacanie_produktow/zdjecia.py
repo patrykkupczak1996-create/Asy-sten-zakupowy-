@@ -94,6 +94,32 @@ def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
     return [(u, True, src) for u in w.image_candidates_from_source(m, source)]
 
 
+def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z karty produktu na stronie producenta znalezionej PO KODZIE (DIRECT_SEARCH w głównym skrypcie).
+
+    Karta musi zawierać kod albo EAN produktu — wtedy zdjęcie jest potwierdzone jak ze strony źródłowej.
+    """
+    code, ean, producer = record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, "")
+    if not code or not hasattr(w, "direct_search_urls"):
+        return []
+    m = w.ProductMatcher(code, ean, producer)
+    found: list[tuple[str, bool, str]] = []
+    try:
+        urls = w.direct_search_urls(m, code, producer)
+    except TypeError:  # starsza wersja głównego skryptu bez parametru producenta
+        urls = w.direct_search_urls(m, code)
+    for url in urls[:3]:
+        if url == record.get(COL_SOURCE) or w.is_watermark_site(url):
+            continue
+        page = w.fetch_page(url)
+        if not page or (m.find(page[0]) is None and not m.in_short_text(url, page[3] if len(page) > 3 else "")):
+            continue
+        shop = {"url": url, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
+                "producer_site": True}
+        found += [(u, True, url) for u in w.image_candidates_from_source(m, shop)]
+    return found
+
+
 STOP_WORDS = {"typ", "do", "dla", "z", "ze", "i", "w", "na", "od", "bez", "the", "and", "with"}
 
 
@@ -203,8 +229,10 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
     out.update({COL_IMG_URL: "", COL_IMG_FILE: "", COL_IMG_PAGE: "", COL_IMG_STATUS: NONE, COL_IMG_REASON: ""})
     tried: set[str] = set()
     notes: list[str] = []
-    # Kolejność: strona źródłowa (potwierdzona kodem) → sklep producenta (seria po nazwie) → wyszukiwarka obrazów.
-    stages = [("źródło", lambda: (source_candidates(record), ""))]
+    # Kolejność: strona źródłowa (potwierdzona kodem) → strona producenta po kodzie → sklep producenta (seria
+    # po nazwie) → wyszukiwarka obrazów.
+    stages = [("źródło", lambda: (source_candidates(record), "")),
+              ("producent-kod", lambda: (producer_code_candidates(record), ""))]
     stages.append(("producent", lambda: producer_shop_candidates(record)))
     if search:
         m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
