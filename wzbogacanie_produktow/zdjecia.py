@@ -308,21 +308,25 @@ def web_page_candidates(record: dict, engine: str) -> list[tuple[str, bool, str]
     skip = {record.get(COL_SOURCE, "")}
     queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
     out: list[tuple[str, bool, str]] = []
-    checked = 0
+    checked, with_code, found = 0, 0, 0
     for query in queries:
         urls = w.with_retry(w.search_pages, query, engine, what=f"[id={record[COL_ID]}] strony '{query}'") or []
+        found += len(urls)
         for url in urls:
             if checked >= WEB_PAGES_TO_CHECK:
-                return out
+                break
             if not url or url in skip or w.is_watermark_site(url) or w.domain_blocked(url):
                 continue
             skip.add(url)
             checked += 1
             page = w.fetch_page(url)
             if page and m.find(page[0]) is not None:  # strona ma kod/EAN — zdjęcia potwierdzone
+                with_code += 1
                 out += page_candidates(url, m, True, page)
-        if out:
+        if out or checked >= WEB_PAGES_TO_CHECK:
             break  # są zdjęcia po kodzie — EAN niepotrzebny
+    log.info("[id=%s] inne strony: wyników %d, otwarte %d, z kodem/EAN %d, zdjęć %d",
+             record[COL_ID], found, checked, with_code, len(out))
     return out
 
 
