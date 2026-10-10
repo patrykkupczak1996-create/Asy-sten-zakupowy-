@@ -1,0 +1,2945 @@
+#!/usr/bin/env python3
+"""
+Wzbogacanie bazy produktów B2B (armatura, zasuwy) pod import do IdoSell.
+
+Dla każdego wiersza pliku CSV (eksport z Google Sheets):
+  1. szuka w internecie strony produktu po kodzie producenta i EAN i sprawdza,
+     czy ten kod / EAN faktycznie występuje na stronie (weryfikacja),
+  2. generuje opis SEO w czystym HTML przez Gemini albo OpenAI WYŁĄCZNIE na podstawie
+     nazwy i tekstu tej strony; model dodatkowo ocenia, czy strona opisuje ten sam produkt,
+  3. bierze zdjęcie z potwierdzonej strony (albo z wyszukiwarki obrazów, jeśli jego źródło
+     też zawiera kod / EAN),
+  4. pobiera zdjęcie do folderu zdjecia/ i sprawdza, czy to prawdziwy plik obrazu,
+  5. nadaje status:
+       PEWNY          — wszystko potwierdzone kodem/EAN -> plik *_pewne.csv (do importu),
+       DO_AKCEPTACJI  — cokolwiek niepotwierdzone (z podanym powodem) -> plik *_do_akceptacji.csv.
+
+Po przejrzeniu pliku do akceptacji (kolumna "Akceptacja" = TAK) komenda
+    py wzbogac_produkty.py --output produkty_wzbogacone.csv --zatwierdz zaakceptowane.csv
+tworzy plik *_do_importu.csv = produkty pewne + zaakceptowane ręcznie.
+
+Postęp jest zapisywany co CHECKPOINT_EVERY wierszy. Po restarcie skrypt zaczyna od
+pierwszego niezapisanego wiersza, więc nic nie jest generowane (ani opłacane) dwa razy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urljoin, urlparse
+
+import pandas as pd
+import requests
+from openai import OpenAI
+import openai
+
+# =============================================================================
+# KONFIGURACJA — TUTAJ WPISUJESZ KLUCZE API
+# =============================================================================
+# Najbezpieczniej ustawić je jako zmienne środowiskowe (patrz README.md).
+# Możesz też wpisać klucz bezpośrednio między cudzysłowy zamiast "" —
+# wtedy nie wysyłaj tego pliku nikomu i nie wrzucaj go do repozytorium.
+
+# Model AI do pisania opisów — parametr --ai lub poniżej: "gemini" albo "openai".
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")          # dla "gemini", np. "AIza..."
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")          # dla "openai", np. "sk-proj-..."
+
+# Wyszukiwarka (strony produktów + zdjęcia) — parametr --search lub poniżej:
+#   "ddg"     — DuckDuckGo, darmowe, bez klucza (przy dużej liczbie zapytań potrafi blokować)
+#   "serpapi" — SerpApi (Google), płatne, najlepsza trafność i stabilność
+#   "google"  — Google Custom Search JSON API (100 zapytań/dzień za darmo)
+SEARCH_ENGINE = os.getenv("SEARCH_ENGINE", "ddg")
+
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")        # tylko dla "serpapi"
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")          # tylko dla "google"
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")            # tylko dla "google" (identyfikator "cx")
+
+# Strony producentów — przeszukiwane NAJPIERW (najlepsze zdjęcia, bez znaków wodnych, pełne dane).
+# Klucz: nazwa producenta dokładnie jak w kolumnie /producer@name (wielkość liter bez znaczenia).
+# Dopisz kolejnych producentów z bazy, np. "HAWLE": ["hawle.pl"].
+PRODUCER_SITES = {
+    # AEON: aeon-sale.com nie pokazuje kodów producenta (AG0828) ani EAN i nie ma go w indeksie
+    # wyszukiwarek, więc nie da się na nim potwierdzić produktu — produkty AEON potwierdzają hurtownie
+    # z TRUSTED_SITES. Tu wpisuj tylko strony producentów, które pokazują kod lub EAN produktu.
+}
+# Wyszukiwarki sklepów producentów, w których kodów nie ma, ale są dobre zdjęcia serii. Skrypt szuka tam
+# po nazwie serii (z karty hurtowni), a model AI wybiera z wyników pozycję zgodną z produktem.
+# {q} = zapytanie. Strona nie musi być w indeksie DuckDuckGo — skrypt używa jej własnej wyszukiwarki.
+# Wartość: sam adres (karty rozpoznawane po „/product/”) albo {"url": adres, "link": fragment adresu karty}.
+PRODUCER_SEARCH = {
+    "AEON": {"url": "https://aeon-sale.com/?s={q}&post_type=product", "link": "/product/"},
+    "VALVEX": {"url": "https://valvex.com/?s={q}", "link": "/produkt/"},
+    "GEBO": {"url": "https://www.gebo.group/de-DE/search?search={q}", "link": "/p/"},
+    # Karty bez kodów producenta — wyszukiwarka działa tylko po nazwie serii (np. „Heat Monitor”, „ELF 2”).
+    "AURATON": {"url": "https://www.auraton.pl/szukaj?s={q}", "link": "/oferta/"},
+    "APATOR-POWOGAZ": {"url": "https://www.apator.com/wyszukiwarka?search={q}", "link": "/produkty-i-uslugi/"},
+    "AWENTA": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/"},
+}
+DEFAULT_SHOP_LINK = "/product/"
+# Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
+# jest powtarzalny i szybszy. Karta z wyników i tak przechodzi zwykłą weryfikację (kod/EAN na stronie).
+#   "url":         adres strony wyników ({q} = kod producenta),
+#   "link":        fragment adresu karty produktu w wynikach,
+#   "code_in_url": True — brać tylko karty z kodem w adresie (warianty z innymi kodami odpadają);
+#                  False — brać pierwsze karty z wyników (kod sprawdzany na samej karcie),
+#   "producers":   dla których producentów (nazwa jak w /producer@name); brak klucza = dla wszystkich.
+#   "api":         zamiast "url"/"link" — wyszukiwarka z API JSON (patrz direct_search_api).
+#   "woo_catalog": zamiast "url"/"api" — adres WooCommerce Store API; skrypt pobiera raz cały katalog (z wariantami)
+#                  i dopasowuje kod do SKU, także do wzorców typu 21.550.DN.1 / 10.100.X (patrz woo_catalog_match).
+#   "trusted":     True — strona producenta nie pokazuje kodu na karcie, ale jej wyszukiwarka zna kody: gdy zwróci
+#                  DOKŁADNIE jedną kartę, karta jest źródłem opisu, a produkt idzie do akceptacji
+#                  (powód SEARCH_ONLY_REASON).
+# Sprawdzone wyszukiwarki (październik 2026), test: py wzbogac_produkty.py --test-wyszukiwarki KOD
+#   AFRISO  — afriso.pl szuka po kodzie (nie po EAN), adres karty zaczyna się od kodu, EAN jest w JSON-LD karty.
+#   CONEX   — conexbanninger.com szuka po kodzie, karta (/product/…) zawiera kod.
+#   GEBERIT — katalog to aplikacja JavaScript; API podpowiedzi catalog.geberit.pl/api/suggest?brand=geberit&
+#             locale=pl-PL&term=KOD, pole exactMatches z kodem; karta /pl-PL/product/PRO_… (produkt) albo
+#             /pl-PL/spare-part/SPT_… (część zamienna — strona spłuczki, w której część występuje).
+#   VALVEX  — valvex.com/?s=KOD (WordPress), karta /produkt/… zawiera kod.
+#   GEBO    — gebo.group/pl-PL/search?search=KOD, kod w adresie karty (/p/…/01.260.28.02).
+#   FERRO   — wyszukiwarka Meilisearch (publiczny klucz tylko do wyszukiwania, podany w HTML ferro.pl):
+#             pola part_number i ean, karta pod adresem z pola url.
+#   DANFOSS — store.danfoss.com: podpowiedzi JSON (…/search/autocomplete/SearchBoxNextStore?term=KOD),
+#             pole code, karta /p/KOD. Nie każdy produkt Danfoss jest w sklepie (np. 003Z1031 nie ma).
+#   BOHAMET-ARMATURA — bohamet-armatura.pl (NIE bohamet.pl — to inna firma, okna okrętowe): WooCommerce Store API.
+#             SKU wariantów to często wzorce (21.550.DN.1, 10.100.X, 10.310.2000 | 10.310.2001) — kod dopasowany
+#             do wzorca nie występuje na karcie, więc taki produkt idzie do akceptacji (SEARCH_ONLY_REASON).
+#   ALCA    — alcadrain.pl: JSON wyszukiwarki Joomla (com_search, searchphrase=exact), kod w tytule wyniku.
+#             alcaplast.pl nie działa (błąd SSL / 500).
+#   AWENTA  — awenta.pl/search/query:KOD (Grav) zwraca kartę serii, ale karta nie pokazuje kodu → "trusted".
+#   GAZEX   — gazex.com/pl/wyszukaj/?query=KOD (parametr „query”; „q”/„s” nic nie zwracają), karta
+#             /pl/produkty/model/zb-40/ z kodem w adresie. Kody 3-znakowe (LD-2) są za krótkie do weryfikacji.
+#   DAFI    — dafi.pl (Magento): catalogsearch/result/?q=KOD, karta *.html ze SKU (= kod) i EAN.
+#             Kody DLW…/DMT… z bazy to kody hurtowni, nie Dafi — ich nie znajdzie.
+#   CALEFFI — caleffi.com: Typesense (publiczny klucz tylko do wyszukiwania, podany w HTML strony wyników),
+#             kolekcja caleffi_corporate_products, pole caleffi_search_caleffi_product_articles = kody
+#             artykułów serii; karta serii ma tabelę artykułów z kodem.
+# Sprawdzone i NIEprzydatne (październik 2026):
+#   blokują skrypty (HTTP 403 + captcha, sprawdzone ponownie 10.2026): Onninen, Armacell (armacell.com/pl-PL),
+#   Flamco (flamco.pl → flamco.aalberts-hfc.com);
+#   karty bez kodów i EAN, wyszukiwarka nie zna kodów: Flowair (flowair.com/pl, Drupal; 56134, 52042),
+#   Ferroli (ferroli.com/pl, Next.js; LSMBA06A, GRZ4430A); Galmet — sklep.galmet.com.pl/szukaj?search= nie
+#   zwraca nic nawet po nazwie, galmet.com.pl (Nuxt) bez wyszukiwarki;
+#   błąd certyfikatu SSL (też przez http → przekierowanie na https): Biawar (biawar.com.pl), Ferroli (ferroli.pl);
+#   brak oficjalnej strony z katalogiem: Famas (Łódź, grupa BOA — famas.eu na sprzedaż; produkty tylko w sklepach);
+#   wyszukiwarka nie zna kodów: Kaczmarek (kaczmarek2.pl), KAN-therm; tylko po nazwie (PRODUCER_SEARCH,
+#   zdjęcia): Auraton (karty bez kodów AUR… i EAN), Apator-Powogaz (apator.com/wyszukiwarka, kody 60-… nieznane);
+#   AGRU (agru.at, TYPO3) — brak działającej wyszukiwarki, kody tylko w katalogach PDF;
+#   wyniki tylko przez JavaScript, bez znalezionego API: Wavin, Galmet, Rothenberger;
+#   brak wyszukiwarki / strona nie odpowiada: Purmo, Georg Fischer (gfps.com), Vesbo, Grundfos (przekroczony czas),
+#   De Dietrich (błąd certyfikatu SSL).
+DIRECT_SEARCH = {
+    "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
+                  "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
+    "conexbanninger.com": {"url": "https://conexbanninger.com/products/?lang=en&srch={q}",
+                           "link": "/product/", "code_in_url": False, "producers": ["CONEX"]},
+    "catalog.geberit.pl": {"producers": ["GEBERIT"], "api": {
+        "url": "https://catalog.geberit.pl/api/suggest", "params": {"brand": "geberit", "locale": "pl-PL", "term": "{q}"},
+        "items": None, "code_fields": ["exactMatches"],
+        "url_from_id": {"PRO_": "https://catalog.geberit.pl/pl-PL/product/",
+                        "SPT_": "https://catalog.geberit.pl/pl-PL/spare-part/"}}},
+    "valvex.com": {"url": "https://valvex.com/?s={q}",
+                   "link": "/produkt/", "code_in_url": False, "producers": ["VALVEX"]},
+    "gebo.group": {"url": "https://www.gebo.group/de-DE/search?search={q}",  # pl-PL/en-GB: HTTP 404
+                   "link": "/p/", "code_in_url": True, "producers": ["GEBO"]},
+    "ferro.pl": {"producers": ["FERRO"], "api": {
+        "method": "POST", "url": "https://meilisearch-pl.pr.uc.ferro.unitymsp.it/indexes/products_pl/search",
+        "json": {"q": "{q}", "limit": 5}, "headers": {"Authorization": "Bearer {key}"},
+        "key_from": {"page": "https://www.ferro.pl/", "regex": r'engine-api-key="([^"]+)"'},
+        "items": "hits", "url_field": "url", "code_fields": ["part_number", "ean"], "base": "https://www.ferro.pl"}},
+    "store.danfoss.com": {"producers": ["DANFOSS"], "api": {
+        "url": "https://store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore", "params": {"term": "{q}"},
+        "items": "products", "url_field": "url", "code_fields": ["code"], "base": "https://store.danfoss.com/pl/pl"}},
+    "bohamet-armatura.pl": {"producers": ["BOHAMET-ARMATURA"],
+                            "woo_catalog": "https://bohamet-armatura.pl/wp-json/wc/store/v1/products"},
+    "alcadrain.pl": {"producers": ["ALCA"], "api": {
+        "url": "https://www.alcadrain.pl/index.php",
+        "params": {"option": "com_search", "searchphrase": "exact", "tmpl": "raw", "type": "json",
+                   "ordering": "alpha", "searchword": "{q}"},
+        "items": "results", "url_field": "url", "code_fields": ["Title"], "base": "https://www.alcadrain.pl"}},
+    "awenta.pl": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/", "code_in_url": False,
+                  "trusted": True, "producers": ["AWENTA"]},
+    "gazex.com": {"url": "https://www.gazex.com/pl/wyszukaj/?query={q}", "link": "/pl/produkty/model/",
+                  "code_in_url": True, "producers": ["GAZEX"]},
+    "dafi.pl": {"url": "https://dafi.pl/catalogsearch/result/?q={q}", "link": ".html", "code_in_url": False,
+                "producers": ["DAFI"]},
+    "caleffi.com": {"producers": ["CALEFFI"], "api": {
+        "url": "https://search.caleffi.com/collections/caleffi_corporate_products/documents/search",
+        "params": {"q": "{q}", "query_by": "caleffi_search_caleffi_product_articles,field_product_code,title",
+                   "filter_by": "langcode:=pl-pl", "per_page": 5},
+        "headers": {"X-TYPESENSE-API-KEY": "{key}"},
+        "key_from": {"page": "https://www.caleffi.com/pl-pl/products/search?query=zawor",
+                     "regex": r'typesense":\{"server":\{"apiKey":"([^"]+)"'},
+        "items": "hits", "item_key": "document", "url_field": "caleffi_path_alias",
+        "code_fields": ["caleffi_search_caleffi_product_articles", "field_product_code"],
+        "base": "https://www.caleffi.com"}},
+}
+SEARCH_ONLY_REASON = "kod potwierdzony tylko wyszukiwarką producenta (karta bez kodu)"
+MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
+# Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
+TRUSTED_SITES = ["cetel-hurtownia.pl", "mateomarket.pl"]  # Onninen odpada — blokuje skrypty (HTTP 403)
+# Strony, które nakładają znak wodny na zdjęcia — skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN,
+# dane do opisu), a zdjęcie szuka gdzie indziej. Dotyczy też ich serwerów ze zdjęciami (np. img.onninen…).
+WATERMARK_SITES = ["onninen.pl"]
+
+# =============================================================================
+# USTAWIENIA PRZETWARZANIA
+# =============================================================================
+# Gemini udostępnia interfejs zgodny z OpenAI, więc oba działają przez tę samą bibliotekę `openai`.
+AI_PROVIDERS = {
+    # Gdy model jest przeciążony (503) albo niedostępny (404), skrypt bierze kolejny z listy.
+    "gemini": {"name": "Gemini",
+               "models": os.getenv("GEMINI_MODEL", "gemini-3.8-flash,gemini-3.7-flash,gemini-3.5-flash").split(","),
+               "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+               "key_env": "GEMINI_API_KEY", "key_url": "https://aistudio.google.com/apikey",
+               # Modele Gemini 3.x "myślą" przed odpowiedzią i liczą to do limitu tokenów —
+               # mały limit uciąłby opis w połowie.
+               "max_tokens": 8000},
+    "openai": {"name": "OpenAI", "models": os.getenv("OPENAI_MODEL", "gpt-4o-mini").split(","),
+               "base_url": None,
+               "key_env": "OPENAI_API_KEY", "key_url": "https://platform.openai.com/api-keys",
+               "max_tokens": 3000},  # opis HTML po polsku + pola JSON (nazwa, zapytanie)
+    # Ollama — model uruchomiony lokalnie na Twoim komputerze (darmowy, bez klucza, potrzebna dobra karta graficzna).
+    "ollama": {"name": "Ollama", "models": os.getenv("OLLAMA_MODEL", "gemma3:12b").split(","),
+               "base_url": os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/v1",
+               "key_env": None, "key_url": "https://ollama.com/download",
+               "max_tokens": 3000,  # opis HTML po polsku + pola JSON — 1500 ucinało odpowiedź
+               "timeout": 600},  # lokalny model bywa wolny, szczególnie bez karty graficznej
+}
+AI = dict(AI_PROVIDERS["gemini"], key="")  # ustawiane w main() przez configure_ai()
+CHECKPOINT_EVERY = 10        # co ile wierszy zapisywać postęp na dysk
+RETRY_WAIT_SECONDS = 5       # ile czekać przed ponowieniem po błędzie
+MAX_RETRIES = 6              # ile razy ponawiać jedno zapytanie, zanim wiersz zostanie pominięty
+REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
+OLLAMA_NUM_CTX = 8192        # kontekst lokalnego modelu (tokeny) — mieści polecenie + tekst strony
+AI_TIMEOUT = 180             # timeout odpowiedzi modelu AI — przy przeciążeniu Gemini odpowiada wolno
+PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
+MAX_PAGES_PER_PRODUCT = 15   # ile stron z wyników wyszukiwania sprawdzić łącznie na produkt
+MAX_PAGES_PER_QUERY = 3      # …i ile z wyników jednego zapytania (żeby jedno złe zapytanie nie zużyło limitu)
+SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
+IMAGES_DIR = "zdjecia"       # folder na pobrane zdjęcia (obok pliku wynikowego)
+MAX_IMAGE_BYTES = 15_000_000
+MIN_IMAGE_BYTES = 2_000      # mniejsze pliki to zwykle ikonki/piksele śledzące, nie zdjęcia produktu
+DEFAULT_WORKERS = 3          # ile wierszy przetwarzać równolegle w ramach jednej paczki
+
+# Nazwy kolumn wejściowych (dokładnie jak w eksporcie z IdoSell / Google Sheets)
+COL_ID = "@id"
+COL_CODE = "@code_producer"
+COL_PRODUCER = "/producer@name"
+COL_EAN = "/sizes/size@code_producer"
+COL_CATEGORY = "/navigation/site/menu/item@textid[pol]"
+COL_NAME = "/description/name[pol]"
+
+# Kolumny dopisywane przez skrypt
+COL_DESC = "Opis_HTML"
+COL_IMAGE = "Zdjecie_URL"
+COL_IMAGE_FILE = "Zdjecie_plik"
+COL_SOURCE = "Zrodlo_URL"
+COL_STATUS = "Status"
+COL_REASON = "Powod"
+COL_ACCEPT = "Akceptacja"
+NEW_COLUMNS = [COL_DESC, COL_IMAGE, COL_IMAGE_FILE, COL_SOURCE, COL_STATUS, COL_REASON]
+
+STATUS_OK = "PEWNY"
+STATUS_REVIEW = "DO_AKCEPTACJI"
+ACCEPT_VALUES = {"TAK", "T", "OK", "X", "1", "YES", "Y"}
+
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")  # .webp: m.in. sklepy na WordPressie (np. AEON)
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.5",
+}
+
+SYSTEM_PROMPT = "Jesteś ekspertem SEO w branży instalacyjnej i B2B."
+
+ABBREVIATIONS = """DN80 = średnica nominalna 80 mm, PN16 = ciśnienie nominalne 16 bar,
+KOŁN. = kołnierzowa (połączenie kołnierzowe), KR. = krótka (krótka długość zabudowy, np. KR. F4),
+F4/F5 = długość zabudowy wg normy EN 558 (F4 krótka, F5 długa), ŻEL. = żeliwna,
+RK/RR = łącznik rurowo-kołnierzowy / rurowo-rurowy, D225 = średnica zewnętrzna rury 225 mm,
+PE = polietylen, PVC = polichlorek winylu (nie poliwęglan), PE/PVC = do rur z polietylenu
+i polichlorku winylu, Z PE = z końcówkami z polietylenu"""
+# Liczby, które słownik skrótów wprowadza sam z siebie (np. „wg normy EN 558”) — nie są zmyśleniem modelu.
+ABBREVIATION_NUMBERS = {"558"}
+
+PROMPT_WITH_SOURCE = """Napisz opis produktu do sklepu internetowego B2B.
+
+DANE Z KARTOTEKI:
+- Nazwa techniczna: {name}
+- Producent: {producer}
+- Kod producenta: {code}
+- EAN: {ean}
+- Kategoria: {category}
+
+TEKST ZE STRONY ŹRÓDŁOWEJ ({url}):
+\"\"\"
+{source}
+\"\"\"
+
+Zasady:
+1. Najpierw sprawdź, czy tekst ze strony dotyczy DOKŁADNIE tego produktu: ten sam kod lub EAN
+   i parametry zgodne z nazwą (np. DN, PN, średnice). Jeśli cokolwiek się nie zgadza,
+   ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
+   Jeśli EAN w kartotece to „brak”, NIE oceniaj EAN ze strony (my go po prostu nie mamy) —
+   o zgodności decyduje kod producenta i parametry.
+2. Opis: ok. 300–600 znaków (bez znaczników HTML), 2–3 krótkie akapity. Opis ma być ogólny, marketingowy,
+   skupiony na przeznaczeniu i korzyściach dla instalatora: do czego służy produkt, w jakich instalacjach
+   się go stosuje, jakie zadanie w nich spełnia. Tekst źródłowy służy do potwierdzenia produktu i zrozumienia
+   jego przeznaczenia — NIE przepisuj z niego danych technicznych.
+3. ZABRANIAM CI dodawać jakichkolwiek parametrów technicznych, norm, certyfikatów, ciśnień, gwintów,
+   temperatur ani materiałów, jeśli nie wynikają one wprost z nazwy produktu — nawet jeśli są w tekście
+   źródłowym. Żadnych liczb spoza nazwy. Skróty z nazwy rozwijaj, np. {abbreviations}.
+   Nie pisz o jakości, trwałości, niezawodności, odporności, zgodności z normami ani o łatwym czy szybkim
+   montażu, jeśli źródło tego wprost nie mówi.
+4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <strong>. Bez list, <html>, <body>,
+   stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu — w nagłówku tylko to, co jest w nazwie.
+5. Nie wspominaj w opisie o stronie źródłowej ani o innych sklepach.
+6. "pelna_nazwa": pełna nazwa handlowa produktu ze strony źródłowej (bez ceny i kodów sklepu).
+7. "zapytanie_producent": 2–5 słów do znalezienia TEJ SERII w sklepie producenta: nazwa serii/linii
+   (np. OptiValve), rodzaj produktu i najważniejsza cecha odróżniająca (np. "zasuwa gaz kołnierzowa
+   OptiValve typ A"). Bez średnicy DN, ciśnienia PN i kodów. Puste, jeśli nie da się ustalić.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"ten_sam_produkt": true lub false, "uwagi": "...", "opis_html": "...",
+  "pelna_nazwa": "...", "zapytanie_producent": "..."}}"""
+
+PROMPT_PICK_PRODUCER_ITEM = """Szukamy w sklepie producenta {producer} zdjęcia produktu:
+- Nazwa w kartotece: {name}
+- Pełna nazwa z hurtowni: {full_name}
+
+Wyniki wyszukiwania w sklepie producenta:
+{items}
+
+Wskaż numer pozycji, która jest DOKŁADNIE tym samym rodzajem i serią produktu. Muszą się zgadzać
+(jeśli są podane): rodzaj (np. zasuwa, łącznik), przeznaczenie (gaz / woda), sposób połączenia
+(kołnierzowa, z króćcami PE, kielichowa, gwintowana), typ i seria (np. OptiValve typ A vs OptiValve Plus),
+długość zabudowy (F4 / F5), materiał korpusu. Pozycja może dotyczyć całej serii bez podanej średnicy;
+jeśli jednak ma podaną INNĄ średnicę DN niż szukany produkt — nie pasuje. Gdy nie masz pewności, zwróć 0.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON: {{"numer": liczba, "uzasadnienie": "krótko"}}"""
+
+PROMPT_NAME_ONLY = """Napisz opis produktu do sklepu internetowego B2B.
+
+DANE Z KARTOTEKI:
+- Nazwa techniczna: {name}
+- Producent: {producer}
+- Kod producenta: {code}
+- Kategoria: {category}
+
+Nie mamy karty katalogowej tego produktu. Napisz krótki opis (ok. 300–600 znaków tekstu):
+1. <h2> — pełna nazwa produktu po polsku: rozwinięte skróty z nazwy, normalna pisownia (nie WIELKIE LITERY).
+   Skróty rozwijaj według słownika: {abbreviations}. Jeśli nie wiesz, co znaczy skrót, przepisz go bez zmian.
+   W nagłówku NIC nie dodawaj od siebie — tylko to, co jest w nazwie (np. nie dopisuj materiału ani rodzaju rur).
+2. Pod nagłówkiem 2–3 krótkie akapity <p>. Opis ma być ogólny, marketingowy, skupiony na przeznaczeniu
+   i korzyściach dla instalatora: do czego służy produkt, w jakich instalacjach się go stosuje, jakie zadanie
+   w nich spełnia.
+3. ZABRANIAM CI dodawać jakichkolwiek parametrów technicznych, norm, certyfikatów, ciśnień, gwintów,
+   temperatur ani materiałów, jeśli nie wynikają one wprost z nazwy produktu. Żadnych liczb spoza nazwy.
+4. Nie pisz o jakości, trwałości, niezawodności, odporności, zgodności z normami ani o łatwym czy szybkim
+   montażu — tego o tym produkcie nie wiemy. Korzyści mają wynikać z rodzaju i przeznaczenia produktu.
+5. Wyłącznie czysty HTML z tagami <h2>, <p>, <strong>. Bez <html>, <body>, stylów i Markdown.
+
+Odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"opis_html": "..."}}"""
+
+log = logging.getLogger("wzbogacanie")
+
+
+# =============================================================================
+# PONAWIANIE PRÓB
+# =============================================================================
+class FatalError(Exception):
+    """Błąd, którego ponawianie nie ma sensu (np. zły klucz API) — zatrzymuje skrypt."""
+
+
+def with_retry(func, *args, what: str = "zapytanie", **kwargs):
+    """Wywołuje func; przy błędzie czeka RETRY_WAIT_SECONDS i ponawia (do MAX_RETRIES razy).
+
+    Zwraca wynik func albo None, jeśli wszystkie próby się nie powiodły
+    (wiersz trafi wtedy do akceptacji, a skrypt jedzie dalej).
+    """
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return func(*args, **kwargs)
+        except FatalError:
+            raise
+        except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
+            raise FatalError(f"{AI['name']} odrzuciło klucz API: {exc}") from exc
+        except openai.BadRequestError as exc:
+            # Błędne zapytanie nie naprawi się samo — nie ma sensu czekać.
+            log.error("%s: błędne zapytanie, pomijam: %s", what, exc)
+            return None
+        except Exception as exc:  # timeout, rate limit, błąd sieci, 5xx...
+            msg = str(exc)
+            if "insufficient_quota" in msg:
+                raise FatalError(f"Brak środków na koncie {AI['name']} (insufficient_quota).") from exc
+            log.warning("%s: błąd (próba %d/%d): %s: %s",
+                        what, attempt, MAX_RETRIES, type(exc).__name__, msg[:200])
+            if attempt < MAX_RETRIES:
+                # Przy kolejnych błędach z rzędu czekamy dłużej (5 s, 10 s, 15 s...),
+                # co pomaga przy limitach zapytań (rate limit).
+                time.sleep(RETRY_WAIT_SECONDS * attempt)
+    log.error("%s: wszystkie %d próby nieudane.", what, MAX_RETRIES)
+    return None
+
+
+# =============================================================================
+# WYSZUKIWARKI
+# =============================================================================
+def _ddgs():
+    try:
+        from ddgs import DDGS  # nowa nazwa paczki
+    except ImportError:
+        from duckduckgo_search import DDGS  # starsza nazwa paczki
+    return DDGS(timeout=REQUEST_TIMEOUT)
+
+
+def _serpapi(params: dict) -> dict:
+    resp = requests.get("https://serpapi.com/search.json",
+                        params={**params, "api_key": SERPAPI_API_KEY, "hl": "pl", "gl": "pl"},
+                        timeout=REQUEST_TIMEOUT)
+    if resp.status_code in (401, 403):
+        raise FatalError(f"SerpApi odrzuciło klucz API (HTTP {resp.status_code}).")
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data and "hasn't returned any results" not in data["error"]:
+        raise RuntimeError(f"SerpApi: {data['error']}")
+    return data
+
+
+def _google(params: dict) -> dict:
+    resp = requests.get("https://www.googleapis.com/customsearch/v1",
+                        params={**params, "key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "num": 10},
+                        timeout=REQUEST_TIMEOUT)
+    if resp.status_code in (400, 401, 403) and "quota" not in resp.text.lower():
+        raise FatalError(f"Google Custom Search odrzucił zapytanie (HTTP {resp.status_code}): {resp.text[:200]}")
+    resp.raise_for_status()  # 429 / limit dzienny -> zwykły błąd, ponawiamy
+    return resp.json()
+
+
+def _ddg_call(method: str, query: str, max_results: int) -> list[dict]:
+    try:
+        return getattr(_ddgs(), method)(query, region="pl-pl", max_results=max_results) or []
+    except Exception as exc:
+        # "No results found" to odpowiedź, nie awaria — nie ma sensu ponawiać tego samego zapytania.
+        # "malformed headers" — DuckDuckGo odrzuca tę postać zapytania; ponowienie da ten sam wynik.
+        msg = str(exc).lower()
+        if "no results" in msg or "malformed headers" in msg:
+            log.debug("DuckDuckGo (%s) '%s': %s", method, query, exc)
+            return []
+        raise
+
+
+def search_pages(query: str, engine: str) -> list[str]:
+    """Zwraca listę adresów stron z wyników wyszukiwania."""
+    if engine == "ddg":
+        return [r.get("href", "") for r in _ddg_call("text", query, 10)]
+    if engine == "serpapi":
+        return [r.get("link", "") for r in _serpapi({"engine": "google", "q": query}).get("organic_results", [])]
+    return [i.get("link", "") for i in _google({"q": query}).get("items", [])]
+
+
+def search_images(query: str, engine: str) -> list[dict]:
+    """Zwraca listę {"image": url_obrazka, "page": url_strony, "title": tytuł}."""
+    if engine == "ddg":
+        return [{"image": r.get("image", ""), "page": r.get("url", ""), "title": r.get("title", "")}
+                for r in _ddg_call("images", query, 20)]
+    if engine == "serpapi":
+        data = _serpapi({"engine": "google_images", "q": query})
+        return [{"image": r.get("original", ""), "page": r.get("link", ""), "title": r.get("title", "")}
+                for r in data.get("images_results", [])]
+    data = _google({"q": query, "searchType": "image"})
+    return [{"image": i.get("link", ""), "page": (i.get("image") or {}).get("contextLink", ""),
+             "title": i.get("title", "")} for i in data.get("items", [])]
+
+
+# =============================================================================
+# WERYFIKACJA: CZY STRONA / ZDJĘCIE DOTYCZY TEGO PRODUKTU
+# =============================================================================
+def code_regex(code: str) -> re.Pattern | None:
+    """Wzorzec dopasowujący kod jako osobny ciąg, z tolerancją na spacje/myślniki (AG-0828, AG 0828)."""
+    chars = [re.escape(c) for c in code if c.isalnum()]
+    if len(chars) < 4:  # zbyt krótki kod dałby przypadkowe trafienia
+        return None
+    return re.compile(r"(?<![0-9A-Za-z])" + r"[\s\-./]?".join(chars) + r"(?![0-9A-Za-z])", re.IGNORECASE)
+
+
+# Cechy karty produktu w sklepie/hurtowni — bez nich sam kod w tytule nie wystarcza (RELAX w key_match).
+SHOP_PAGE_RE = re.compile(r'"@type"\s*:\s*"Product"|do koszyka|dodaj do|add to (?:cart|basket)|warenkorb|'
+                          r'\bkoszyk|\bcena\b|\bnetto\b|\bbrutto\b|\d\s?zł\b|\bPLN\b|\d\s?€|€\s?\d', re.I)
+
+
+# Człony nazw producentów, które same nic nie mówią — nie wystarczą jako „producent na stronie”.
+GENERIC_PRODUCER_WORDS = {"armatura", "polska", "poland", "group", "grupa", "technika", "instal", "systems",
+                          "system", "plast", "industry", "industries", "company", "metal", "trade", "service"}
+
+
+def fold(text: str) -> str:
+    """Bez polskich i niemieckich znaków diakrytycznych (Bänninger → banninger, Łódź → lodz)."""
+    import unicodedata
+    text = text.replace("ł", "l").replace("Ł", "L")
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
+class ProductMatcher:
+    """Sprawdza, czy tekst zawiera EAN albo kod producenta (+ nazwę producenta)."""
+
+    def __init__(self, code: str, ean: str, producer: str):
+        self.ean_re = code_regex(ean) if len(re.sub(r"\D", "", ean)) >= 8 else None
+        self.code_re = code_regex(code)
+        self.code = code
+        self.producer = fold(producer.lower().strip())
+
+    def find(self, text: str) -> int | None:
+        """Pozycja potwierdzającego dopasowania w tekście albo None."""
+        if self.ean_re and (m := self.ean_re.search(text)):
+            return m.start()
+        if self.code_re and (m := self.code_re.search(text)):
+            # Sam kod (np. AG0828) może się powtórzyć u innego producenta — wymagamy też nazwy producenta.
+            if self.producer_on_page(text):
+                return m.start()
+        return None
+
+    def producer_on_page(self, text: str) -> bool:
+        """Nazwa producenta na stronie, także zapisana inaczej niż w bazie: „BOHAMET-ARMATURA” → „Bohamet”,
+        „APATOR-POWOGAZ” → „Apator Powogaz”, „BMETERS” → „B Meters”, „CONEX” → „Conex Bänninger”."""
+        if not self.producer:
+            return True
+        lower = fold(text.lower())
+        if self.producer in lower:
+            return True
+        squashed = re.sub(r"[^0-9a-z]", "", self.producer)
+        if len(squashed) >= 4 and squashed in re.sub(r"[^0-9a-z]", "", lower):
+            return True
+        return any(re.search(r"(?<![0-9a-z])" + re.escape(t), lower) for t in self.producer_words())
+
+    def producer_words(self) -> list[str]:
+        """Charakterystyczne człony nazwy producenta (min. 4 znaki, bez słów typu „armatura”, „polska”)."""
+        return [t for t in re.split(r"[^0-9a-z]+", self.producer) if len(t) >= 4 and t not in GENERIC_PRODUCER_WORDS]
+
+    def distinctive_code(self) -> bool:
+        """Kod, który sam w sobie wskazuje produkt: min. 6 znaków albo litery+cyfry (AG0510, A392B, HT-13X018).
+        Krótkie same cyfry (FLAMCO 27987) mogą być czymkolwiek — wtedy dalej wymagamy nazwy producenta."""
+        chars = re.sub(r"[^0-9A-Za-z]", "", self.code)
+        return len(chars) >= 6 or (len(chars) >= 4 and bool(re.search(r"\d", chars)) and bool(re.search(r"[A-Za-z]", chars)))
+
+    def key_match(self, key_text: str, url: str, page_text: str, name: str = "") -> bool:
+        """RELAX: dokładny kod producenta w kluczowym miejscu karty (tytuł, H1, SKU/MPN, pole „Kod/Symbol…”
+        tabeli parametrów, adres) wystarcza bez EAN i bez nazwy producenta na stronie — hurtownie często
+        ukrywają EAN w skryptach i nie piszą producenta przy kodzie. Warunki bezpieczeństwa: strona wygląda na kartę
+        sklepu (SHOP_PAGE_RE) i jest na niej nazwa producenta albo — dla unikalnego kodu — rodzaj produktu z nazwy."""
+        if not self.code_re or not self.code_re.search(f"{key_text} {url}"):
+            return False
+        if not SHOP_PAGE_RE.search(page_text):
+            return False  # kod w tytule strony, która nie jest kartą produktu (np. numer lotu AA1058, repozytorium)
+        lower, host = page_text.lower(), urlparse(url).netloc.lower()
+        names = [p for p in re.split(r"[\s\-]+", self.producer) if len(p) >= 3]
+        if any(n in lower or n in host for n in names) or self.producer_on_page(page_text):
+            return True
+        # Bez nazwy producenta: kod unikalny + rodzaj produktu z nazwy na karcie („AA1058” obudowa — nie baleriny).
+        stems = [n[:5] for n in name_nouns(name, self.producer)]
+        return self.distinctive_code() and any(st in lower for st in stems)
+
+    def in_short_text(self, *texts: str) -> bool:
+        """Dopasowanie w krótkich tekstach (tytuł, adres URL) — wystarczy sam kod lub EAN."""
+        joined = " ".join(texts)
+        return bool((self.ean_re and self.ean_re.search(joined)) or (self.code_re and self.code_re.search(joined)))
+
+
+def is_direct_image_url(url: str) -> bool:
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    return urlparse(url).path.lower().endswith(IMAGE_EXTENSIONS)
+
+
+NOT_IMAGE_EXTENSIONS = (".svg", ".gif", ".ico", ".html", ".htm", ".js", ".css", ".pdf", ".json", ".xml")
+
+
+def is_image_candidate_url(url: str) -> bool:
+    """Łagodniejsze niż is_direct_image_url — dla og:image i galerii produktu. Serwery zdjęć (Scene7 Castoramy,
+    Cloudinary, Sanitino…) podają adresy bez rozszerzenia; to, czy to naprawdę obraz, sprawdza fetch_image
+    po zawartości pliku."""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    return is_direct_image_url(url) or not urlparse(url).path.lower().endswith(NOT_IMAGE_EXTENSIONS)
+
+
+# Strony bez og:image i bez rozpoznawalnej galerii: wzorzec adresu, po którym rozpoznać zdjęcia produktu
+# wśród zwykłych <img> na karcie (domena karty → wyrażenie regularne na adres zdjęcia).
+PRODUCT_IMAGE_HINTS = {
+    "catalog.geberit.pl": r"images\.data\.geberit\.com/image/upload/[^/]*t_Product(?:Large|Medium|Detail)",
+}
+
+
+def html_doc(resp: requests.Response):
+    """Drzewo HTML z poprawnym kodowaniem (polskie znaki) także dla stron, które go nie deklarują."""
+    import lxml.html
+
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"  # requests domyślnie zakłada latin-1
+    text = resp.text[:3_000_000]
+    try:
+        return lxml.html.fromstring(text)
+    except ValueError:  # deklaracja <?xml encoding=...?> w napisie — lxml chce wtedy bajtów
+        return lxml.html.fromstring(text.encode("utf-8"))
+
+
+def largest_from_srcset(srcset: str) -> str:
+    """Największy wariant z atrybutu srcset ("a.jpg 300w, b.jpg 1200w")."""
+    best, best_w = "", -1
+    for part in srcset.split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        width = int(bits[1][:-1]) if len(bits) > 1 and bits[1].endswith("w") and bits[1][:-1].isdigit() else 0
+        if width > best_w:
+            best, best_w = bits[0], width
+    return best
+
+
+BLOCK_AFTER = 3              # po tylu odmowach (403) z rzędu domena jest pomijana do końca przebiegu
+_refusals: dict[str, int] = {}
+_refusals_lock = threading.Lock()
+
+
+def domain_blocked(url: str) -> bool:
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    with _refusals_lock:
+        return _refusals.get(host, 0) >= BLOCK_AFTER
+
+
+def note_response(url: str, status: int) -> None:
+    """Liczy odmowy dostępu per domena — strony blokujące skrypty nie zabierają czasu przy kolejnych produktach."""
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    with _refusals_lock:
+        if status in (401, 403):
+            _refusals[host] = _refusals.get(host, 0) + 1
+            if _refusals[host] == BLOCK_AFTER:
+                log.warning("Strona %s blokuje automatyczne pobieranie (HTTP %d) — pomijam ją do końca przebiegu.",
+                            host, status)
+        elif status == 200:
+            _refusals[host] = 0
+
+
+# Etykiety pól z kodem katalogowym w tabelach parametrów / opisie karty (hurtownie, sklepy producentów).
+CODE_LABEL_RE = re.compile(r"^\s*(?:kod|symbol|sku|mpn|indeks|index|nr\.?\s*kat|numer\s+kat|nr\.?\s*art|art\.|"
+                           r"artyku|ref\b|referenc|part\s*n|catalog|katalog|product\s*code|item\s*n)", re.I)
+
+
+def _jsonld_values(node, keys: tuple[str, ...]) -> list[str]:
+    """Wartości pól o nazwach z `keys` z danych JSON-LD (zagnieżdżone obiekty i listy)."""
+    out: list[str] = []
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if key in keys:
+                vals = val if isinstance(val, list) else [val]
+                for v in vals:
+                    if isinstance(v, str):
+                        out.append(v)
+                    elif isinstance(v, dict):
+                        out += [x for x in (v.get("url"), v.get("contentUrl")) if isinstance(x, str)]
+            elif isinstance(val, (dict, list)):
+                out += _jsonld_values(val, keys)
+    elif isinstance(node, list):
+        for item in node:
+            out += _jsonld_values(item, keys)
+    return out
+
+
+def _jsonld_products(node) -> list[dict]:
+    """Obiekty schema.org typu Product (także w @graph i listach), bez zagnieżdżonych w ItemList/ofertach."""
+    found: list[dict] = []
+    if isinstance(node, list):
+        for item in node:
+            found += _jsonld_products(item)
+    elif isinstance(node, dict):
+        kind = node.get("@type")
+        kinds = kind if isinstance(kind, list) else [kind]
+        if any(isinstance(k, str) and k.lower() in ("product", "productmodel", "productgroup") for k in kinds):
+            found.append(node)
+        elif "@graph" in node:
+            found += _jsonld_products(node["@graph"])
+    return found
+
+
+def _img_source(img) -> tuple[str, bool]:
+    """Najlepszy adres zdjęcia z <img> (i otaczającego <picture>) oraz czy to atrybut pełnego rozmiaru."""
+    big = (img.get("data-large_image") or img.get("data-zoom-image") or img.get("data-zoom")
+           or img.get("data-large") or img.get("data-full") or img.get("data-original"))
+    if big:
+        return big, True
+    # Miniatura w linku powiększenia (lightbox): <a href="…/produkt.png"><img src="…/thumbs/produkt_300x300.png">
+    link = img.xpath("ancestor::a[@href][1]/@href")
+    if link and urlparse(link[0]).path.lower().endswith(IMAGE_EXTENSIONS):
+        return link[0], True
+    # <picture><source srcset=…>: największy wariant ze wszystkich źródeł (pomijamy .avif — nie umiemy go otworzyć).
+    # lxml nie zna <picture> i bywa, że <source> są rodzeństwem <img>, a nie dziećmi <picture>.
+    parent = img.getparent()
+    sources = (parent.xpath("./source") if parent is not None and parent.tag == "picture"
+               else img.xpath("preceding-sibling::source"))
+    sets = [s.get("srcset") or s.get("data-srcset") or "" for s in sources
+            if "avif" not in (s.get("type") or "") and ".avif" not in (s.get("srcset") or "")]
+    best = largest_from_srcset(", ".join(x for x in sets if x))
+    if best:
+        return best, False
+    return (largest_from_srcset(img.get("data-srcset") or img.get("srcset") or "")
+            or img.get("data-lazy-src") or img.get("data-lazy") or img.get("data-src")
+            or img.get("src") or ""), False
+
+
+def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, list[str], str] | None:
+    """Pobiera stronę HTML.
+
+    Zwraca (tekst, og:image + zdjęcia z JSON-LD, [(src, alt) wszystkich <img>], tytuł, zdjęcia z galerii produktu,
+    kluczowe pola karty: tytuł, H1, SKU/MPN, pola „Kod/Symbol/Indeks…” z tabeli parametrów) albo None.
+    """
+    if domain_blocked(url):
+        return None
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+        note_response(url, resp.status_code)
+        if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
+            return None
+        doc = html_doc(resp)
+    except Exception as exc:
+        log.debug("Nie udało się pobrać %s: %s", url, exc)
+        return None
+
+    titles = doc.xpath('//meta[@property="og:title"]/@content') or doc.xpath("//h1//text()") or doc.xpath("//title/text()")
+    title = re.sub(r"\s+", " ", " ".join(t.strip() for t in titles[:1])).strip()
+    og_images = [urljoin(url, u) for u in doc.xpath(
+        '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
+    imgs, gallery = [], []
+    for img in doc.xpath("//img"):
+        # Pełny rozmiar: WooCommerce trzyma go w data-large_image, inne sklepy w data-zoom-image / <picture> / srcset,
+        # leniwe ładowanie w data-lazy / data-src.
+        src, full_size = _img_source(img)
+        if src and not src.startswith("data:"):
+            imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
+            # Zdjęcie z galerii TEGO produktu (nie z „podobnych produktów”, banerów, menu czy stopki).
+            around = " ".join(img.xpath("ancestor::*/@class") + img.xpath("ancestor::*/@id")).lower()
+            in_gallery = full_size or any(k in around for k in ("gallery", "product-image", "product__image",
+                                                                "product-photo"))
+            elsewhere = any(k in around for k in ("related", "upsell", "up-sells", "cross-sell", "crosssell",
+                                                  "recent", "widget", "footer", "header", "menu", "banner"))
+            if in_gallery and not elsewhere:
+                gallery.append(urljoin(url, src))
+    # Dane strukturalne (JSON-LD: sku, gtin = EAN, mpn) — wiele sklepów pokazuje EAN tylko tam,
+    # np. afriso.pl. Dopisujemy je do tekstu, zanim skrypty zostaną usunięte.
+    blocks = doc.xpath('//script[@type="application/ld+json"]')
+    structured = " ".join(s.text_content() for s in blocks)
+    key_parts = doc.xpath("//title/text()") + doc.xpath('//meta[@property="og:title"]/@content') + \
+        [h.text_content() for h in doc.xpath("//h1")]
+    for block in blocks:
+        try:
+            data = json.loads(block.text_content())
+        except ValueError:
+            continue
+        products = _jsonld_products(data)
+        if len(products) != 1:
+            continue  # lista produktów (strona kategorii/wyników) — kody i zdjęcia innych pozycji
+        og_images += [urljoin(url, u) for u in _jsonld_values(products[0], ("image",)) if u.startswith(("http", "/"))]
+        key_parts += _jsonld_values(products[0], ("sku", "mpn", "productID", "gtin", "gtin8", "gtin13", "gtin14"))
+    key_parts += doc.xpath('//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="productID"]/@content')
+    key_parts += [e.text_content() for e in doc.xpath('//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="productID"]')]
+    # Pola „Kod producenta: AG0510”, „Symbol | AH0453” — wiersz tabeli, para dt/dd albo krótki element z etykietą.
+    for row in doc.xpath("//tr|//dt|//li|//p|//span|//div[not(*[self::div])]"):
+        label = re.sub(r"\s+", " ", row.text_content()).strip()
+        if not label or len(label) > 120 or not CODE_LABEL_RE.match(label):
+            continue
+        key_parts.append(label)
+        if row.tag in ("dt", "span", "div", "p"):
+            nxt = row.getnext()
+            if nxt is not None:
+                key_parts.append(nxt.text_content()[:120])
+    key_text = re.sub(r"\s+", " ", " ".join(str(k) for k in key_parts)).strip()
+    for bad in doc.xpath("//script|//style|//noscript|//svg"):
+        bad.drop_tree()
+    # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
+    text = re.sub(r"\s+", " ", " ".join(doc.itertext()) + " " + structured).strip()
+    return text, list(dict.fromkeys(og_images)), imgs, title, gallery, key_text
+
+
+def producer_sites(producer: str) -> list[str]:
+    return PRODUCER_SITES.get(producer.strip().upper(), [])
+
+
+def is_producer_url(url: str, producer: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host == d or host.endswith("." + d) for d in producer_sites(producer))
+
+
+def direct_search_applies(cfg: dict, producer: str | None) -> bool:
+    """producer=None — wszystkie wyszukiwarki (diagnostyka)."""
+    producers = cfg.get("producers")
+    return producer is None or not producers or producer.strip().upper() in {p.upper() for p in producers}
+
+
+def _result_links(resp, link_fragment: str) -> list[str]:
+    """Adresy z fragmentem `link_fragment` w całym kodzie strony (także w danych JSON dla JavaScriptu)."""
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    page = resp.text.replace("\\/", "/")  # JSON zapisuje ukośniki jako \/
+    link = re.escape(link_fragment)
+    out = []
+    for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
+        url = urljoin(resp.url, found).split("#")[0]
+        if re.search(r"[(){}$]|/\.html", url):
+            continue  # szablon JavaScriptu, np. „/.html(fullname)” na dafi.pl — nie adres karty
+        if url not in out:
+            out.append(url)
+    return out
+
+
+_common_links: dict[str, set[str]] = {}
+_common_links_lock = threading.Lock()
+NONSENSE_QUERY = "zzqx0000qxzz"
+
+
+def _common_result_links(domain: str, cfg: dict) -> set[str]:
+    """Linki do kart, które strona wyników pokazuje ZAWSZE (menu, polecane) — sprawdzone na bezsensownym
+    zapytaniu. Bez tego np. katalog Geberit zwracałby stałe linki z menu zamiast wyników."""
+    from urllib.parse import quote_plus
+
+    with _common_links_lock:
+        if domain in _common_links:
+            return _common_links[domain]
+    try:
+        resp = requests.get(cfg["url"].format(q=quote_plus(NONSENSE_QUERY)), headers=BROWSER_HEADERS,
+                            timeout=PAGE_TIMEOUT)
+        links = set(_result_links(resp, cfg["link"])) if resp.status_code == 200 else set()
+    except Exception:
+        links = set()
+    with _common_links_lock:
+        _common_links[domain] = links
+    return links
+
+
+_api_keys: dict[str, str] = {}
+_api_keys_lock = threading.Lock()
+
+
+def _api_key(domain: str, spec: dict) -> str:
+    """Publiczny klucz wyszukiwarki, który strona sama podaje w HTML (np. Meilisearch na ferro.pl)."""
+    with _api_keys_lock:
+        if domain in _api_keys:
+            return _api_keys[domain]
+    page = requests.get(spec["page"], headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT).text
+    found = re.search(spec["regex"], page)
+    key = found.group(1) if found else ""
+    with _api_keys_lock:
+        _api_keys[domain] = key
+    return key
+
+
+def direct_search_api(domain: str, cfg: dict, m: ProductMatcher, code: str) -> list[str]:
+    """Wyszukiwarka z API JSON (strony, które wyniki ładują JavaScriptem). Karty z kodem/EAN produktu.
+
+    cfg["api"]: method, url ({q}), params/json (z {q}), headers (z {key}), key_from {page, regex},
+    items (klucz z listą wyników), item_key (pole z właściwą pozycją w każdym wyniku, np. Typesense „document”),
+    url_field, code_fields (pola z kodem/EAN), base (adres do dołączenia).
+    """
+    api = cfg["api"]
+
+    def fill(value):
+        if isinstance(value, str):
+            return value.replace("{q}", code).replace("{key}", key)
+        if isinstance(value, dict):
+            return {k: fill(v) for k, v in value.items()}
+        return value
+
+    try:
+        key = _api_key(domain, api["key_from"]) if "key_from" in api else ""
+        resp = requests.request(api.get("method", "GET"), fill(api["url"]),
+                                params=fill(api.get("params")), json=fill(api.get("json")),
+                                headers={**BROWSER_HEADERS, **fill(api.get("headers", {}))}, timeout=PAGE_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        items = (data if api.get("items") is None else data.get(api["items"], [])) or []
+        if api.get("item_key"):  # Typesense: {"hits": [{"document": {...}}]}
+            items = [i.get(api["item_key"], {}) for i in items if isinstance(i, dict)]
+    except Exception as exc:
+        log.debug("API wyszukiwarki %s niedostępne: %s", domain, exc)
+        return []
+    urls = []
+    id_paths = api.get("url_from_id")  # {prefiks id: adres karty} — np. Geberit PRO_… / SPT_…
+    for item in items:
+        values = " ".join(json.dumps(item.get(f, ""), ensure_ascii=False) for f in api.get("code_fields", []))
+        # Tylko pozycje, które w polach kodu/EAN mają NASZ kod albo EAN (warianty z innymi kodami odpadają).
+        if not m.in_short_text(values):
+            continue
+        if id_paths:
+            item_id = str(item.get(api.get("id_field", "id"), ""))
+            for order, (prefix, base) in enumerate(id_paths.items()):
+                if item_id.startswith(prefix):
+                    urls.append((order, base + item_id))
+                    break
+        elif item.get(api["url_field"]):
+            urls.append((0, urljoin(api["base"].rstrip("/") + "/", str(item[api["url_field"]]).lstrip("/"))))
+    # Kolejność z url_from_id: np. karta produktu przed stroną części zamiennej.
+    return [u for _, u in sorted(urls, key=lambda x: x[0])][:MAX_DIRECT_RESULTS]
+
+
+def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None) -> list[str]:
+    """Karty produktów z wyszukiwarek producentów/hurtowni (DIRECT_SEARCH) dla tego producenta."""
+    from urllib.parse import quote_plus
+
+    urls: list[str] = []
+    for domain, cfg in DIRECT_SEARCH.items():
+        if not direct_search_applies(cfg, producer):
+            continue
+        if "woo_catalog" in cfg:
+            url, exact = woo_catalog_match(cfg["woo_catalog"], code)
+            if url and url not in urls:
+                urls.append(url)
+                if not exact:
+                    with _trusted_lock:
+                        _trusted_results.add((code.lower(), url))
+            continue
+        if "api" in cfg:
+            urls += [u for u in direct_search_api(domain, cfg, m, code) if u not in urls]
+            continue
+        try:
+            resp = requests.get(cfg["url"].format(q=quote_plus(code)), headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+            resp.raise_for_status()
+        except Exception as exc:
+            log.debug("Wyszukiwarka %s niedostępna: %s", domain, exc)
+            continue
+        found_here: list[str] = []
+        common = _common_result_links(domain, cfg)
+        for url in _result_links(resp, cfg["link"]):
+            if url in urls or url in found_here or url in common or urlparse(url).netloc.removeprefix("www.") != domain:
+                continue
+            if cfg.get("code_in_url", True) and not m.in_short_text(url):
+                continue
+            found_here.append(url)
+        if cfg.get("trusted") and len(found_here) == 1:
+            with _trusted_lock:
+                _trusted_results.add((code.lower(), found_here[0]))
+        urls += found_here if cfg.get("code_in_url", True) else found_here[:MAX_DIRECT_RESULTS]
+    return urls
+
+
+_woo_catalogs: dict[str, list[tuple[re.Pattern, int, str]]] = {}
+_woo_lock = threading.Lock()
+SKU_WILDCARD = re.compile(r"\b(?:DN|dn|X|Y)\b")
+
+
+def _woo_catalog(api_url: str) -> list[tuple[re.Pattern, int, str]]:
+    """[(wzorzec SKU, liczba stałych znaków, karta)] całego sklepu WooCommerce — pobierane raz na przebieg."""
+    with _woo_lock:
+        if api_url in _woo_catalogs:
+            return _woo_catalogs[api_url]
+        items: list[dict] = []
+        try:
+            for page in range(1, 30):
+                batch = requests.get(api_url, params={"per_page": 100, "page": page}, headers=BROWSER_HEADERS,
+                                     timeout=PAGE_TIMEOUT).json()
+                if not batch:
+                    break
+                items += batch
+            var_ids = [v["id"] for p in items for v in p.get("variations", [])]
+            for i in range(0, len(var_ids), 100):
+                items += requests.get(api_url, params={"include": ",".join(map(str, var_ids[i:i + 100])),
+                                                       "per_page": 100, "type": "variation"},
+                                      headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT).json()
+        except Exception as exc:
+            log.warning("Katalog sklepu %s niedostępny: %s", api_url, exc)
+        catalog = []
+        for item in items:
+            for alt in str(item.get("sku") or "").split("|"):  # „10.310.2000 | 10.310.2001” — kilka kodów
+                alt = alt.strip()
+                if len(alt) < 4 or not item.get("permalink"):
+                    continue
+                parts = SKU_WILDCARD.split(alt)
+                literal = sum(len(p) for p in parts)
+                if len(parts) > 1 and literal < 6:
+                    continue  # „05.X” pasowałby do połowy katalogu
+                pattern = re.compile("[0-9A-Za-z]+".join(re.escape(p) for p in parts), re.I)
+                catalog.append((pattern, literal + (100 if len(parts) == 1 else 0), item["permalink"]))
+        log.info("Katalog sklepu %s: %d kodów/wzorców SKU", urlparse(api_url).netloc, len(catalog))
+        _woo_catalogs[api_url] = catalog
+        return catalog
+
+
+def woo_catalog_match(api_url: str, code: str) -> tuple[str, bool]:
+    """(karta, czy SKU dokładnie równe kodowi) — najdokładniejszy pasujący wzorzec; remis różnych kart = brak."""
+    best: list[tuple[int, str]] = []
+    for pattern, score, url in _woo_catalog(api_url):
+        if pattern.fullmatch(code.strip()):
+            best.append((score, url))
+    if not best:
+        return "", False
+    best.sort(reverse=True)
+    tied = list(dict.fromkeys(u for s, u in best if s == best[0][0]))
+    if len(tied) > 1:
+        paths = {u.split("?")[0] for u in tied}
+        if len(paths) > 1:
+            return "", False  # różne produkty pasują tak samo dobrze
+        # Warianty jednego produktu (…?attribute_pa_srednica-rury=100) — ten, którego średnica jest w kodzie.
+        numbers = {int(n) for n in re.findall(r"\d+", code)}
+        sized = [u for u in tied if "?" in u and any(int(n) in numbers for n in re.findall(r"=(?:dn-?)?(\d+)", u))]
+        tied = sized if len(sized) == 1 else [paths.pop()]
+    return tied[0], best[0][0] >= 100
+
+
+_trusted_results: set[tuple[str, str]] = set()  # (kod, karta) — jedyny wynik wyszukiwarki "trusted" dla kodu
+_trusted_lock = threading.Lock()
+
+
+def found_only_by_search(code: str, url: str) -> bool:
+    with _trusted_lock:
+        return (code.lower(), url) in _trusted_results
+
+
+def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produkty_probka.csv",
+                producers: list[str] | None = None) -> None:
+    """Losowa próbka proporcjonalna do liczby produktów producenta (każdy z 15 największych ma min. 1).
+
+    producers: tylko ci producenci (nazwy jak w /producer@name, wielkość liter bez znaczenia).
+    """
+    df = pd.read_csv(input_path, dtype=str, keep_default_na=False, sep=sep, encoding="utf-8-sig")
+    if producers:
+        wanted = {p.strip().upper() for p in producers if p.strip()}
+        df = df[df[COL_PRODUCER].str.strip().str.upper().isin(wanted)]
+        missing = wanted - set(df[COL_PRODUCER].str.strip().str.upper())
+        if missing:
+            print(f"Uwaga: brak w bazie producentów: {', '.join(sorted(missing))}")
+    counts = df[COL_PRODUCER].value_counts()
+    quota = {p: max(1 if i < 15 else 0, round(n * c / len(df))) for i, (p, c) in enumerate(counts.items())}
+    parts = [df[df[COL_PRODUCER] == p].sample(min(q, counts[p]), random_state=42)
+             for p, q in quota.items() if q > 0]
+    sample = pd.concat(parts).sample(frac=1, random_state=42)  # wymieszane, żeby wątki nie szły producentami
+    sample.to_csv(out_path, index=False, encoding="utf-8")
+    print(f"Zapisano {len(sample)} produktów do {out_path}:")
+    for p, c in sample[COL_PRODUCER].value_counts().head(20).items():
+        print(f"  {p or '(brak)':25} {c}")
+    print(f"Test:  py wzbogac_produkty.py --input {out_path} --output wyniki_probka.csv")
+
+
+def diagnose(output_path: str, ids: list[str], engine: str) -> None:
+    """--diagnoza: to samo szukanie co w przebiegu, z opisem każdego kroku."""
+    global TRACE
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path} — podaj --output z wynikami opisów.")
+    rows = {r[COL_ID]: r for r in read_csv(output_path).to_dict("records")}
+    TRACE = True
+    for pid in ids:
+        r = rows.get(str(pid).strip())
+        if not r:
+            print(f"\n[id={pid}] nie ma w {output_path}")
+            continue
+        code, ean, producer, name = (str(r.get(c, "") or "").strip() for c in (COL_CODE, COL_EAN, COL_PRODUCER, COL_NAME))
+        print(f"\n=== [id={pid}] {name}\n    producent: {producer}, kod: {code or '—'}, EAN: {ean or '—'}, "
+              f"wyszukiwarka: {engine}")
+        if code and not code_regex(code):
+            print("    UWAGA: kod ma mniej niż 4 litery/cyfry — skrypt nie potwierdzi go na stronie")
+        source = find_verified_source(ProductMatcher(code, ean, producer), code, ean, producer, engine,
+                                      f"[id={pid}]", name)
+        print(f"\n  WYNIK: {source['url'] if source else 'nie znaleziono strony'}")
+    TRACE = False
+
+
+def test_direct_search(code: str, producer: str | None = None) -> None:
+    """Diagnostyka: co zwracają wyszukiwarki hurtowni dla kodu i czy karta zawiera ten kod."""
+    from urllib.parse import quote_plus
+
+    m = ProductMatcher(code, "", producer or "")
+    for domain, cfg in DIRECT_SEARCH.items():
+        if not direct_search_applies(cfg, producer):
+            continue
+        if "woo_catalog" in cfg:
+            url, exact = woo_catalog_match(cfg["woo_catalog"], code)
+            print(f"\n{domain}: katalog WooCommerce — karta: {url or 'brak'}"
+                  + ("" if not url else " (SKU = kod)" if exact else " (wzorzec SKU — produkt do akceptacji)"))
+            continue
+        if "api" in cfg:
+            print(f"\n{domain}: API JSON {cfg['api']['url']} — karty: "
+                  f"{direct_search_api(domain, cfg, ProductMatcher(code, '', ''), code) or 'brak'}")
+            continue
+        url = cfg["url"].format(q=quote_plus(code))
+        print(f"\n{domain}: {url}")
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+            print(f"  odpowiedź: HTTP {resp.status_code}, {len(resp.content)} bajtów, "
+                  f"'{cfg['link']}' występuje {resp.text.count(cfg['link'])} razy, kod {code}: "
+                  f"{'jest' if code.lower() in resp.text.lower() else 'BRAK'} w kodzie strony")
+        except Exception as exc:
+            print(f"  błąd: {exc}")
+            continue
+    urls = direct_search_urls(m, code, producer)
+    print(f"\nZnalezione karty z kodem {code}: {len(urls)}")
+    for url in urls:
+        page = fetch_page(url)
+        ok = page is not None and m.find(page[0]) is not None
+        trusted = "" if ok or not found_only_by_search(code, url) else \
+            " — karta przyjęta jako jedyny wynik wyszukiwarki producenta (produkt do akceptacji)"
+        print(f"  {url}\n    kod na stronie karty: {'TAK' if ok else 'NIE'}{trusted}")
+    if not urls:
+        print("  Brak — wyszukiwarka pewnie ładuje wyniki przez JavaScript; skrypt użyje wtedy DuckDuckGo.")
+
+
+TRACE = False  # --diagnoza: wypisuje każde zapytanie i powód odrzucenia każdej strony
+
+
+def trace(msg: str) -> None:
+    if TRACE:
+        print(msg, flush=True)
+
+
+def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
+                         row_label: str, name: str = "") -> dict | None:
+    """Szuka strony, na której występuje kod/EAN produktu — najpierw w wyszukiwarkach hurtowni."""
+    # Najpierw zwykłe zapytania (najczęściej trafiają), "site:" tylko gdy one nic nie dadzą —
+    # każde dodatkowe zapytanie zwiększa ryzyko, że DuckDuckGo zacznie blokować.
+    # Kaskada: 1) producent + kod + EAN, 2) producent + "kod" (sygnatura producenta),
+    # 3) "kod" + rodzaj produktu z nazwy (gdy kod jest unikalny, np. "AG0510" zasuwa), potem sam EAN i site:.
+    queries = []
+    if code:
+        queries.append(f"{producer} {code} {ean}".strip())
+        queries.append(f'{producer} "{code}"'.strip())
+        noun = next(iter(name_nouns(name, producer)), "")
+        if noun and len(re.sub(r"[^0-9A-Za-z]", "", code)) >= 5:
+            queries.append(f'"{code}" {noun}')
+        queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
+    if ean:
+        queries.append(ean)
+    if code:  # na wybranych stronach tylko po kodzie
+        queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
+
+    checked: set[str] = set()
+    direct = direct_search_urls(m, code, producer) if code else []
+    for query in ([None] if direct else []) + queries:
+        if query is None:
+            urls = direct  # wyniki z wyszukiwarek hurtowni — sprawdzane przed DuckDuckGo
+        else:
+            urls = [u for u in (with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or [])
+                    if u and u not in checked and not urlparse(u).path.lower().endswith(".pdf")]
+        if query and query.startswith("site:"):
+            # Część wyszukiwarek ignoruje "site:" i zwraca przypadkowe strony — zostawiamy tylko tę domenę.
+            domain = query.split()[0].removeprefix("site:")
+            urls = [u for u in urls if urlparse(u).netloc.lower().removeprefix("www.").endswith(domain)]
+        # Najpierw adresy, w których jest kod/EAN (np. onninen.pl/produkt/…-AG0828) — najczęściej trafione.
+        urls.sort(key=lambda u: not m.in_short_text(u))
+        trace(f"\n  ZAPYTANIE: {query or 'wyszukiwarka na stronie producenta'} → wyników: {len(urls)}"
+              + (f" (sprawdzam {min(len(urls), MAX_PAGES_PER_QUERY)})" if urls else ""))
+        for url in urls[:MAX_PAGES_PER_QUERY]:
+            if len(checked) >= MAX_PAGES_PER_PRODUCT:
+                trace(f"  limit {MAX_PAGES_PER_PRODUCT} stron na produkt — koniec szukania")
+                return None
+            checked.add(url)
+            page = fetch_page(url)
+            if not page:
+                trace(f"    ✗ {url}\n      nie udało się pobrać (blokada, błąd, PDF albo strona tylko w JavaScript)")
+                continue
+            if TRACE:
+                code_hit = bool(m.code_re and m.code_re.search(page[0]))
+                ean_hit = bool(m.ean_re and m.ean_re.search(page[0]))
+                trace(f"    · {url}\n      kod na stronie: {'TAK' if code_hit else 'NIE'}, EAN: {'TAK' if ean_hit else 'NIE'}, "
+                      f"producent: {'TAK' if m.producer_on_page(page[0]) else 'NIE'}, "
+                      f"karta sklepu: {'TAK' if SHOP_PAGE_RE.search(page[0]) else 'NIE'}")
+            text, og_images, imgs = page[0], page[1], page[2]
+            pos = m.find(text)
+            if pos is None and m.key_match(page[5] if len(page) > 5 else page[3], url, text, name):
+                hit = m.code_re.search(text)
+                pos = hit.start() if hit else 0
+                log.info("%s kod %s w tytule/SKU/tabeli karty (bez EAN i nazwy producenta): %s", row_label, code, url)
+            search_only = pos is None and query is None and code and found_only_by_search(code, url)
+            if pos is None and not search_only:
+                trace("      ✗ odrzucona")
+                continue
+            trace("      ✓ PRZYJĘTA jako źródło")
+            start = max(0, (pos or 0) - SOURCE_EXCERPT_CHARS // 3)
+            return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS], "search_only": bool(search_only),
+                    "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
+                    "title": page[3] if len(page) > 3 else "", "gallery": page[4] if len(page) > 4 else []}
+    return None
+
+
+def is_watermark_site(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host == d or host.endswith("." + d) or d.split(".")[0] in host for d in WATERMARK_SITES)
+
+
+def image_candidates_from_source(m: ProductMatcher, source: dict) -> list[str]:
+    """Zdjęcia ze zweryfikowanej strony: najpierw <img> z kodem/EAN w nazwie lub opisie, potem og:image."""
+    if is_watermark_site(source["url"]):
+        return []  # strona ze znakami wodnymi — zdjęcie znajdzie wyszukiwarka obrazów
+    with_code = [src for src, alt in source["imgs"] if is_image_candidate_url(src) and m.in_short_text(src, alt)]
+    og = [src for src in source["og_images"] if is_image_candidate_url(src)]
+    # Producent często ma jedno zdjęcie na całą serię (DN50–DN300) bez kodu w nazwie pliku — na jego
+    # stronie bierzemy też zdjęcia z GALERII produktu (nie wszystkie obrazki: „podobne produkty” to inne towary).
+    rest = ([src for src in source.get("gallery", []) if is_image_candidate_url(src)]
+            if source.get("producer_site") else [])
+    host = urlparse(source["url"]).netloc.lower().removeprefix("www.")
+    hint = PRODUCT_IMAGE_HINTS.get(host)
+    hinted = [src for src, _ in source["imgs"] if hint and re.search(hint, src)]
+    return list(dict.fromkeys(with_code + og + rest + hinted))
+
+
+_shop_cache: dict[str, list[tuple[str, str]]] = {}
+_shop_cache_lock = threading.Lock()
+
+
+def search_producer_shop(template: str | dict, query: str) -> list[tuple[str, str]]:
+    """[(tytuł, adres)] produktów z wyników wewnętrznej wyszukiwarki sklepu producenta (z pamięcią podręczną).
+
+    template: adres z {q} albo wpis z PRODUCER_SEARCH {"url": …, "link": fragment adresu karty produktu}.
+    """
+    from urllib.parse import quote_plus
+
+    cfg = template if isinstance(template, dict) else {"url": template}
+    link = cfg.get("link") or DEFAULT_SHOP_LINK
+    url = cfg["url"].format(q=quote_plus(query))
+    with _shop_cache_lock:
+        if url in _shop_cache:
+            return _shop_cache[url]
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+    resp.raise_for_status()
+    doc = html_doc(resp)
+    # Linki z menu (np. /oferta/… na auraton.pl) są przy każdym zapytaniu — to nie wyniki.
+    common = _common_result_links("sklep:" + cfg["url"], {"url": cfg["url"], "link": link})
+    def collect(anchors) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for raw_href, text in anchors:
+            href = urljoin(url, html.unescape(raw_href or ""))
+            if link not in href or "add-to-cart" in href or href.split("#")[0] in common:
+                continue
+            title = re.sub(r"\s+", " ", html.unescape(text)).strip()
+            if len(title) > len(found.get(href, "")):
+                found[href] = title
+        return found
+
+    found = collect((a.get("href"), a.text_content()) for a in doc.xpath("//a[@href]"))
+    if not found:
+        # lxml gubi część linków na stronach z błędnym HTML (np. apator.com) — wtedy wprost z kodu strony.
+        found = collect((h, re.sub(r"<[^>]+>", " ", inner)) for h, inner in
+                        re.findall(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', resp.text, re.S))
+    items = [(t, h) for h, t in found.items() if len(t) >= 3][:40]
+    with _shop_cache_lock:
+        _shop_cache[url] = items
+    return items
+
+
+def image_candidates_from_producer_shop(row: dict, source: dict | None, ai_result: dict | None,
+                                        row_label: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z karty serii w sklepie producenta, wybranej przez AI z wyników wyszukiwania po nazwie."""
+    template = PRODUCER_SEARCH.get(row["producer"].strip().upper())
+    query = str((ai_result or {}).get("zapytanie_producent") or "").strip()
+    if not template or not query or not source or (ai_result or {}).get("ten_sam_produkt") is not True:
+        return []
+    words = query.split()
+    items: list[tuple[str, str]] = []
+    # Sklep szuka wszystkich słów naraz — przy braku wyników skracamy zapytanie od końca (max 3 próby).
+    for n in range(len(words), max(len(words) - 3, 1), -1):
+        items = with_retry(search_producer_shop, template, " ".join(words[:n]),
+                           what=f"{row_label} sklep producenta '{' '.join(words[:n])}'") or []
+        if items:
+            break
+    if not items:
+        return []
+    listing = "\n".join(f"{i}. {title}" for i, (title, _) in enumerate(items, 1))
+    full_name = str(ai_result.get("pelna_nazwa") or source.get("title") or row["name"])
+    answer = with_retry(ai_json, PROMPT_PICK_PRODUCER_ITEM.format(
+        producer=row["producer"], name=row["name"], full_name=full_name, items=listing),
+        what=f"{row_label} wybór w sklepie producenta") or {}
+    try:
+        number = int(answer.get("numer") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    if not 1 <= number <= len(items):
+        log.info("%s sklep producenta: brak pasującej pozycji (%s)", row_label, answer.get("uzasadnienie", ""))
+        return []
+    title, url = items[number - 1]
+    log.info("%s sklep producenta: %s", row_label, title)
+    page = fetch_page(url)
+    if not page:
+        return []
+    shop_source = {"url": url, "og_images": page[1], "imgs": page[2], "producer_site": True,
+                   "gallery": page[4] if len(page) > 4 else []}
+    return [(u, True, url) for u in image_candidates_from_source(ProductMatcher("", "", ""), shop_source)]
+
+
+def image_candidates_from_search(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
+                                 row_label: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z wyszukiwarki obrazów: [(url, czy_potwierdzone_kodem, strona_źródłowa)], potwierdzone najpierw."""
+    verified: list[tuple[str, bool, str]] = []
+    unverified: list[tuple[str, bool, str]] = []
+    # Bez "site:" — wyszukiwarka obrazów DuckDuckGo odrzuca takie zapytania ("malformed headers").
+    # Zwykłe zapytanie z kodem i tak zwraca zdjęcia z hurtowni i sklepów, które ten kod mają.
+    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    for query in queries:
+        results = with_retry(search_images, query, engine, what=f"{row_label} zdjęcie '{query}'") or []
+        candidates = [r for r in results if is_direct_image_url(r["image"]) and not image_url_looks_bad(r["image"])
+                      and not is_watermark_site(r["image"]) and not is_watermark_site(r["page"] or "")]
+        pages_checked = 0
+        for r in candidates:
+            if m.in_short_text(r["image"], r["title"], r["page"]):
+                verified.append((r["image"], True, r["page"]))
+            elif r["page"] and pages_checked < 3:
+                # Kod nie występuje w tytule/adresie — sprawdzamy stronę, z której pochodzi obrazek.
+                pages_checked += 1
+                page = fetch_page(r["page"])
+                if page and m.find(page[0]) is not None:
+                    verified.append((r["image"], True, r["page"]))
+                else:
+                    unverified.append((r["image"], False, r["page"]))
+            else:
+                unverified.append((r["image"], False, r["page"]))
+        if verified:
+            break  # mamy potwierdzone zdjęcia — nie trzeba szukać po EAN
+    return verified + unverified[:3]
+
+
+# =============================================================================
+# OPIS HTML (Gemini / OpenAI)
+# =============================================================================
+_openai_client: OpenAI | None = None
+
+
+# Gdy OLLAMA_MODEL nie jest ustawione, skrypt bierze pierwszy pobrany model z tej listy (od najlepszego po polsku).
+# Bielik (SpeakLeash, trenowany na polskich tekstach) pisze poprawniejszą polszczyzną niż qwen (literówki,
+# chińskie wtrącenia) — dlatego jest pierwszy.
+OLLAMA_PREFERRED = ["SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M", "qwen2.5:14b-instruct", "qwen2.5:14b",
+                    "gemma3:12b", "qwen3:14b", "qwen3:8b", "qwen2.5:7b-instruct", "qwen2.5:7b", "llama3.1:latest"]
+
+
+def ollama_installed(settings: dict) -> set[str]:
+    host = settings["base_url"].removesuffix("/v1")
+    try:
+        resp = requests.get(host + "/api/tags", timeout=10)
+        resp.raise_for_status()
+        return {m.get("name", "") for m in resp.json().get("models", [])}
+    except Exception:
+        sys.exit(f"Ollama nie odpowiada pod adresem {host}. Zainstaluj ją z {settings['key_url']} "
+                 "i uruchom (ikona Ollama w zasobniku systemowym), potem spróbuj ponownie.")
+
+
+def check_ollama(settings: dict) -> None:
+    """Sprawdza, czy Ollama działa i czy wybrany model jest pobrany."""
+    installed = ollama_installed(settings)
+    # "gemma3" bez tagu w Ollamie oznacza "gemma3:latest"
+    names = installed | {n.removesuffix(":latest") for n in installed}
+    missing = [m for m in settings["models"] if m.strip() not in names]
+    if missing:
+        sys.exit(f"W Ollamie brakuje modelu {missing[0]}. Pobierz go poleceniem:  ollama pull {missing[0]}\n"
+                 f"Pobrane modele: {', '.join(sorted(installed)) or 'brak'}. "
+                 "Inny model ustawisz zmienną OLLAMA_MODEL, np. $env:OLLAMA_MODEL=\"qwen3:8b\".")
+
+
+def configure_ai(provider: str) -> None:
+    """Wybiera dostawcę AI i sprawdza klucz. Kończy skrypt czytelnym komunikatem, jeśli klucza brak."""
+    settings = AI_PROVIDERS[provider]
+    if provider == "ollama":
+        if not os.getenv("OLLAMA_MODEL"):
+            installed = ollama_installed(settings)
+            names = installed | {n.removesuffix(":latest") for n in installed}
+            pick = next((m for m in OLLAMA_PREFERRED if m in names), None)
+            if pick:
+                settings = dict(settings, models=[pick])
+        check_ollama(settings)
+        AI.update(settings, key="ollama")  # Ollama nie sprawdza klucza, ale biblioteka wymaga jakiegoś
+        return
+    key = GEMINI_API_KEY if provider == "gemini" else OPENAI_API_KEY
+    if not key:
+        sys.exit(f"Brak klucza {settings['name']}. Ustaw zmienną środowiskową {settings['key_env']} "
+                 f"(klucz z {settings['key_url']}) albo wpisz go w sekcji KONFIGURACJA na górze skryptu.")
+    if "TWÓJ" in key.upper() or "..." in key:
+        sys.exit(f"{settings['key_env']} zawiera przykładowy tekst zamiast prawdziwego klucza. "
+                 f"Wklej swój klucz z {settings['key_url']}.")
+    AI.update(settings, key=key)
+
+
+def get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        # max_retries=0 — ponawianiem zajmuje się with_retry (5 s przerwy, logowanie).
+        _openai_client = OpenAI(api_key=AI["key"], base_url=AI["base_url"],
+                                timeout=AI.get("timeout", AI_TIMEOUT), max_retries=0)
+    return _openai_client
+
+
+def parse_json(text: str) -> dict:
+    """JSON z odpowiedzi modelu — także gdy model owinie go w ```json ... ```."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            raise ValueError(f"Model nie zwrócił JSON: {text[:120]!r}")
+        return json.loads(match.group(0))
+
+
+def clean_html(text: str) -> str:
+    """Usuwa ewentualne bloki ```html ... ``` i zbędne białe znaki."""
+    text = text.strip()
+    text = re.sub(r"^```(?:html)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    text = re.sub(r">\s*\n\s*<", "><", text)
+    return text.strip()
+
+
+def _call_openai(prompt: str) -> dict:
+    """Zapytanie do wybranego dostawcy; przy przeciążeniu modelu próbuje kolejnych z listy."""
+    last_error: Exception | None = None
+    for model in AI["models"]:
+        try:
+            return _call_model(model.strip(), prompt)
+        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError,
+                openai.RateLimitError) as exc:
+            # 503 "high demand" / model wycofany / brak odpowiedzi / limit (każdy model Gemini ma
+            # osobny limit) — od razu kolejny model, bez czekania.
+            log.debug("Model %s niedostępny: %s", model, exc)
+            last_error = exc
+    raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
+
+
+OLLAMA_REPEAT_PENALTY = 1.05  # 1.15 wypychało Qwena w chiński/rosyjski i puste odpowiedzi; 1.05 to zalecenie Qwena
+
+
+def _call_ollama(model: str, prompt: str, require_desc: bool = False) -> dict:
+    """Ollama przez jej własne API — pozwala ustawić większy kontekst (num_ctx).
+
+    Domyślny kontekst Ollamy (2–4 tys. tokenów) ucinałby tekst strony źródłowej.
+    Gdy opis wyjdzie pusty albo w obcym alfabecie, od razu jedna druga próba z innymi ustawieniami
+    (bez kary za powtórzenia, trochę wyższa temperatura) — ta sama próba dałaby zwykle to samo.
+    """
+    data = _ollama_once(model, prompt, 0.1, OLLAMA_REPEAT_PENALTY)
+    if require_desc:
+        desc = str(data.get("opis_html") or "")
+        if not clean_html(desc) or FOREIGN_SCRIPT_RE.search(desc):
+            second = _ollama_once(model, prompt, 0.3, 1.0)
+            second_desc = str(second.get("opis_html") or "")
+            if clean_html(second_desc) and (not FOREIGN_SCRIPT_RE.search(second_desc) or not clean_html(desc)):
+                data = second
+    return data
+
+
+def _ollama_once(model: str, prompt: str, temperature: float, repeat_penalty: float) -> dict:
+    host = AI["base_url"].removesuffix("/v1")
+    resp = requests.post(host + "/api/chat", timeout=AI.get("timeout", AI_TIMEOUT), json={
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                     {"role": "user", "content": prompt}],
+        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": temperature, "num_predict": AI["max_tokens"],
+                    "repeat_penalty": repeat_penalty},
+    })
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("done_reason") == "length":
+        raise ValueError("Odpowiedź ucięta (limit tokenów)")
+    return parse_json((data.get("message") or {}).get("content") or "{}")
+
+
+def ai_json(prompt: str) -> dict:
+    """Dowolne zapytanie do modelu z odpowiedzią JSON (bez wymogu opisu)."""
+    last_error: Exception | None = None
+    for model in AI["models"]:
+        try:
+            return _call_model(model.strip(), prompt, require_desc=False)
+        except (openai.InternalServerError, openai.NotFoundError, openai.APITimeoutError,
+                openai.RateLimitError) as exc:
+            last_error = exc
+    raise last_error
+
+
+def _call_model(model: str, prompt: str, require_desc: bool = True) -> dict:
+    if AI["name"] == "Ollama":
+        data = _call_ollama(model, prompt, require_desc)
+        if not require_desc:
+            return data
+        data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
+        if not data["opis_html"]:
+            raise ValueError("Model zwrócił pusty opis")
+        return data
+    request = dict(
+        model=model,
+        temperature=0.1,  # niska — mniej „twórczości”, czyli mniej zmyślonych cech
+        max_tokens=AI["max_tokens"],
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": prompt}],
+    )
+    try:
+        response = get_openai_client().chat.completions.create(**request)
+    except openai.BadRequestError as exc:
+        if "response_format" not in str(exc):
+            raise
+        # Model bez trybu JSON — prompt i tak każe odpowiedzieć JSON-em, parse_json sobie poradzi.
+        del request["response_format"]
+        response = get_openai_client().chat.completions.create(**request)
+    choice = response.choices[0]
+    if choice.finish_reason == "length":
+        raise ValueError("Odpowiedź ucięta (limit tokenów)")
+    data = parse_json(choice.message.content or "{}")
+    if not require_desc:
+        return data
+    data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
+    if not data["opis_html"]:
+        raise ValueError("Model zwrócił pusty opis")
+    return data
+
+
+def generate_description(row: dict, source: dict | None, row_label: str) -> dict | None:
+    # Ścieżka kategorii z IdoSell ("A\B\C") jest czytelniejsza dla modelu jako "A > B > C".
+    category = " > ".join(p.strip() for p in row["category"].split("\\") if p.strip()) or "brak danych"
+    common = dict(name=row["name"], producer=row["producer"] or "brak danych",
+                  code=row["code"] or "brak", ean=row["ean"] or "brak",
+                  category=category, abbreviations=ABBREVIATIONS)
+    if source:
+        prompt = PROMPT_WITH_SOURCE.format(**common, url=source["url"], source=source["excerpt"])
+    else:
+        prompt = PROMPT_NAME_ONLY.format(**common)
+    result = with_retry(_call_openai, prompt, what=f"{row_label} {AI['name']}")
+    _track_ai_result(result is not None)
+    return result
+
+
+MAX_AI_FAILURES_IN_ROW = 5
+_ai_failures = {"in_row": 0}
+_ai_failures_lock = threading.Lock()
+
+
+def _track_ai_result(ok: bool) -> None:
+    """Zatrzymuje skrypt, gdy AI kilka razy z rzędu nie odpowiada (np. wyczerpany limit konta).
+
+    Bez tego skrypt przeszedłby przez tysiące produktów bez opisów, zużywając zapytania wyszukiwarki.
+    """
+    with _ai_failures_lock:
+        _ai_failures["in_row"] = 0 if ok else _ai_failures["in_row"] + 1
+        if _ai_failures["in_row"] >= MAX_AI_FAILURES_IN_ROW:
+            raise FatalError(
+                f"{AI['name']} nie odpowiedziało dla {MAX_AI_FAILURES_IN_ROW} produktów z rzędu. "
+                + ("Sprawdź, czy Ollama działa i czy komputerowi starcza pamięci na ten model. "
+                   if AI["name"] == "Ollama" else
+                   "Najczęstsza przyczyna: wyczerpany limit/brak płatności na koncie "
+                   "(błąd 429 'exceeded your current quota'). Sprawdź konto. ")
+                + "Po poprawieniu uruchom skrypt ponownie — zacznie od miejsca, w którym przerwał.")
+
+
+# =============================================================================
+# POBIERANIE ZDJĘĆ NA DYSK
+# =============================================================================
+IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"GIF8", ".gif"),
+)
+
+
+def image_type(head: bytes) -> str | None:
+    """Rozszerzenie na podstawie nagłówka pliku — odrzuca strony błędów udające obrazek."""
+    for signature, ext in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return ext
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def safe_filename(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z_-]+", "_", text).strip("_")[:80] or "produkt"
+
+
+# Fragmenty adresów typowe dla logotypów, banerów i ikon — to nie są zdjęcia produktu.
+BAD_IMAGE_WORDS = ("logo", "banner", "baner", "icon", "ikona", "favicon", "sprite", "placeholder",
+                   "noimage", "no-image", "no_image", "brak-zdjecia", "brak_zdjecia", "nophoto", "no-photo",
+                   "social", "share")
+MIN_IMAGE_SIDE = 400         # px — mniejsze to miniaturki słabej jakości albo ikonki
+MAX_IMAGE_RATIO = 1.9        # szerokość/wysokość — szersze to zwykle banery i logotypy
+MIN_IMAGE_RATIO = 0.5
+
+
+def image_url_looks_bad(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return any(word in path for word in BAD_IMAGE_WORDS)
+
+
+def fetch_image(url: str, referer: str = "") -> tuple[bytes, str, str]:
+    """Pobiera obrazek do pamięci. Zwraca (dane, rozszerzenie, "") albo (b"", "", powód_odrzucenia)."""
+    if domain_blocked(url):
+        return b"", "", "strona blokuje pobieranie"
+    headers = dict(BROWSER_HEADERS)
+    if referer:
+        headers["Referer"] = referer  # część sklepów blokuje obrazki pobierane bez strony źródłowej
+    try:
+        with requests.get(url, headers=headers, timeout=PAGE_TIMEOUT, stream=True) as resp:
+            note_response(url, resp.status_code)
+            if resp.status_code != 200:
+                return b"", "", f"HTTP {resp.status_code}"
+            data = b""
+            for chunk in resp.iter_content(64 * 1024):
+                data += chunk
+                if len(data) > MAX_IMAGE_BYTES:
+                    return b"", "", "plik za duży"
+    except Exception as exc:
+        return b"", "", type(exc).__name__
+    ext = image_type(data[:16])
+    if not ext:
+        return b"", "", "to nie jest plik obrazu"
+    if len(data) < MIN_IMAGE_BYTES:
+        return b"", "", "obrazek za mały"
+    return data, ext, ""
+
+
+def check_image(data: bytes) -> str:
+    """Odrzuca ikonki, banery i logotypy po wymiarach. Zwraca powód odrzucenia albo ""."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""  # bez Pillow nie sprawdzimy wymiarów — zostaje filtr adresu i sygnatury pliku
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
+    except Exception:
+        return "uszkodzony plik obrazu"
+    if min(width, height) < MIN_IMAGE_SIDE:
+        return f"obrazek za mały ({width}x{height})"
+    if not MIN_IMAGE_RATIO <= width / height <= MAX_IMAGE_RATIO:
+        return f"proporcje banera/logo ({width}x{height})"
+    return ""
+
+
+def save_image(data: bytes, ext: str, images_dir: str, base_name: str) -> str:
+    os.makedirs(images_dir, exist_ok=True)
+    # Usuwamy plik tego produktu z poprzedniego uruchomienia (mógł mieć inne rozszerzenie albo być błędny).
+    for old_ext in (".jpg", ".png", ".webp", ".gif"):
+        old = os.path.join(images_dir, base_name + old_ext)
+        if os.path.exists(old):
+            os.remove(old)
+    if ext == ".webp":
+        # Lokalna kopia jako JPG — pewniejsza przy ręcznym wgrywaniu do sklepu i w starszych programach.
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as img:
+            out = io.BytesIO()
+            img.convert("RGB").save(out, "JPEG", quality=92)
+        data, ext = out.getvalue(), ".jpg"
+    path = os.path.join(images_dir, base_name + ext)
+    with open(path + ".part", "wb") as fh:
+        fh.write(data)
+    os.replace(path + ".part", path)
+    return path
+
+
+MAX_IMAGE_TRIES = 15         # ilu kandydatów na zdjęcie sprawdzić na produkt (sklep + źródło + wyszukiwarka)
+
+
+def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
+               base_name: str, tried: set[str], log_rejections: list[str] | None = None) -> tuple[str, bool, str, str]:
+    """Pierwsze zdjęcie, które przejdzie wszystkie filtry.
+
+    Zwraca (url, czy_potwierdzone, ścieżka_pliku, powód_ostatniego_odrzucenia).
+    """
+    last_reason = ""
+    for url, verified, referer in candidates:
+        if url in tried or len(tried) >= MAX_IMAGE_TRIES:
+            continue
+        tried.add(url)
+        if image_url_looks_bad(url):
+            last_reason = "logo/baner w adresie"
+            if log_rejections is not None:
+                log_rejections.append(f"{last_reason}: {url}")
+            continue
+        data, ext, reason = fetch_image(url, referer)
+        if not reason:
+            reason = check_image(data)
+        if reason:
+            last_reason = reason
+            if log_rejections is not None:
+                log_rejections.append(f"{reason}: {url}")
+            continue
+        path = save_image(data, ext, images_dir, base_name) if images_dir else ""
+        return url, verified, path, ""
+    return "", False, "", last_reason
+
+
+# =============================================================================
+# KONTROLA OPISU: zakazane ogólniki i nagłówek z rodzajem produktu
+# =============================================================================
+# (wzorzec ogólnika, wzorzec w tekście źródła, który go uzasadnia). Zdanie z ogólnikiem zostaje tylko wtedy,
+# gdy źródło mówi o tym samym — np. „odporny na korozję” przejdzie, jeśli w źródle jest słowo „korozj…”.
+BANNED_PHRASES = [
+    (r"(?:wysok|najwyższ|doskonał|świetn)\w*\s+jakoś\w*|jakoś\w*\s+wykonania", r"jakoś"),
+    (r"niezawodn\w*", r"niezawodn"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?korozj\w*|antykorozyjn\w*", r"korozj"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?(?:chemikal\w*|chemiczn\w*|substancj\w*)", r"chemi|substancj"),
+    (r"odporn\w*\s+na\s+(?:\w+\s+){0,2}?(?:warunk\w*\s+atmosferyczn\w*|czynnik\w*\s+atmosferyczn\w*|"
+     r"atmosferyczn\w*|UV|promieniowan\w*)", r"atmosferyczn|\bUV\b|promieniowan"),
+    (r"(?:zgodn\w*|spełni\w*|zgodnie)\s+(?:\w+\s+){0,2}?(?:norm\w*|standard\w*|wymog\w*|wymagani\w*|przepis\w*)",
+     r"\bPN-|\bEN\s?\d|\bISO\b|norm|standard|DVGW|atest|certyfikat"),
+    (r"(?:najnowsz|nowoczesn)\w*\s+(?:standard\w*|technologi\w*|rozwiązan\w*)", r"standard|technologi"),
+    (r"(?:łatw|prost|szybk|bezproblemow)\w*\s+(?:i\s+\w+\s+)?(?:montaż\w*|instalacj\w*|w\s+montażu|"
+     r"w\s+instalacji|do\s+zamontowania|zamontowa\w*)",
+     # samo słowo „montaż” w źródle nie wystarczy — źródło musi mówić o ŁATWYM/szybkim montażu
+     r"(?:łatw|prost|szybk|bezproblemow)\w*\s+(?:\w+\s+)?(?:montaż|instalacj|zamontowa)|"
+     r"montaż\w*\s+(?:jest\s+)?(?:łatw|prost|szybk)"),
+    (r"(?:dług[oi]?\w*\s*)?trwał(?:ość|ości|y|a|e|ego|ej|ym|ych)\b|długotrwał\w*|żywotnoś\w*", r"trwał|żywotnoś"),
+]
+MIN_DESC_CHARS = 200          # opis krótszy po usunięciu ogólników idzie do akceptacji
+MIN_NAME_ONLY_CHARS = 150     # opis (bez nagłówka) krótszy po usunięciu danych spoza nazwy — do akceptacji
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ0-9<])")
+
+
+def _plain(fragment: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+def _banned_hit(sentence: str, source_text: str) -> str:
+    """Pierwszy ogólnik w zdaniu, którego źródło nie uzasadnia, albo ""."""
+    plain = _plain(sentence)
+    for pattern, allowed in BANNED_PHRASES:
+        hit = re.search(pattern, plain, flags=re.IGNORECASE)
+        if hit and not re.search(allowed, source_text, flags=re.IGNORECASE):
+            return hit.group(0)
+    return ""
+
+
+def filter_generic_claims(desc_html: str, source_text: str) -> tuple[str, list[str]]:
+    """Usuwa zdania i punkty listy z ogólnikami nieobecnymi w źródle. Zwraca (nowy HTML, usunięte frazy)."""
+    removed: list[str] = []
+
+    def clean_block(match: re.Match) -> str:
+        tag, inner = match.group(1).lower(), match.group(2)
+        if tag == "li":  # punkt listy to jedno stwierdzenie — usuwamy go w całości
+            hit = _banned_hit(inner, source_text)
+            if hit:
+                removed.append(hit)
+                return ""
+            return match.group(0)
+        kept = []
+        for sentence in _SENTENCE_END.split(inner):
+            hit = _banned_hit(sentence, source_text)
+            if hit:
+                removed.append(hit)
+            else:
+                kept.append(sentence)
+        return f"<p>{' '.join(kept)}</p>" if _plain(" ".join(kept)) else ""
+
+    out = re.sub(r"<(p|li)>(.*?)</\1>", clean_block, desc_html, flags=re.IGNORECASE | re.DOTALL)
+    out = re.sub(r"<ul>\s*</ul>", "", out, flags=re.IGNORECASE)  # lista bez punktów
+    return out, removed
+
+
+# Typowe końcówki przymiotników i imiesłowów (kołnierzowa, ręczny, natynkowy, równoważący, mosiężna…) —
+# takie słowa z nazwy nie są brane pod uwagę przy sprawdzaniu nagłówka.
+ADJECTIVE_ENDINGS = ("owy", "owa", "owe", "owej", "owego", "owych", "ny", "ne", "ni", "nej", "nego", "nych",
+                     "ący", "ąca", "ące", "ski", "ska", "skie", "cki", "cka", "ckie", "ły", "ła", "łe",
+                     "wy", "we")
+
+
+def name_nouns(name: str, producer: str = "") -> list[str]:
+    """Słowa z nazwy, które mogą być rzeczownikiem: min. 4 litery, bez przymiotników, skrótów z kropką
+    (KOŁN., KR.) i nazwy producenta."""
+    skip = {w.lower() for w in re.findall(r"[^\W\d_]+", producer)}
+    nouns = []
+    for match in re.finditer(r"([^\W\d_]+)(\.?)", name):
+        word, dot = match.group(1).lower(), match.group(2)
+        if len(word) < 4 or dot or word in skip or word.endswith(ADJECTIVE_ENDINGS):
+            continue
+        if word not in nouns:
+            nouns.append(word)
+    return nouns
+
+
+def _stem(word: str) -> str:
+    return word[:5] if len(word) >= 6 else word[:4]
+
+
+def heading_has_type(desc_html: str, name: str, producer: str = "") -> bool:
+    """Czy <h2> ma wspólny rdzeń (4–5 liter) z którymkolwiek rzeczownikiem z nazwy.
+
+    Rdzeń z początku słowa: literówka w bazie („Termostst”) nie karze poprawnego nagłówka („Termostat”),
+    a odmiana jest dozwolona (zasuwa/zasuwy, łącznik/łącznika).
+    """
+    h2 = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.IGNORECASE | re.DOTALL)
+    if not h2:
+        return False
+    nouns = name_nouns(name, producer)
+    if not nouns:
+        return True  # nazwa bez rzeczowników do sprawdzenia
+    heading = _plain(h2.group(1)).lower()
+    return any(_stem(w) in heading for w in nouns)
+
+
+# Słowa w uwagach AI, które wskazują na niezgodność INNĄ niż sam EAN (wtedy odrzucenie zostaje).
+NON_EAN_MISMATCH = re.compile(r"kod\w*\s+(?:\w+\s+){0,6}?(?:niezgodn|inn|różn|nie\s+zgadza)|niezgodn\w*\s+kod|"
+                              r"\bDN\b|\bPN\b|średnic|wymiar|inn\w*\s+(?:produkt|model|seri|rodzaj)|"
+                              r"materiał|gwint|ciśnieni", re.IGNORECASE)
+
+
+def ean_only_mismatch(uwagi: str) -> bool:
+    """Czy AI odrzuciło stronę wyłącznie z powodu EAN (bez niezgodności kodu, wymiarów, rodzaju…)."""
+    return bool(re.search(r"\bEAN\b|\bGTIN\b|kod\w*\s+kreskow", uwagi, re.IGNORECASE)) and not NON_EAN_MISMATCH.search(uwagi)
+
+
+def _numbers(text: str) -> set[str]:
+    return {n.replace(",", ".") for n in re.findall(r"\d+(?:[.,]\d+)?", text)}
+
+
+# Opis „tylko z nazwy”: dane techniczne, które wolno podać tylko wtedy, gdy wynikają z nazwy (z rozwiniętymi
+# skrótami). (wzorzec w opisie, wzorzec w nazwie, który go uzasadnia; None = to samo słowo musi być w nazwie)
+NAME_ONLY_TECH = [
+    (r"\bnorm\w*|\bPN-EN\b|\bEN\s?\d+|\bISO\b|\bDIN\b|atest\w*|certyfika\w*|aprobat\w*|DVGW|homologac\w*|"
+     r"deklaracj\w*\s+zgodnoś\w*|\bCE\b", r"\bnorm|\bEN\s?\d|\bISO\b|\bDIN\b|atest|certyfik|PZH|CNBOP|DVGW"),
+    (r"ciśnieni\w*|\bbar\b|\bMPa\b|\bPN\s?\d+", r"\bPN\s?\d|\bbar\b|ciśn"),
+    (r"gwint\w*|\bG\s?\d/\d|\bR\s?\d/\d|\bGW\b|\bGZ\b|\bcal\w*\b|\d\s?\"", r"gwint|\bGW|\bGZ|\bG\s?\d|\bR\s?\d|\"|cal"),
+    (r"temperatur\w*|°\s?C\b|stopni\w*\s+Celsjusza", r"temperatur|°"),
+    (r"mosiądz\w*|mosiężn\w*|\bstal(?:i|ą|owy|owa|owe|owej|owego|owych|owym)?\b|nierdzewn\w*|żeliw\w*|\bGJ[SL]\b|"
+     r"\bPVC\b|polichlor\w*|\bPE\b|polietylen\w*|\bPP\b|polipropylen\w*|\bPE-?X\b|miedź|miedzi\b|miedzian\w*|"
+     r"brąz\w*|\bEPDM\b|\bNBR\b|kauczuk\w*|gum\w*|tworzyw\w*|alumini\w*|chromowan\w*|ocynk\w*|cynkow\w*|"
+     r"ceramik\w*|ceramiczn\w*|\bPOM\b|\bABS\b|poliamid\w*|tytan\w*|silikon\w*", None),
+]
+
+
+def _fold(text: str) -> str:
+    """Małe litery bez polskich znaków — nazwy w bazie bywają pisane bez ogonków (ZELIWO, MOSIADZ)."""
+    return text.lower().translate(str.maketrans("ąćęłńóśźż", "acelnoszz"))
+
+
+def _name_with_expansions(name: str) -> str:
+    """Nazwa + rozwinięcia skrótów ze słownika, które w niej występują (PE → polietylen, ŻEL. → żeliwna)."""
+    extra = []
+    for key, value in re.findall(r"([^\s,=/]+(?:/[^\s,=]+)?)\s*=\s*([^,=]+?)(?=,\s*[^\s,=]+\s*=|$)",
+                                 ABBREVIATIONS.replace("\n", " ")):
+        for part in key.split("/"):
+            letters = re.sub(r"\d+", "", part).strip()
+            if len(letters) >= 2 and re.search(rf"(?<![^\W\d_]){re.escape(letters)}(?![^\W\d_])", name, re.I):
+                extra.append(value)
+    return name + " " + " ".join(extra)
+
+
+def _unsupported_tech(sentence: str, name_ext: str) -> str:
+    """Pierwsza dana techniczna w zdaniu, której nie uzasadnia nazwa produktu, albo ""."""
+    plain = _plain(sentence)
+    name_words = re.findall(r"[^\W_]+", _fold(name_ext))
+    for pattern, allowed in NAME_ONLY_TECH:
+        for hit in re.finditer(pattern, plain, flags=re.I):
+            word = hit.group(0)
+            if allowed is not None:
+                if not re.search(allowed, name_ext, flags=re.I):
+                    return word
+                continue
+            stem = _fold(word)[:4]  # stalowy/stal, żeliwna/ŻELIWO; krótkie (PE, PP) — całe słowo
+            if not any(w.startswith(stem) if len(stem) == 4 else w == stem for w in name_words):
+                return word
+    return ""
+
+
+def strip_name_only_extras(desc_html: str, name: str) -> tuple[str, list[str]]:
+    """Opis „tylko z nazwy”: usuwa zdania i punkty listy z liczbami spoza nazwy (np. zmyślone „OD63”) oraz
+    z normami, certyfikatami, ciśnieniem, gwintem, temperaturą, materiałem — gdy nie wynikają z nazwy."""
+    removed: list[str] = []
+    allowed = _numbers(name) | ABBREVIATION_NUMBERS
+    name_ext = _name_with_expansions(name)
+
+    def bad(fragment: str) -> str:
+        invented = _numbers(_plain(fragment)) - allowed
+        if invented:
+            return f"liczby spoza nazwy {sorted(invented)}"
+        tech = _unsupported_tech(fragment, name_ext)
+        return f"„{tech}” spoza nazwy" if tech else ""
+
+    def clean_block(match: re.Match) -> str:
+        tag, inner = match.group(1).lower(), match.group(2)
+        if tag == "li":
+            why = bad(inner)
+            if why:
+                removed.append(f"{why}: {_plain(inner)[:60]}")
+                return ""
+            return match.group(0)
+        kept = []
+        for sentence in _SENTENCE_END.split(inner):
+            why = bad(sentence)
+            if why:
+                removed.append(f"{why}: {_plain(sentence)[:60]}")
+            else:
+                kept.append(sentence)
+        return f"<p>{' '.join(kept)}</p>" if _plain(" ".join(kept)) else ""
+
+    out = re.sub(r"<(p|li)>(.*?)</\1>", clean_block, desc_html, flags=re.I | re.S)
+    out = re.sub(r"<ul>\s*</ul>", "", out, flags=re.I)
+    return out, removed
+
+
+# --- Automatyczna poprawka literówek modelu (np. „Zasuga” zamiast „Zasuwa” z nazwy produktu) ---
+TYPO_REASON_PREFIX = "poprawiona literówka"
+INFO_REASON_PREFIXES = (TYPO_REASON_PREFIX,)   # powody informacyjne — nie odbierają statusu PEWNY
+INFLECTION_ENDINGS = ("ie", "a", "y", "ę", "ą", "i", "e")
+MIN_TYPO_WORD = 5            # krótsze słowa pomijamy — za dużo przypadkowych „poprawek”
+MIN_TYPO_STEM = 5            # minimalny rdzeń słowa z nazwy (bez końcówki)
+VOWELS = set("aąeęioóuy")
+ALTERNATIONS = {frozenset(p) for p in ("kc", "gz", "rz", "tc", "dz", "ch", "zż", "sś", "lł")}
+FOREIGN_FIRST_LETTERS = set("cvqx")  # pierwsza litera z angielskiej pisowni (ventylator, clips)
+DIACRITIC_PAIRS = {"ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n", "ó": "o", "ś": "s", "ź": "z", "ż": "z"}
+# Częstość słów w NAZWACH całej bazy (nie w opisach — tam powtarzają się błędy modelu). Ustawiane w main()
+# i w --przelicz-statusy. Chroni przed „poprawianiem” dobrego słowa na literówkę z nazwy (Termostst).
+NAME_WORD_FREQ: dict[str, int] = {}
+
+
+def build_name_word_freq(names) -> None:
+    from collections import Counter
+    NAME_WORD_FREQ.clear()
+    NAME_WORD_FREQ.update(Counter(w.lower() for n in names for w in re.findall(r"[^\W\d_]+", str(n))))
+
+
+def _word_stem(word: str) -> str:
+    for ending in INFLECTION_ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 4:
+            return word[: -len(ending)]
+    return word
+
+
+def _fit_ending(stem: str, ending: str) -> str:
+    """Końcówka zgodna z pisownią po zmianie ostatniej litery rdzenia: zasuG+i → zasuW+y, łączniK+y → łączniK+i."""
+    if ending == "i" and stem[-1:] not in ("k", "g", "l", "j") and not stem.endswith(("cz", "sz", "rz", "ż", "c", "dz")):
+        return "y"
+    if ending == "y" and stem[-1:] in ("k", "g"):
+        return "i"
+    return ending
+
+
+def _same_case(template: str, word: str) -> str:
+    if template.isupper():
+        return word.upper()
+    if template[:1].isupper():
+        return word[:1].upper() + word[1:]
+    return word
+
+
+def fix_typos(desc_html: str, name: str) -> tuple[str, list[str]]:
+    """Poprawia w tekście opisu (h2 i treść, bez znaczników) słowa różniące się o JEDNĄ literę od słowa z nazwy
+    produktu albo jego odmiany (-a/-y/-ę/-ą/-i/-e/-ie). Zwraca (opis, ["Zasuga→Zasuwa", …]).
+
+    Zabezpieczenia: różnica nie może być na ostatniej literze (tam są legalne końcówki: gazu/gazy) i słowo
+    z nazwy musi być w nazwach bazy częstsze niż słowo z opisu (gdy literówka jest w nazwie — „Termostst” —
+    poprawny „Termostat” w opisie zostaje).
+    """
+    stems = {}
+    for word in re.findall(r"[^\W\d_]+", name):
+        w = word.lower()
+        stem = _word_stem(w)
+        if len(stem) >= MIN_TYPO_STEM:  # „stal”, „wody” — za krótkie, pasowałyby do zwykłych słów (stanie, wodne)
+            stems.setdefault(stem, w)
+    fixes: list[str] = []
+
+    def fix_word(match: re.Match) -> str:
+        original = match.group(0)
+        t = original.lower()
+        if len(t) < MIN_TYPO_WORD or t in stems.values():
+            return original
+        for stem, base in stems.items():
+            ending = t[len(stem):]
+            if len(t) < len(stem) or (ending and ending not in INFLECTION_ENDINGS):
+                continue
+            diffs = [k for k in range(len(stem)) if t[k] != stem[k]]
+            if len(diffs) != 1 or diffs[0] == len(t) - 1:
+                continue
+            k = diffs[0]
+            a, b = t[k], stem[k]
+            if k == 0 and a not in FOREIGN_FIRST_LETTERS:
+                continue  # inny przedrostek to zwykle inne słowo (zbudowany/wbudowany); poprawiamy tylko ventylator, clips
+            if DIACRITIC_PAIRS.get(a) == b or DIACRITIC_PAIRS.get(b) == a:
+                continue  # sam ogonek: nazwy w bazie bywają bez polskich znaków, a ó/o wymienia się w odmianie
+            if a in VOWELS and b in VOWELS and k >= len(stem) - 3:
+                continue  # zmiana samogłoski przy końcu rdzenia to zwykle odmiana (zaworem/zaworami)
+            if k == len(stem) - 1 and ending != base[len(stem):] and (
+                    a in VOWELS or b in VOWELS or frozenset((a, b)) in ALTERNATIONS):
+                continue  # inna forma (żeliwo/żeliwne) albo oboczność (nakrętka/nakrętce), nie literówka
+            if NAME_WORD_FREQ and NAME_WORD_FREQ.get(t, 0) >= NAME_WORD_FREQ.get(base, 0):
+                continue  # słowo z opisu jest w nazwach bazy co najmniej tak częste — to nie literówka
+            fixed = _same_case(original, stem + _fit_ending(stem, ending))
+            fixes.append(f"{original}→{fixed}")
+            return fixed
+        return original
+
+    out = re.sub(r"(?<=>)[^<]+", lambda seg: re.sub(r"[^\W\d_]+", fix_word, seg.group(0)), desc_html)
+    return out, list(dict.fromkeys(fixes))
+
+
+# qwen (chiński model) potrafi w środku polskiego zdania wstawić słowo po chińsku, czasem po rosyjsku.
+# Znaki CJK, kana, hangul, cyrylica, tajski, arabski — w opisie polskiego sklepu nie mają prawa wystąpić.
+FOREIGN_SCRIPT_RE = re.compile(r"[\u0400-\u04ff\u0600-\u06ff\u0e00-\u0e7f\u3000-\u30ff\u3400-\u4dbf"
+                               r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+")
+FOREIGN_REASON_PREFIX = "opis zawierał znaki obcego alfabetu (np. chińskie) — usunięte, sprawdź zdanie"
+
+
+def strip_foreign_script(desc_html: str) -> tuple[str, list[str]]:
+    """Usuwa wtrącenia w obcym alfabecie. Zwraca (opis, usunięte fragmenty) — produkt idzie wtedy do akceptacji."""
+    found = FOREIGN_SCRIPT_RE.findall(desc_html)
+    if not found:
+        return desc_html, []
+    out = FOREIGN_SCRIPT_RE.sub("", desc_html)
+    out = re.sub(r"\(\s*\)", "", out)              # puste nawiasy po usuniętym słowie
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:])", r"\1", out)
+    return out, list(dict.fromkeys(found))
+
+
+def status_for(reasons: list[str]) -> str:
+    """PEWNY, gdy wszystkie powody są tylko informacyjne (np. poprawiona literówka)."""
+    return STATUS_REVIEW if any(not r.startswith(INFO_REASON_PREFIXES) for r in reasons) else STATUS_OK
+
+
+def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
+    """Poprawka literówek + filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody)."""
+    reasons: list[str] = []
+    desc_html, foreign = strip_foreign_script(desc_html)
+    if foreign:
+        log.info("%s obce znaki w opisie (usunięte): %s", row_label, " ".join(foreign)[:80])
+        reasons.append(f"{FOREIGN_REASON_PREFIX}: {' '.join(foreign)[:40]}")
+    desc_html, typo_fixes = fix_typos(desc_html, row["name"])
+    if typo_fixes:
+        log.info("%s poprawione literówki: %s", row_label, ", ".join(typo_fixes))
+        reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
+    # Każdy opis (także ze strony źródłowej) ma być ogólny: dane techniczne tylko te, które wynikają z nazwy.
+    desc_html, extras = strip_name_only_extras(desc_html, row["name"])
+    if extras:
+        log.info("%s usunięte dane spoza nazwy: %s", row_label, "; ".join(extras))
+    length = len(_plain(re.sub(r"<h2>.*?</h2>", "", desc_html, flags=re.I | re.S)))
+    if length < MIN_NAME_ONLY_CHARS:
+        reasons.append(f"opis za krótki po usunięciu danych spoza nazwy ({length} znaków)")
+    heading = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.I | re.S)
+    if heading:
+        invented = sorted(_numbers(_plain(heading.group(1))) - _numbers(row["name"]) - ABBREVIATION_NUMBERS)
+        tech = _unsupported_tech(heading.group(1), _name_with_expansions(row["name"]))
+        if invented or tech:
+            reasons.append(f"nagłówek zawiera dane spoza nazwy: {tech or ', '.join(invented)}")
+    source_text = " ".join([row["name"], row["category"], (source or {}).get("excerpt", "")])
+    desc_html, removed = filter_generic_claims(desc_html, source_text)
+    if removed:
+        log.info("%s usunięte ogólniki (brak w źródle): %s", row_label, "; ".join(removed))
+        length = len(_plain(desc_html))
+        if length < MIN_DESC_CHARS:
+            reasons.append(f"opis po usunięciu ogólników za krótki ({length} znaków)")
+    if not heading_has_type(desc_html, row["name"], row["producer"]):
+        reasons.append(heading_reason(row["name"], row["producer"]))
+    return desc_html, reasons
+
+
+HEADING_REASON_PREFIX = "nagłówek opisu nie zawiera rodzaju produktu"
+
+
+def heading_reason(name: str, producer: str) -> str:
+    return f"{HEADING_REASON_PREFIX} („{', '.join(name_nouns(name, producer)[:3])}”) — możliwa literówka"
+
+
+# =============================================================================
+# PRZETWARZANIE WIERSZA
+# =============================================================================
+def process_row(record: dict, position: int, engine: str, images_dir: str | None,
+                with_images: bool = True) -> dict:
+    """images_dir=None wyłącza zapis zdjęć na dysk; with_images=False pomija zdjęcia całkowicie."""
+    def val(col: str) -> str:
+        return str(record.get(col, "") or "").strip()
+
+    row = {"name": val(COL_NAME), "producer": val(COL_PRODUCER), "code": val(COL_CODE),
+           "ean": val(COL_EAN), "category": val(COL_CATEGORY)}
+    row_label = f"[wiersz {position + 1}, id={val(COL_ID)}]"
+    m = ProductMatcher(row["code"], row["ean"], row["producer"])
+    reasons: list[str] = []
+
+    # 1. Strona produktu potwierdzona kodem/EAN
+    source = None
+    if m.code_re or m.ean_re:
+        source = find_verified_source(m, row["code"], row["ean"], row["producer"], engine, row_label, row["name"])
+    if not source:
+        reasons.append("nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy")
+    elif source.get("search_only"):
+        reasons.append(SEARCH_ONLY_REASON)
+
+    # 2. Opis
+    desc = ""
+    result = None
+    if not row["name"]:
+        reasons.append("brak nazwy produktu")
+    else:
+        result = generate_description(row, source, row_label)
+        if result:
+            desc = result["opis_html"]
+            if source and result.get("ten_sam_produkt") is not True:
+                uwagi = str(result.get("uwagi") or "")
+                if not row["ean"] and ean_only_mismatch(uwagi):
+                    # Nie mamy EAN w danych — EAN na stronie nie może być powodem odrzucenia; liczy się kod.
+                    log.info("%s AI zgłosiło tylko niezgodność EAN, a produkt nie ma EAN w danych — "
+                             "pomijam (%s)", row_label, uwagi)
+                else:
+                    reasons.append("AI: strona nie pasuje do produktu" + (f" ({uwagi})" if uwagi else ""))
+            desc, desc_reasons = review_description(desc, row, source, row_label)
+            reasons += desc_reasons
+        else:
+            reasons.append("nie udało się wygenerować opisu")
+
+    # 3. Zdjęcie: kandydaci ze strony źródłowej, potem z wyszukiwarki obrazów. Każdy jest pobierany
+    #    i sprawdzany (sygnatura pliku, wymiary, logo/baner) — pierwszy poprawny wygrywa.
+    base_name = safe_filename(f"{val(COL_ID)}_{row['code']}")
+    tried: set[str] = set()
+    rejections: list[str] = []
+    image, image_ok, image_file, rejected = "", False, "", ""
+    # Najpierw zdjęcie serii ze sklepu producenta (najlepsza jakość, bez znaków wodnych).
+    shop = image_candidates_from_producer_shop(row, source, result, row_label) if source and with_images else []
+    if shop:
+        image, image_ok, image_file, rejected = pick_image(shop, images_dir, base_name, tried, rejections)
+    if with_images and source and not image:
+        image, image_ok, image_file, rejected = pick_image(
+            [(u, True, source["url"]) for u in image_candidates_from_source(m, source)],
+            images_dir, base_name, tried, rejections)
+    if with_images and not image:
+        found = image_candidates_from_search(m, row["code"], row["ean"], row["producer"], engine, row_label)
+        image, image_ok, image_file, reason = pick_image(found, images_dir, base_name, tried, rejections)
+        rejected = reason or rejected
+    if not with_images:
+        pass  # --bez-zdjec: PEWNY zależy tylko od źródła i opisu
+    elif not image:
+        log.info("%s zdjęcie: kandydaci — sklep producenta %d, strona źródłowa %d, sprawdzone %d%s",
+                 row_label, len(shop), len(image_candidates_from_source(m, source)) if source else 0,
+                 len(tried), "" if rejections else ", brak kandydatów")
+        for line in rejections:
+            log.info("%s   odrzucone — %s", row_label, line)
+        reasons.append(f"brak poprawnego zdjęcia (odrzucone: {rejected})" if rejected else "brak zdjęcia")
+    elif not image_ok:
+        reasons.append("zdjęcie niepotwierdzone kodem/EAN")
+
+    out = dict(record)
+    out[COL_DESC] = desc
+    out[COL_IMAGE] = image
+    out[COL_IMAGE_FILE] = image_file.replace(os.sep, "/")
+    out[COL_SOURCE] = source["url"] if source else ""
+    out[COL_STATUS] = status_for(reasons)
+    out[COL_REASON] = "; ".join(reasons)
+    log.info("%s %s%s", row_label, out[COL_STATUS], f" — {out[COL_REASON]}" if reasons else "")
+    return out
+
+
+# =============================================================================
+# KONTROLA ZDJĘĆ MODELEM WIZYJNYM (znak wodny, logo, czy to zdjęcie produktu)
+# =============================================================================
+VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
+VISION_MAX_SIDE = 1024       # zdjęcie zmniejszane przed wysłaniem do modelu — szybciej, wynik ten sam
+# Zamiennik_* — inne zdjęcie znalezione w miejsce odrzuconego (np. ze znakiem wodnym).
+CHECK_COLUMNS = [COL_ID, COL_IMAGE, "Wynik", "Uwagi", "Zamiennik_URL", "Zamiennik_plik", "Zamiennik_potwierdzony"]
+MAX_REPLACEMENT_CHECKS = 3   # ile zastępczych zdjęć obejrzeć modelem, zanim produkt zostanie bez zdjęcia
+CHECK_OK, CHECK_REJECTED = "OK", "ODRZUCONE"
+
+VISION_PROMPT = """To zdjęcie ma być zdjęciem produktu w sklepie internetowym z armaturą instalacyjną.
+Produkt: {name}
+Producent: {producer}
+
+Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
+{{"zdjecie_produktu": true lub false,
+  "rodzaj_zgodny": true lub false,
+  "znak_wodny": true lub false,
+  "uwagi": "krótko po polsku, co jest nie tak (puste, jeśli wszystko w porządku)"}}
+
+- "zdjecie_produktu": true tylko jeśli widać fizyczny produkt (np. zasuwa, zawór, łącznik, kształtka, rura).
+  false dla: logo, banera, samego napisu, rysunku technicznego, tabeli, zrzutu strony, zdjęcia innego przedmiotu.
+- "rodzaj_zgodny": true tylko jeśli na zdjęciu jest TEN SAM RODZAJ produktu co w nazwie powyżej
+  (np. nazwa „łącznik” → na zdjęciu łącznik; hydrant, zasuwa, rura czy zawór to wtedy false).
+- "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny SKLEPU lub innej firmy niż producent, adres strony
+  www, numer telefonu albo napis przez środek zdjęcia, który nie jest częścią produktu.
+  NIE są znakiem wodnym (wtedy false): nazwa lub logo producenta „{producer}” (także małe, w rogu zdjęcia),
+  napisy odlane/nadrukowane na produkcie, napisy na opakowaniu produktu."""
+
+
+def check_file_path(output_path: str) -> str:
+    return side_path(output_path, "kontrola_zdjec")
+
+
+def load_image_checks(output_path: str) -> dict[tuple[str, str], dict]:
+    """{(id, url_zdjęcia): wiersz kontroli} — wynik dotyczy konkretnego zdjęcia, więc zmiana zdjęcia = nowa kontrola."""
+    path = check_file_path(output_path)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {}
+    df = read_csv(path)
+    missing = [c for c in CHECK_COLUMNS if c not in df.columns]
+    if missing:
+        # Plik ze starszej wersji (bez kolumn zamiennika) — uzupełniamy nagłówek, wyniki zostają.
+        for c in missing:
+            df[c] = ""
+        df[CHECK_COLUMNS].to_csv(path, index=False, encoding="utf-8")
+    return {(r[COL_ID], r[COL_IMAGE]): r for r in df.to_dict("records")}
+
+
+def _image_for_vision(record: dict) -> bytes:
+    """Zdjęcie produktu zmniejszone do JPEG (z pliku na dysku albo z linku)."""
+    from PIL import Image
+
+    local = record.get(COL_IMAGE_FILE, "")
+    if local and os.path.exists(local):
+        with open(local, "rb") as fh:
+            data = fh.read()
+    else:
+        data, _, reason = fetch_image(record[COL_IMAGE])
+        if reason:
+            raise ValueError(f"nie udało się pobrać zdjęcia ({reason})")
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=90)
+        return out.getvalue()
+
+
+def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
+    import base64
+
+    host = AI_PROVIDERS["ollama"]["base_url"].removesuffix("/v1")
+    resp = requests.post(host + "/api/chat", timeout=300, json={
+        "model": VISION_MODEL,
+        "stream": False,
+        "format": "json",
+        "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych"),
+                      "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
+        "options": {"temperature": 0, "num_ctx": 4096},
+    })
+    resp.raise_for_status()
+    return parse_json((resp.json().get("message") or {}).get("content") or "{}")
+
+
+def _shrink_for_vision(data: bytes) -> bytes:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+        out = io.BytesIO()
+        img.save(out, "JPEG", quality=90)
+        return out.getvalue()
+
+
+def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
+    """(wynik, uwagi) dla zdjęcia produktu — z rekordu albo z podanych bajtów (zdjęcie zastępcze)."""
+    try:
+        image = _shrink_for_vision(data) if data is not None else _image_for_vision(record)
+    except Exception as exc:
+        return CHECK_REJECTED, str(exc)
+    answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), record.get(COL_PRODUCER, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
+    if answer is None:
+        return CHECK_REJECTED, "model nie ocenił zdjęcia"
+    problems = []
+    if answer.get("zdjecie_produktu") is not True:
+        problems.append("to nie jest zdjęcie produktu")
+    elif answer.get("rodzaj_zgodny") is not True:
+        problems.append("zdjęcie przedstawia inny rodzaj produktu")
+    if answer.get("znak_wodny") is not False:
+        problems.append("znak wodny / nałożone logo lub napis")
+    if problems:
+        note = str(answer.get("uwagi") or "").strip()
+        return CHECK_REJECTED, "; ".join(problems) + (f" ({note})" if note else "")
+    return CHECK_OK, ""
+
+
+def find_replacement(record: dict, engine: str, images_dir: str | None) -> tuple[str, bool, str, str]:
+    """Szuka innego zdjęcia w miejsce odrzuconego i sprawdza je modelem wizyjnym.
+
+    Zwraca (url, czy_potwierdzone_kodem, plik, uwagi) albo ("", False, "", powód).
+    """
+    def val(col: str) -> str:
+        return str(record.get(col, "") or "").strip()
+
+    m = ProductMatcher(val(COL_CODE), val(COL_EAN), val(COL_PRODUCER))
+    label = f"[id={val(COL_ID)}]"
+    candidates: list[tuple[str, bool, str]] = []
+    if val(COL_SOURCE):
+        page = fetch_page(val(COL_SOURCE))
+        if page:
+            source = {"url": val(COL_SOURCE), "excerpt": "", "og_images": page[1], "imgs": page[2],
+                      "gallery": page[4] if len(page) > 4 else [],
+                      "producer_site": is_producer_url(val(COL_SOURCE), val(COL_PRODUCER))}
+            candidates += [(u, True, source["url"]) for u in image_candidates_from_source(m, source)]
+    candidates += image_candidates_from_search(m, val(COL_CODE), val(COL_EAN), val(COL_PRODUCER), engine, label)
+
+    tried = {val(COL_IMAGE)}
+    base_name = safe_filename(f"{val(COL_ID)}_{val(COL_CODE)}")
+    last_note = "nie znaleziono innego zdjęcia"
+    for _ in range(MAX_REPLACEMENT_CHECKS):
+        # pick_image pobiera i filtruje (logo w adresie, wymiary) — model ogląda tylko to, co przeszło
+        url, verified, path, reason = pick_image(candidates, None, base_name, tried)
+        if not url:
+            last_note = f"brak innego poprawnego zdjęcia ({reason})" if reason else last_note
+            break
+        data, ext, err = fetch_image(url)
+        if err:
+            last_note = err
+            continue
+        result, note = check_one_image(record, data)
+        log.info("%s zdjęcie zastępcze %s%s", label, result, f" — {note}" if note else "")
+        if result == CHECK_OK:
+            path = save_image(data, ext, images_dir, base_name) if images_dir else ""
+            return url, verified, path, ""
+        last_note = f"zastępcze też odrzucone: {note}"
+    return "", False, "", last_note
+
+
+def run_image_check(output_path: str, engine: str = "ddg", images_dir: str | None = None) -> None:
+    """Etap 2: ogląda modelem wizyjnym każde zdjęcie, którego jeszcze nie sprawdzono.
+
+    Przy odrzuconym zdjęciu (znak wodny, logo, nie produkt) szuka zdjęcia zastępczego.
+    """
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path}. Najpierw uruchom przetwarzanie produktów (--input ...).")
+    check_ollama(dict(AI_PROVIDERS["ollama"], models=[VISION_MODEL]))
+    df = read_csv(output_path)
+    done = load_image_checks(output_path)
+    todo = [r for r in df.to_dict("records") if r.get(COL_IMAGE) and (r[COL_ID], r[COL_IMAGE]) not in done]
+    log.info("Kontrola zdjęć modelem %s: do sprawdzenia %d (sprawdzone wcześniej: %d).",
+             VISION_MODEL, len(todo), len(done))
+    path = check_file_path(output_path)
+    started, batch, rejected, replaced = time.time(), [], 0, 0
+    try:
+        for i, record in enumerate(todo, 1):
+            result, note = check_one_image(record)
+            log.info("[id=%s] zdjęcie %s%s", record[COL_ID], result, f" — {note}" if note else "")
+            entry = {COL_ID: record[COL_ID], COL_IMAGE: record[COL_IMAGE], "Wynik": result, "Uwagi": note,
+                     "Zamiennik_URL": "", "Zamiennik_plik": "", "Zamiennik_potwierdzony": ""}
+            if result != CHECK_OK:
+                new_url, new_ok, new_path, new_note = find_replacement(record, engine, images_dir)
+                if new_url:
+                    replaced += 1
+                    entry.update({"Zamiennik_URL": new_url, "Zamiennik_plik": new_path.replace(os.sep, "/"),
+                                  "Zamiennik_potwierdzony": "TAK" if new_ok else "NIE"})
+                    log.info("[id=%s] zamieniono zdjęcie na: %s", record[COL_ID], new_url)
+                else:
+                    rejected += 1
+                    entry["Uwagi"] = f"{note}; {new_note}"
+                    log.info("[id=%s] brak zdjęcia zastępczego — %s", record[COL_ID], new_note)
+            batch.append(entry)
+            if len(batch) >= CHECKPOINT_EVERY or i == len(todo):
+                append_batch(batch, CHECK_COLUMNS, path)
+                batch = []
+                remaining = (len(todo) - i) * (time.time() - started) / i
+                log.info("KONTROLA: %d/%d, zamienione: %d, bez zdjęcia: %d. Pozostało ok. %.1f h.",
+                         i, len(todo), replaced, rejected, remaining / 3600)
+    except KeyboardInterrupt:
+        if batch:
+            append_batch(batch, CHECK_COLUMNS, path)
+        log.warning("Przerwano — sprawdzone zdjęcia są zapisane, kolejne uruchomienie dokończy resztę.")
+    except FatalError as exc:
+        if batch:
+            append_batch(batch, CHECK_COLUMNS, path)
+        log.error("Zatrzymuję kontrolę: %s", exc)
+    split_results(output_path)
+
+
+# =============================================================================
+# PLIKI: CHECKPOINTY, PODZIAŁ NA PEWNE / DO AKCEPTACJI, ZATWIERDZANIE
+# =============================================================================
+def side_path(output_path: str, suffix: str) -> str:
+    base, ext = os.path.splitext(output_path)
+    return f"{base}_{suffix}{ext or '.csv'}"
+
+
+def read_csv(path: str) -> pd.DataFrame:
+    # dtype=str + keep_default_na=False: EAN-y i kody zostają tekstem (bez "5.9e+12" i "nan").
+    return pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+
+
+def count_done_rows(output_path: str, df_in: pd.DataFrame) -> int:
+    """Ile wierszy jest już w pliku wyjściowym (= od którego wiersza wznowić)."""
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        return 0
+    df_out = read_csv(output_path)
+    if any(c not in df_out.columns for c in NEW_COLUMNS):
+        sys.exit(f"Plik {output_path} pochodzi ze starszej wersji skryptu (inne kolumny). "
+                 "Usuń go albo podaj inną nazwę w --output.")
+    done = len(df_out)
+    if done > len(df_in):
+        sys.exit(f"Plik wyjściowy ma więcej wierszy ({done}) niż wejściowy ({len(df_in)}). "
+                 "Czy to na pewno ten sam plik? Usuń/zmień nazwę pliku wyjściowego.")
+    # Kontrola, czy plik wejściowy nie zmienił kolejności od poprzedniego uruchomienia.
+    if done and COL_ID in df_out.columns and COL_ID in df_in.columns:
+        if df_out[COL_ID].iloc[-1] != df_in[COL_ID].iloc[done - 1]:
+            sys.exit(f"Ostatni zapisany wiersz (id={df_out[COL_ID].iloc[-1]}) nie zgadza się z wierszem "
+                     f"{done} pliku wejściowego (id={df_in[COL_ID].iloc[done - 1]}). "
+                     "Plik wejściowy zmienił się od poprzedniego uruchomienia — nie wznawiam, żeby nie "
+                     "pomieszać danych.")
+    return done
+
+
+def append_batch(rows: list[dict], columns: list[str], output_path: str) -> None:
+    """Dopisuje paczkę wierszy na koniec pliku i wymusza zapis na dysk."""
+    write_header = not os.path.exists(output_path) or os.path.getsize(output_path) == 0
+    batch_df = pd.DataFrame(rows, columns=columns)
+    with open(output_path, "a", encoding="utf-8", newline="") as fh:
+        batch_df.to_csv(fh, index=False, header=write_header)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def apply_image_checks(df: pd.DataFrame, checks: dict) -> pd.DataFrame:
+    """Produkt z niesprawdzonym albo odrzuconym zdjęciem nie może być PEWNY."""
+    df = df.copy()
+    for i, row in df.iterrows():
+        if not row[COL_IMAGE]:
+            continue
+        check = checks.get((row[COL_ID], row[COL_IMAGE]), {})
+        result, note = check.get("Wynik", ""), check.get("Uwagi", "")
+        if result == CHECK_OK:
+            continue
+        if result == CHECK_REJECTED and check.get("Zamiennik_URL"):
+            # Odrzucone zdjęcie zastąpione innym, które przeszło kontrolę modelu.
+            df.at[i, COL_IMAGE] = check["Zamiennik_URL"]
+            df.at[i, COL_IMAGE_FILE] = check.get("Zamiennik_plik", "")
+            if check.get("Zamiennik_potwierdzony") == "TAK":
+                continue
+            reason = "zdjęcie zastępcze niepotwierdzone kodem/EAN"
+        elif result == CHECK_REJECTED:
+            # Bez zdjęcia — lepiej żadne niż ze znakiem wodnym albo cudzym logo.
+            df.at[i, COL_IMAGE] = ""
+            df.at[i, COL_IMAGE_FILE] = ""
+            reason = f"brak zdjęcia — odrzucone: {note}"
+        else:
+            reason = "zdjęcie niesprawdzone (uruchom --sprawdz-zdjecia)"
+        df.at[i, COL_STATUS] = STATUS_REVIEW
+        df.at[i, COL_REASON] = "; ".join(r for r in (row[COL_REASON], reason) if r)
+    return df
+
+
+def split_results(output_path: str) -> None:
+    """Dzieli plik roboczy na *_pewne.csv (do importu) i *_do_akceptacji.csv (do przejrzenia)."""
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        return
+    df = apply_image_checks(read_csv(output_path), load_image_checks(output_path))
+    ok_path, review_path = side_path(output_path, "pewne"), side_path(output_path, "do_akceptacji")
+
+    df[df[COL_STATUS] == STATUS_OK].to_csv(ok_path, index=False, encoding="utf-8-sig")
+
+    review = df[df[COL_STATUS] != STATUS_OK].copy()
+    review.insert(0, COL_ACCEPT, "")
+    # Nie nadpisujemy pliku, w którym ktoś już zaczął akceptować produkty.
+    if os.path.exists(review_path):
+        try:
+            existing = read_csv(review_path)
+            if COL_ACCEPT in existing.columns and existing[COL_ACCEPT].str.strip().ne("").any():
+                review_path = side_path(output_path, "do_akceptacji_nowe")
+                log.warning("Plik do akceptacji ma już Twoje oznaczenia — nowa wersja trafia do %s.", review_path)
+        except Exception:
+            pass
+    review.to_csv(review_path, index=False, encoding="utf-8-sig")
+    log.info("PODZIAŁ: %d pewnych -> %s | %d do akceptacji -> %s",
+             len(df) - len(review), ok_path, len(review), review_path)
+    write_preview(df, side_path(output_path, "podglad").rsplit(".", 1)[0] + ".html")
+
+
+ALLOWED_TAGS = ("h2", "h3", "p", "ul", "ol", "li", "strong", "b", "em", "br")
+
+
+def safe_html(fragment: str) -> str:
+    """Zostawia tylko proste tagi opisu (bez atrybutów) — reszta jest wyświetlana jako tekst."""
+    escaped = html.escape(fragment, quote=False)
+    tags = "|".join(ALLOWED_TAGS)
+    return re.sub(rf"&lt;(/?)({tags})(?:\s[^&]*)?&gt;", r"<\1\2>", escaped, flags=re.IGNORECASE)
+
+
+def write_preview(df: pd.DataFrame, path: str) -> None:
+    """Strona HTML do przejrzenia wyników w przeglądarce: wyrenderowany opis + miniatura zdjęcia."""
+    def col(row, name):
+        return str(row.get(name, "") or "")
+
+    cards = []
+    for _, row in df.iterrows():
+        ok = col(row, COL_STATUS) == STATUS_OK
+        img = col(row, COL_IMAGE)
+        local = col(row, COL_IMAGE_FILE)
+        if local and os.path.exists(local):
+            # Lokalna kopia działa w podglądzie także bez internetu i gdy sklep blokuje podlinkowanie.
+            img = os.path.relpath(local, os.path.dirname(os.path.abspath(path))).replace(os.sep, "/")
+        src = col(row, COL_SOURCE)
+        cards.append(
+            f'<article class="card {"ok" if ok else "review"}">'
+            f'<header><span class="badge">{"PEWNY" if ok else "DO AKCEPTACJI"}</span> '
+            f'<b>{html.escape(col(row, COL_NAME))}</b>'
+            f'<small>id {html.escape(col(row, COL_ID))} · kod {html.escape(col(row, COL_CODE))} · '
+            f'EAN {html.escape(col(row, COL_EAN))}</small></header>'
+            + (f'<p class="reason">⚠ {html.escape(col(row, COL_REASON))}</p>' if not ok else "")
+            + '<div class="body">'
+            + (f'<a href="{html.escape(img)}" target="_blank"><img loading="lazy" src="{html.escape(img)}" '
+               f'alt="" referrerpolicy="no-referrer"></a>' if img else '<div class="noimg">brak zdjęcia</div>')
+            + f'<div class="desc">{safe_html(col(row, COL_DESC)) or "<i>brak opisu</i>"}'
+            + (f'<p class="src">Źródło: <a href="{html.escape(src)}" target="_blank" rel="noreferrer">'
+               f'{html.escape(src)}</a></p>' if src else "")
+            + "</div></div></article>")
+    n_ok = int((df[COL_STATUS] == STATUS_OK).sum())
+    page = f"""<!doctype html><html lang="pl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Podgląd produktów</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:0;background:#f4f5f7;color:#1d2433}}
+.top{{position:sticky;top:0;background:#fff;padding:12px 16px;border-bottom:1px solid #ddd;z-index:1}}
+.top button{{margin-right:6px;padding:6px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}}
+.top button.on{{background:#1d2433;color:#fff}}
+main{{max-width:1100px;margin:0 auto;padding:16px}}
+.card{{background:#fff;border-radius:10px;padding:14px 16px;margin-bottom:14px;border-left:6px solid #2e9d5b}}
+.card.review{{border-left-color:#e0a100}}
+header small{{display:block;color:#667;margin-top:4px}}
+.badge{{font-size:12px;padding:2px 8px;border-radius:10px;background:#e3f4ea;color:#1f6f40;margin-right:6px}}
+.review .badge{{background:#fff3cf;color:#8a6100}}
+.reason{{color:#8a6100;background:#fff8e1;padding:6px 10px;border-radius:6px}}
+.body{{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}}
+.body img{{width:200px;max-height:200px;object-fit:contain;border:1px solid #eee;border-radius:6px;background:#fff}}
+.noimg{{width:200px;height:120px;display:flex;align-items:center;justify-content:center;background:#f0f0f0;color:#888;border-radius:6px}}
+.desc{{flex:1;min-width:260px}} .desc h2{{font-size:18px;margin:4px 0 8px}}
+.src{{font-size:12px;color:#667;word-break:break-all}}
+</style></head><body>
+<div class="top"><button class="on" data-f="all">Wszystkie ({len(df)})</button>
+<button data-f="ok">Pewne ({n_ok})</button><button data-f="review">Do akceptacji ({len(df) - n_ok})</button></div>
+<main>{"".join(cards)}</main>
+<script>
+document.querySelectorAll('.top button').forEach(b=>b.onclick=()=>{{
+  document.querySelectorAll('.top button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.card').forEach(c=>c.style.display=
+    (b.dataset.f==='all'||c.classList.contains(b.dataset.f))?'':'none');
+}});
+</script></body></html>"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    log.info("PODGLĄD w przeglądarce: %s", path)
+
+
+def approve(output_path: str, accepted_path: str) -> None:
+    """Łączy produkty pewne z ręcznie zaakceptowanymi w jeden plik do importu."""
+    ok_path = side_path(output_path, "pewne")
+    if not os.path.exists(ok_path):
+        sys.exit(f"Nie ma pliku {ok_path}. Najpierw uruchom przetwarzanie z tym samym --output.")
+    if not os.path.isfile(accepted_path):
+        sys.exit(f"Nie znaleziono pliku z akceptacją: {accepted_path}")
+    ok = read_csv(ok_path)
+    reviewed = read_csv(accepted_path)
+    if COL_ACCEPT not in reviewed.columns:
+        sys.exit(f"W pliku {accepted_path} brakuje kolumny '{COL_ACCEPT}'.")
+    accepted = reviewed[reviewed[COL_ACCEPT].str.strip().str.upper().isin(ACCEPT_VALUES)].drop(columns=[COL_ACCEPT])
+    accepted[COL_STATUS] = "ZAAKCEPTOWANY"
+    result = pd.concat([ok, accepted], ignore_index=True)
+    if COL_ID in result.columns:
+        result = result.drop_duplicates(subset=[COL_ID], keep="last")
+    import_path = side_path(output_path, "do_importu")
+    result.to_csv(import_path, index=False, encoding="utf-8-sig")
+    print(f"Pewne: {len(ok)}, zaakceptowane ręcznie: {len(accepted)} "
+          f"(odrzucone/pominięte: {len(reviewed) - len(accepted)}). Plik do importu: {import_path}")
+
+
+# =============================================================================
+# AKTUALIZACJA SKRYPTU Z GITHUBA
+# =============================================================================
+UPDATE_REPO = "patrykkupczak1996-create/Asy-sten-zakupowy-"
+UPDATE_BRANCH = "claude/b2b-product-enrichment-script-uve0u0"
+UPDATE_DIR = "wzbogacanie_produktow"
+UPDATE_BASE_URL = ""  # pusty = ustalany automatycznie (testy mogą go nadpisać)
+UPDATE_FILES = ("wzbogac_produkty.py", "requirements.txt", "README.md")
+
+
+def _update_base_url() -> str:
+    """Adres plików z najnowszego commita gałęzi.
+
+    Adres z nazwą gałęzi jest przez kilka minut cache'owany przez GitHub (stara wersja),
+    adres z numerem commita — nie. Gdy API GitHuba nie odpowie, używamy nazwy gałęzi.
+    """
+    if UPDATE_BASE_URL:
+        return UPDATE_BASE_URL
+    ref = UPDATE_BRANCH
+    try:
+        resp = requests.get(f"https://api.github.com/repos/{UPDATE_REPO}/commits/{UPDATE_BRANCH}",
+                            headers={"Accept": "application/vnd.github.sha"}, timeout=10)
+        if resp.status_code == 200 and re.fullmatch(r"[0-9a-f]{40}", resp.text.strip()):
+            ref = resp.text.strip()
+    except Exception:
+        pass
+    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{ref}/{UPDATE_DIR}/"
+
+
+def _download_text(name: str, timeout: int, base_url: str | None = None) -> bytes:
+    resp = requests.get((base_url or _update_base_url()) + name, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+
+def check_for_update() -> None:
+    """Przy starcie: jeśli na GitHubie jest inna wersja skryptu, podpowiada --aktualizuj. Błędy ignoruje."""
+    try:
+        remote = _download_text("wzbogac_produkty.py", timeout=5)
+        with open(os.path.abspath(__file__), "rb") as fh:
+            local = fh.read()
+        if remote.replace(b"\r\n", b"\n") != local.replace(b"\r\n", b"\n"):
+            log.warning("Jest nowsza wersja skryptu. Zaktualizuj: py wzbogac_produkty.py --aktualizuj")
+    except Exception:
+        pass  # brak internetu / GitHub niedostępny — pracujemy na obecnej wersji
+
+
+def self_update() -> None:
+    """Pobiera najnowsze pliki skryptu z GitHuba i podmienia je w folderze skryptu."""
+    folder = os.path.dirname(os.path.abspath(__file__))
+    downloaded = {}
+    base_url = _update_base_url()
+    for name in UPDATE_FILES:
+        try:
+            downloaded[name] = _download_text(name, timeout=30, base_url=base_url)
+        except Exception as exc:
+            sys.exit(f"Nie udało się pobrać {name}: {exc}. Nic nie zostało zmienione.")
+    try:
+        # Nie podmieniamy działającego skryptu na uszkodzony plik (np. stronę błędu zamiast kodu).
+        compile(downloaded["wzbogac_produkty.py"], "wzbogac_produkty.py", "exec")
+    except SyntaxError as exc:
+        sys.exit(f"Pobrany skrypt jest uszkodzony ({exc}). Nic nie zostało zmienione.")
+
+    old_requirements = b""
+    req_path = os.path.join(folder, "requirements.txt")
+    if os.path.exists(req_path):
+        with open(req_path, "rb") as fh:
+            old_requirements = fh.read()
+
+    changed = []
+    for name, content in downloaded.items():
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            with open(path, "rb") as fh:
+                if fh.read().replace(b"\r\n", b"\n") == content.replace(b"\r\n", b"\n"):
+                    continue
+        with open(path + ".nowy", "wb") as fh:
+            fh.write(content)
+        os.replace(path + ".nowy", path)
+        changed.append(name)
+
+    if not changed:
+        print("Masz już najnowszą wersję.")
+        return
+    print("Zaktualizowano: " + ", ".join(changed))
+    if downloaded["requirements.txt"].replace(b"\r\n", b"\n") != old_requirements.replace(b"\r\n", b"\n"):
+        print("Zmieniły się wymagane biblioteki — uruchom: py -m pip install -r requirements.txt")
+
+
+# =============================================================================
+# BLOKADA PLIKU WYNIKÓW I PONOWNE PRZETWARZANIE PRODUKTÓW BEZ ŹRÓDŁA
+# =============================================================================
+NO_SOURCE_REASON = "nie znaleziono strony"
+REPROCESS_SAVE_EVERY = 50    # co ile ponownie przetworzonych wierszy zapisać cały plik
+
+
+def lock_output(output_path: str):
+    """Blokada <plik>.lock na czas działania procesu. System zwalnia ją sam, gdy proces się zakończy."""
+    handle = open(output_path + ".lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(f"Plik {output_path} jest już przetwarzany przez inne uruchomienie skryptu. "
+                 "Poczekaj, aż skończy, albo zatrzymaj je, zanim uruchomisz kolejne.")
+    return handle
+
+
+def save_dataframe(df: pd.DataFrame, path: str) -> None:
+    """Zapis całego pliku przez plik tymczasowy — przerwanie w trakcie nie uszkodzi wyników."""
+    tmp = path + ".tmp"
+    df.to_csv(tmp, index=False, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def recheck_statuses(output_path: str) -> None:
+    """--przelicz-statusy: ponowna kontrola zapisanych opisów bez generowania, statusy poprawiane na miejscu.
+
+    Poprawia literówki w opisach (słowa o jedną literę różne od nazwy produktu), sprawdza na nowo nagłówek
+    (rdzeń rzeczownika z nazwy) i zdejmuje odrzucenie „AI: strona nie pasuje”, jeśli dotyczyło tylko EAN,
+    a produkt nie ma EAN w danych. Przed zmianą robi kopię pliku.
+    """
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path}.")
+    df = read_csv(output_path)
+    if not NAME_WORD_FREQ:
+        # Statystyka słów z pełnej bazy (produkty.csv obok pliku wyników), a gdy jej brak — z nazw w wynikach.
+        full = os.path.join(os.path.dirname(os.path.abspath(output_path)), "produkty.csv")
+        names = read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME]
+        build_name_word_freq(names)
+    backup = f"{os.path.splitext(output_path)[0]}_kopia_przed_przeliczeniem_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    shutil.copy2(output_path, backup)
+    changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
+    typo_rows, typo_examples = 0, []
+    foreign_rows, foreign_examples = 0, []
+    for i in df.index:
+        row = df.loc[i]
+        old_reasons = [r for r in row[COL_REASON].split("; ") if r]
+        reasons = []
+        if row[COL_DESC]:
+            clean_desc, foreign = strip_foreign_script(row[COL_DESC])
+            if foreign:
+                df.at[i, COL_DESC] = clean_desc
+                foreign_rows += 1
+                foreign_examples.append(f"id {row[COL_ID]}: {' '.join(foreign)[:30]}")
+                if not any(r.startswith(FOREIGN_REASON_PREFIX) for r in old_reasons):
+                    reasons.append(f"{FOREIGN_REASON_PREFIX}: {' '.join(foreign)[:40]}")
+                row = df.loc[i]
+            fixed_desc, typo_fixes = fix_typos(row[COL_DESC], row[COL_NAME])
+            if typo_fixes:
+                df.at[i, COL_DESC] = fixed_desc
+                typo_rows += 1
+                typo_examples.append(f"id {row[COL_ID]}: {', '.join(typo_fixes)} („{row[COL_NAME][:50]}”)")
+                reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
+                row = df.loc[i]
+        for reason in old_reasons:
+            if reason.startswith(HEADING_REASON_PREFIX):
+                continue  # nagłówek sprawdzamy na nowo poniżej
+            if (reason.startswith("AI: strona nie pasuje") and not row[COL_EAN].strip()
+                    and ean_only_mismatch(reason)):
+                continue  # tylko EAN, którego nie mamy w danych — liczy się kod producenta
+            reasons.append(reason)
+        if row[COL_DESC] and not heading_has_type(row[COL_DESC], row[COL_NAME], row[COL_PRODUCER]):
+            reasons.append(heading_reason(row[COL_NAME], row[COL_PRODUCER]))
+        status = status_for(reasons)
+        if reasons != old_reasons or status != row[COL_STATUS]:
+            changes["zmieniony powód"] += 1
+            if status != row[COL_STATUS]:
+                changes[f"→ {status}"] += 1
+            df.at[i, COL_REASON] = "; ".join(reasons)
+            df.at[i, COL_STATUS] = status
+    save_dataframe(df, output_path)
+    log.info("PRZELICZ: %d wierszy, zmienione powody: %d, %s → PEWNY: %d, → DO_AKCEPTACJI: %d. Kopia: %s",
+             len(df), changes["zmieniony powód"], STATUS_REVIEW, changes["→ PEWNY"],
+             changes["→ DO_AKCEPTACJI"], backup)
+    log.info("PRZELICZ: poprawione literówki w %d opisach. Przykłady:", typo_rows)
+    for example in typo_examples[:10]:
+        log.info("   %s", example)
+    log.info("PRZELICZ: usunięte obce znaki (np. chińskie) w %d opisach — te produkty są do akceptacji.%s",
+             foreign_rows, (" Np. " + "; ".join(foreign_examples[:5])) if foreign_examples else "")
+    split_results(output_path)
+
+
+def reprocess_missing_sources(args) -> None:
+    """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony”, resztę pliku zostawia bez zmian."""
+    if not os.path.exists(args.output):
+        sys.exit(f"Nie ma pliku {args.output}.")
+    df = read_csv(args.output)
+    full = os.path.join(os.path.dirname(os.path.abspath(args.output)), "produkty.csv")
+    build_name_word_freq(read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME])
+    todo = [i for i in df.index if NO_SOURCE_REASON in df.at[i, COL_REASON]]
+    if args.limit:
+        todo = todo[:args.limit]
+    log.info("PONÓW: %d z %d produktów bez potwierdzonej strony. AI: %s (%s).%s",
+             len(todo), len(df), AI["name"], ", ".join(AI["models"]),
+             " Tryb --bez-zdjec." if args.bez_zdjec else "")
+    if not todo:
+        split_results(args.output)
+        return
+    images_dir = None if (args.bez_pobierania or args.bez_zdjec) else os.path.relpath(
+        os.path.join(os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR))
+    started, found, unsaved, exit_code = time.time(), 0, 0, 0
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            for b in range(0, len(todo), CHECKPOINT_EVERY):
+                batch = todo[b:b + CHECKPOINT_EVERY]
+                results = list(pool.map(
+                    lambda i: process_row(df.loc[i].to_dict(), i, args.search, images_dir, not args.bez_zdjec),
+                    batch))
+                for i, out in zip(batch, results):
+                    for col in NEW_COLUMNS:
+                        df.at[i, col] = out[col]
+                    found += NO_SOURCE_REASON not in out[COL_REASON]
+                unsaved += len(batch)
+                if unsaved >= REPROCESS_SAVE_EVERY or b + CHECKPOINT_EVERY >= len(todo):
+                    save_dataframe(df, args.output)
+                    unsaved = 0
+                done = b + len(batch)
+                log.info("PONÓW: %d/%d, znalezione strony: %d. Pozostało ok. %.1f h.", done, len(todo), found,
+                         (len(todo) - done) * (time.time() - started) / done / 3600)
+    except FatalError as exc:
+        log.error("Zatrzymuję: %s", exc)
+        exit_code = 1
+    except KeyboardInterrupt:
+        log.warning("Przerwano (Ctrl+C) — zapisuję to, co już przetworzone.")
+        exit_code = 130
+    if unsaved:
+        save_dataframe(df, args.output)
+    split_results(args.output)
+    log.info("PONÓW: koniec. Znaleziono strony dla %d produktów.", found)
+    if exit_code:
+        sys.exit(exit_code)
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Wzbogacanie produktów B2B o opisy HTML i zdjęcia.")
+    parser.add_argument("--input", "-i", help="Plik CSV z Google Sheets (ścieżka lub link .../export?format=csv)")
+    parser.add_argument("--output", "-o", default="produkty_wzbogacone.csv", help="Plik roboczy z wynikami")
+    parser.add_argument("--ai", choices=sorted(AI_PROVIDERS), default=AI_PROVIDER,
+                        help="Model do pisania opisów (domyślnie: %(default)s)")
+    parser.add_argument("--search", choices=["ddg", "serpapi", "google"], default=SEARCH_ENGINE,
+                        help="Wyszukiwarka stron i zdjęć (domyślnie: %(default)s)")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help="Ile wierszy przetwarzać równolegle (domyślnie: %(default)s)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Przetwórz tylko N kolejnych wierszy (do testów, np. --limit 5)")
+    parser.add_argument("--sep", default=",", help="Separator kolumn w pliku wejściowym (domyślnie przecinek)")
+    parser.add_argument("--bez-pobierania", action="store_true",
+                        help="Nie pobieraj zdjęć na dysk (zapisz tylko linki)")
+    parser.add_argument("--sprawdz-zdjecia", action="store_true",
+                        help="Etap 2: sprawdź zdjęcia modelem wizyjnym Ollamy (znak wodny, logo, czy to produkt)")
+    parser.add_argument("--utworz-probke", type=int, metavar="N",
+                        help="Zapisz losową próbkę ok. N produktów z --input do produkty_probka.csv "
+                             "(proporcjonalnie do producentów) — do testów na całej bazie")
+    parser.add_argument("--producenci", metavar="LISTA",
+                        help="Z --utworz-probke: tylko ci producenci, po przecinku (np. \"GEBERIT,WAVIN\")")
+    parser.add_argument("--diagnoza", nargs="+", metavar="ID",
+                        help="Pokaż krok po kroku, jak skrypt szuka strony produktu (id z pliku --output)")
+    parser.add_argument("--test-wyszukiwarki", metavar="KOD",
+                        help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
+    parser.add_argument("--aktualizuj", action="store_true",
+                        help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
+    parser.add_argument("--zatwierdz", metavar="PLIK",
+                        help="Plik do akceptacji z kolumną Akceptacja=TAK -> tworzy *_do_importu.csv")
+    parser.add_argument("--bez-zdjec", action="store_true",
+                        help="Tylko opisy: bez szukania i pobierania zdjęć; PEWNY zależy od źródła i opisu")
+    parser.add_argument("--przelicz-statusy", action="store_true",
+                        help="Ponowna kontrola zapisanych opisów w --output bez generowania; poprawia statusy "
+                             "na miejscu (przed zmianą robi kopię pliku)")
+    parser.add_argument("--ponow-brak-strony", action="store_true",
+                        help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony”; "
+                             "pozostałe wiersze zostają bez zmian")
+    args = parser.parse_args()
+
+    if args.aktualizuj:
+        self_update()
+        return
+    if args.utworz_probke:
+        if not args.input:
+            parser.error("--utworz-probke wymaga --input")
+        make_sample(args.input, args.utworz_probke, args.sep,
+                    producers=args.producenci.split(",") if args.producenci else None)
+        return
+    if args.test_wyszukiwarki:
+        test_direct_search(args.test_wyszukiwarki)
+        return
+    if args.diagnoza:
+        diagnose(args.output, args.diagnoza, args.search)
+        return
+    if args.zatwierdz:
+        approve(args.output, args.zatwierdz)
+        return
+    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony and not args.przelicz_statusy:
+        parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia, --ponow-brak-strony albo --zatwierdz")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(),
+                  logging.FileHandler("wzbogacanie.log", encoding="utf-8")],
+    )
+    # Biblioteki (httpx, ddgs, openai) logują każde zapytanie — to zasłania komunikaty skryptu.
+    logging.getLogger().setLevel(logging.WARNING)
+    log.setLevel(logging.INFO)
+    check_for_update()
+    # Jeden przebieg naraz na tym samym pliku wyników — dwa dopisywałyby/nadpisywały te same wiersze.
+    _lock = lock_output(args.output)  # noqa: F841 — trzymamy uchwyt do końca procesu
+
+    if args.przelicz_statusy:
+        recheck_statuses(args.output)
+        return
+
+    if args.ponow_brak_strony:
+        configure_ai(args.ai)
+        reprocess_missing_sources(args)
+        return
+
+    if args.sprawdz_zdjecia:
+        images_dir = None if args.bez_pobierania else os.path.relpath(
+            os.path.join(os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR))
+        run_image_check(args.output, args.search, images_dir)
+        return
+
+    configure_ai(args.ai)
+    if args.search == "serpapi" and not SERPAPI_API_KEY:
+        sys.exit("Wybrano SerpApi, ale brak SERPAPI_API_KEY.")
+    if args.search == "google" and not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
+        sys.exit("Wybrano Google Custom Search, ale brak GOOGLE_API_KEY lub GOOGLE_CSE_ID.")
+
+    if "://" not in args.input and not os.path.isfile(args.input):
+        csv_files = sorted(f for f in os.listdir(".") if f.lower().endswith(".csv"))
+        sys.exit(f"Nie znaleziono pliku wejściowego '{args.input}' w folderze {os.getcwd()}.\n"
+                 f"Pliki CSV w tym folderze: {', '.join(csv_files) or 'brak'}.\n"
+                 "Skopiuj tu plik pobrany z Google Sheets albo podaj pełną ścieżkę w --input "
+                 "(w cudzysłowie, jeśli zawiera spacje).")
+    df_in = pd.read_csv(args.input, dtype=str, keep_default_na=False, sep=args.sep, encoding="utf-8-sig")
+    if COL_NAME in df_in.columns:
+        build_name_word_freq(df_in[COL_NAME])  # do poprawiania literówek modelu (fix_typos)
+    missing = [c for c in (COL_ID, COL_CODE, COL_PRODUCER, COL_EAN, COL_CATEGORY, COL_NAME)
+               if c not in df_in.columns]
+    if missing:
+        log.warning("Brak kolumn w pliku wejściowym: %s (dostępne: %s)", missing, list(df_in.columns))
+    if COL_NAME not in df_in.columns:
+        sys.exit(f"Nie znaleziono kolumny z nazwą produktu '{COL_NAME}'. Sprawdź separator (--sep).")
+
+    columns = [c for c in df_in.columns if c not in NEW_COLUMNS + [COL_ACCEPT]] + NEW_COLUMNS
+    total = len(df_in)
+    start = count_done_rows(args.output, df_in)
+    end = total if args.limit is None else min(total, start + args.limit)
+
+    if start >= total:
+        log.info("Wszystkie %d wiersze są już przetworzone w %s.", total, args.output)
+        split_results(args.output)
+        return
+    log.info("Wierszy w pliku: %d. Start od wiersza %d%s. AI: %s (%s). Wyszukiwarka: %s. Wątki: %d.",
+             total, start + 1, " (wznowienie)" if start else "", AI["name"], ", ".join(AI["models"]),
+             args.search, args.workers)
+
+    records = df_in.to_dict("records")
+    images_dir = None if (args.bez_pobierania or args.bez_zdjec) else os.path.join(
+        os.path.dirname(os.path.abspath(args.output)), IMAGES_DIR)
+    if args.bez_zdjec:
+        log.info("Tryb --bez-zdjec: tylko opisy, zdjęcia nie są szukane.")
+    if images_dir:
+        # Ścieżki w CSV względem bieżącego folderu (zwykle "zdjecia/28846_AG0828.jpg").
+        images_dir = os.path.relpath(images_dir)
+        log.info("Zdjęcia będą pobierane do folderu: %s", os.path.abspath(images_dir))
+    started_at = time.time()
+    done_now = 0
+    exit_code = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            for batch_start in range(start, end, CHECKPOINT_EVERY):
+                batch_end = min(batch_start + CHECKPOINT_EVERY, end)
+                # pool.map zachowuje kolejność wierszy, więc plik wyjściowy ma ten sam porządek co wejściowy.
+                results = list(pool.map(lambda p: process_row(records[p], p, args.search, images_dir,
+                                                              not args.bez_zdjec),
+                                        range(batch_start, batch_end)))
+                append_batch(results, columns, args.output)
+
+                done_now += len(results)
+                elapsed = time.time() - started_at
+                remaining = (total - batch_end) * elapsed / done_now
+                log.info("CHECKPOINT: zapisano %d/%d (%.1f%%). Pozostało ok. %.1f h.",
+                         batch_end, total, 100 * batch_end / total, remaining / 3600)
+    except FatalError as exc:
+        log.error("Zatrzymuję skrypt: %s", exc)
+        log.error("Dotychczasowy postęp jest zapisany w %s — po poprawieniu problemu uruchom skrypt ponownie.",
+                  args.output)
+        exit_code = 1
+    except KeyboardInterrupt:
+        log.warning("Przerwano (Ctrl+C). Zapisane paczki zostają w %s; niedokończona paczka "
+                    "zostanie przetworzona ponownie przy następnym uruchomieniu.", args.output)
+        exit_code = 130
+
+    split_results(args.output)
+    if exit_code:
+        sys.exit(exit_code)
+    log.info("Gotowe. Przetworzono %d wierszy w tym uruchomieniu.", done_now)
+
+
+if __name__ == "__main__":
+    main()

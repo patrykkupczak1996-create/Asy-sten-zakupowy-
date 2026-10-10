@@ -1,0 +1,10 @@
+# Wzbogacanie produktow B2B (opisy HTML + zdjecia) pod import do IdoSell
+pandas>=2.0
+openai>=1.40
+requests>=2.31
+# Darmowe wyszukiwanie zdjec przez DuckDuckGo (domyslna wyszukiwarka)
+ddgs>=9.0
+# Odczyt tekstu i zdjec ze stron produktow (weryfikacja kodu/EAN)
+lxml>=5.0
+# Sprawdzanie wymiarow zdjec (odrzucanie logotypow, banerow, ikon)
+Pillow>=10.0
