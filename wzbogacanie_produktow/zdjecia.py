@@ -417,7 +417,14 @@ def bigger_variants(url: str) -> list[str]:
     prefixed = re.sub(r"/\d{2,4}_{2,3}(?=[^/]+$)", "/", path)  # rurex.pl i in.: „/f83/500___5.jpg” → „/f83/5.jpg”
     if prefixed != path:
         variants.append(prefixed)
+    # „/files/thumbs/2021/07/nazwa_123-4c16efdc.jpg” → oryginał bez katalogu miniatur (i bez skrótu rozmiaru)
+    no_thumbs = re.sub(r"/thumbs?/", "/", path, count=1, flags=re.IGNORECASE)
+    if no_thumbs != path:
+        no_hash = re.sub(r"-[0-9a-f]{6,12}(?=\.[A-Za-z]{3,4}$)", "", no_thumbs)
+        variants += [no_hash, no_thumbs] if no_hash != no_thumbs else [no_thumbs]
     for small, big in SIZE_WORDS:
+        if small == "thumb" and "thumbs" in path.lower():
+            continue  # „thumbs” już obsłużone — „thumb” dałoby „larges”
         if small in path.lower():
             variants.append(re.sub(re.escape(small), big, path, flags=re.IGNORECASE))
     out = [urlunsplit((parts.scheme, parts.netloc, v, parts.query, "")) for v in variants]
