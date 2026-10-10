@@ -391,7 +391,9 @@ def producer_shop_candidates(record: dict) -> tuple[list[tuple[str, bool, str]],
 # Sklepy pokazują miniatury, a pełny rozmiar leży pod podobnym adresem:
 # WordPress „zdjecie-150x150.jpg” → „zdjecie.jpg”, „/thumb/”, „_small” → „/large/”, „_large”, parametry „?w=100”.
 SIZE_WORDS = [("thumbnail", "large"), ("thumbs", "large"), ("thumb", "large"), ("small", "large"),
-              ("mini", "large"), ("medium", "large"), ("_min", "_max"), ("/s/", "/l/"), ("/m/", "/l/")]
+              ("mini", "large"), ("medium", "large"), ("_min", "_max"), ("/s/", "/l/"), ("/m/", "/l/"),
+              ("/middle/", "/big/"), ("/middle/", "/large/"), ("/middle/", "/original/"),  # np. saniland.sk
+              ("large_default", "thickbox_default"), ("home_default", "large_default")]  # PrestaShop
 
 
 def bigger_variants(url: str) -> list[str]:
