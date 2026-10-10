@@ -348,9 +348,14 @@ def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
         if url == record.get(COL_SOURCE) or w.is_watermark_site(url):
             continue
         page = w.fetch_page(url)
-        if not page or (m.find(page[0]) is None and not m.in_short_text(url, page[3] if len(page) > 3 else "")):
+        if not page:
             continue
-        found += page_candidates(url, m, True, page)
+        if m.find(page[0]) is not None or m.in_short_text(url, page[3] if len(page) > 3 else ""):
+            found += page_candidates(url, m, True, page)
+        elif hasattr(w, "found_only_by_search") and w.found_only_by_search(code, url):
+            # Karta serii u producenta dopasowana wzorcem SKU (Bohamet: 21.560.DN.1 dla 21.560.100.1) — kodu
+            # na karcie nie ma, ale to ten produkt w innym rozmiarze: zdjęcie do akceptacji, nie PEWNE.
+            found += page_candidates(url, m, False, page)
     return found
 
 
@@ -584,6 +589,8 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
         problems = []
         if stage == "producent":
             problems.append(f"zdjęcie serii ze strony producenta, dopasowane po nazwie („{shop_title}”)")
+        elif stage == "producent-kod" and not verified:
+            problems.append("zdjęcie serii ze strony producenta, karta dopasowana wzorcem kodu (np. 21.560.DN.1)")
         elif not verified:
             problems.append("zdjęcie niepotwierdzone kodem/EAN")
         if not vision:
