@@ -291,11 +291,15 @@ TEKST ZE STRONY ŹRÓDŁOWEJ ({url}):
 \"\"\"
 
 Zasady:
-1. Najpierw sprawdź, czy tekst ze strony dotyczy DOKŁADNIE tego produktu: ten sam kod lub EAN
-   i parametry zgodne z nazwą (np. DN, PN, średnice). Jeśli cokolwiek się nie zgadza,
-   ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
-   Jeśli EAN w kartotece to „brak”, NIE oceniaj EAN ze strony (my go po prostu nie mamy) —
-   o zgodności decyduje kod producenta i parametry.
+1. Najpierw sprawdź zgodność techniczną tekstu ze strony z kartoteką. "ten_sam_produkt": true, jeśli:
+   a) na stronie jest ten sam kod producenta ({code}) — to wystarczy, ALBO
+   b) zgadza się rodzaj elementu (np. zasuwa, łącznik, zawór, kolano) ORAZ kluczowy wymiar
+      (DN, PN albo średnica) z nazwy.
+   Różnice w zapisie i rozwinięciu skrótów to NIE niezgodność (np. „RK” = „rurowo-kołnierzowy”,
+   „GW” = „gwint wewnętrzny”, „DN 50” = „DN50”). "ten_sam_produkt": false tylko przy wyraźnej sprzeczności:
+   inny kod producenta przy tym produkcie, inny rodzaj elementu albo inny DN/PN/średnica — w "uwagi" napisz
+   krótko, co się nie zgadza.
+   Jeśli EAN w kartotece to „brak”, NIE oceniaj EAN ze strony (my go po prostu nie mamy).
 2. Opis: ok. 300–600 znaków (bez znaczników HTML), 2–3 krótkie akapity. Opis ma być ogólny, marketingowy,
    skupiony na przeznaczeniu i korzyściach dla instalatora: do czego służy produkt, w jakich instalacjach
    się go stosuje, jakie zadanie w nich spełnia. Tekst źródłowy służy do potwierdzenia produktu i zrozumienia
@@ -2116,7 +2120,12 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
             desc = result["opis_html"]
             if source and result.get("ten_sam_produkt") is not True:
                 uwagi = str(result.get("uwagi") or "")
-                if not row["ean"] and ean_only_mismatch(uwagi):
+                if m.code_re and m.code_re.search(f"{source.get('title', '')} {source.get('excerpt', '')}"):
+                    # Zasada akceptacji: zgodny kod katalogowy na stronie wystarcza (różnice w opisie,
+                    # skrótach czy parametrach na tej samej karcie nie są powodem odrzucenia).
+                    log.info("%s AI miało zastrzeżenia, ale kod %s jest na stronie — akceptuję (%s)",
+                             row_label, row["code"], uwagi)
+                elif not row["ean"] and ean_only_mismatch(uwagi):
                     # Nie mamy EAN w danych — EAN na stronie nie może być powodem odrzucenia; liczy się kod.
                     log.info("%s AI zgłosiło tylko niezgodność EAN, a produkt nie ma EAN w danych — "
                              "pomijam (%s)", row_label, uwagi)
@@ -2667,6 +2676,7 @@ def self_update() -> None:
 # BLOKADA PLIKU WYNIKÓW I PONOWNE PRZETWARZANIE PRODUKTÓW BEZ ŹRÓDŁA
 # =============================================================================
 NO_SOURCE_REASON = "nie znaleziono strony"
+AI_MISMATCH_REASON = "AI: strona nie pasuje"
 REPROCESS_SAVE_EVERY = 50    # co ile ponownie przetworzonych wierszy zapisać cały plik
 
 
@@ -2763,16 +2773,18 @@ def recheck_statuses(output_path: str) -> None:
 
 
 def reprocess_missing_sources(args) -> None:
-    """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony”, resztę pliku zostawia bez zmian."""
+    """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony” albo „AI: strona nie pasuje”,
+    resztę pliku zostawia bez zmian."""
     if not os.path.exists(args.output):
         sys.exit(f"Nie ma pliku {args.output}.")
     df = read_csv(args.output)
     full = os.path.join(os.path.dirname(os.path.abspath(args.output)), "produkty.csv")
     build_name_word_freq(read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME])
-    todo = [i for i in df.index if NO_SOURCE_REASON in df.at[i, COL_REASON]]
+    # Także „AI: strona nie pasuje” — sprawdzane na nowo według zasady akceptacji (kod albo rodzaj + wymiar).
+    todo = [i for i in df.index if NO_SOURCE_REASON in df.at[i, COL_REASON] or AI_MISMATCH_REASON in df.at[i, COL_REASON]]
     if args.limit:
         todo = todo[:args.limit]
-    log.info("PONÓW: %d z %d produktów bez potwierdzonej strony. AI: %s (%s).%s",
+    log.info("PONÓW: %d z %d produktów bez potwierdzonej strony lub odrzuconych przez AI. AI: %s (%s).%s",
              len(todo), len(df), AI["name"], ", ".join(AI["models"]),
              " Tryb --bez-zdjec." if args.bez_zdjec else "")
     if not todo:
@@ -2852,7 +2864,7 @@ def main() -> None:
                         help="Ponowna kontrola zapisanych opisów w --output bez generowania; poprawia statusy "
                              "na miejscu (przed zmianą robi kopię pliku)")
     parser.add_argument("--ponow-brak-strony", action="store_true",
-                        help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony”; "
+                        help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony” albo „AI: strona nie pasuje”; "
                              "pozostałe wiersze zostają bez zmian")
     args = parser.parse_args()
 
