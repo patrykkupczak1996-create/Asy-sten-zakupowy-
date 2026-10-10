@@ -1456,6 +1456,7 @@ BANNED_PHRASES = [
     (r"(?:dług[oi]?\w*\s*)?trwał(?:ość|ości|y|a|e|ego|ej|ym|ych)\b|długotrwał\w*|żywotnoś\w*", r"trwał|żywotnoś"),
 ]
 MIN_DESC_CHARS = 200          # opis krótszy po usunięciu ogólników idzie do akceptacji
+SHORT_GENERAL_PREFIX = "opis za krótki po usunięciu danych spoza nazwy"
 MIN_NAME_ONLY_CHARS = 150     # opis (bez nagłówka) krótszy po usunięciu danych spoza nazwy — do akceptacji
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ0-9<])")
 
@@ -1777,7 +1778,7 @@ def review_description(desc_html: str, row: dict, source: dict | None, row_label
         log.info("%s usunięte dane spoza nazwy: %s", row_label, "; ".join(extras))
     length = len(_plain(re.sub(r"<h2>.*?</h2>", "", desc_html, flags=re.I | re.S)))
     if length < MIN_NAME_ONLY_CHARS:
-        reasons.append(f"opis za krótki po usunięciu danych spoza nazwy ({length} znaków)")
+        reasons.append(f"{SHORT_GENERAL_PREFIX} ({length} znaków)")
     heading = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.I | re.S)
     if heading:
         invented = sorted(_numbers(_plain(heading.group(1))) - _numbers(row["name"]) - ABBREVIATION_NUMBERS)
@@ -2436,6 +2437,7 @@ def recheck_statuses(output_path: str) -> None:
     changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
     typo_rows, typo_examples = 0, []
     foreign_rows, foreign_examples = 0, []
+    general_rows, general_examples = 0, []
     for i in df.index:
         row = df.loc[i]
         old_reasons = [r for r in row[COL_REASON].split("; ") if r]
@@ -2456,6 +2458,16 @@ def recheck_statuses(output_path: str) -> None:
                 typo_examples.append(f"id {row[COL_ID]}: {', '.join(typo_fixes)} („{row[COL_NAME][:50]}”)")
                 reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
                 row = df.loc[i]
+            # Opisy sprzed zmiany na „ogólne”: usuwamy dane techniczne spoza nazwy (jak przy nowych opisach).
+            general_desc, extras = strip_name_only_extras(row[COL_DESC], row[COL_NAME])
+            if extras:
+                df.at[i, COL_DESC] = general_desc
+                general_rows += 1
+                general_examples.append(f"id {row[COL_ID]}: {extras[0][:70]}")
+                row = df.loc[i]
+                length = len(_plain(re.sub(r"<h2>.*?</h2>", "", general_desc, flags=re.I | re.S)))
+                if length < MIN_NAME_ONLY_CHARS and not any(r.startswith(SHORT_GENERAL_PREFIX) for r in old_reasons):
+                    reasons.append(f"{SHORT_GENERAL_PREFIX} ({length} znaków)")
         for reason in old_reasons:
             if reason.startswith(HEADING_REASON_PREFIX):
                 continue  # nagłówek sprawdzamy na nowo poniżej
@@ -2481,6 +2493,8 @@ def recheck_statuses(output_path: str) -> None:
         log.info("   %s", example)
     log.info("PRZELICZ: usunięte obce znaki (np. chińskie) w %d opisach — te produkty są do akceptacji.%s",
              foreign_rows, (" Np. " + "; ".join(foreign_examples[:5])) if foreign_examples else "")
+    log.info("PRZELICZ: uogólnione opisy (usunięte dane techniczne spoza nazwy) w %d opisach.%s",
+             general_rows, (" Np. " + "; ".join(general_examples[:5])) if general_examples else "")
     split_results(output_path)
 
 
