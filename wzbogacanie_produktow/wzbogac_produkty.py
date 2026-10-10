@@ -1165,11 +1165,28 @@ def _call_openai(prompt: str) -> dict:
     raise last_error  # wszystkie modele zajęte — with_retry odczeka i spróbuje ponownie
 
 
-def _call_ollama(model: str, prompt: str) -> dict:
+OLLAMA_REPEAT_PENALTY = 1.05  # 1.15 wypychało Qwena w chiński/rosyjski i puste odpowiedzi; 1.05 to zalecenie Qwena
+
+
+def _call_ollama(model: str, prompt: str, require_desc: bool = False) -> dict:
     """Ollama przez jej własne API — pozwala ustawić większy kontekst (num_ctx).
 
     Domyślny kontekst Ollamy (2–4 tys. tokenów) ucinałby tekst strony źródłowej.
+    Gdy opis wyjdzie pusty albo w obcym alfabecie, od razu jedna druga próba z innymi ustawieniami
+    (bez kary za powtórzenia, trochę wyższa temperatura) — ta sama próba dałaby zwykle to samo.
     """
+    data = _ollama_once(model, prompt, 0.1, OLLAMA_REPEAT_PENALTY)
+    if require_desc:
+        desc = str(data.get("opis_html") or "")
+        if not clean_html(desc) or FOREIGN_SCRIPT_RE.search(desc):
+            second = _ollama_once(model, prompt, 0.3, 1.0)
+            second_desc = str(second.get("opis_html") or "")
+            if clean_html(second_desc) and (not FOREIGN_SCRIPT_RE.search(second_desc) or not clean_html(desc)):
+                data = second
+    return data
+
+
+def _ollama_once(model: str, prompt: str, temperature: float, repeat_penalty: float) -> dict:
     host = AI["base_url"].removesuffix("/v1")
     resp = requests.post(host + "/api/chat", timeout=AI.get("timeout", AI_TIMEOUT), json={
         "model": model,
@@ -1177,9 +1194,8 @@ def _call_ollama(model: str, prompt: str) -> dict:
         "format": "json",
         "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                      {"role": "user", "content": prompt}],
-        # repeat_penalty 1.15 — mniej zapętlania się modelu (powtórzenia, puste/ucięte odpowiedzi)
-        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": 0.1, "num_predict": AI["max_tokens"],
-                    "repeat_penalty": 1.15},
+        "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": temperature, "num_predict": AI["max_tokens"],
+                    "repeat_penalty": repeat_penalty},
     })
     resp.raise_for_status()
     data = resp.json()
@@ -1202,7 +1218,7 @@ def ai_json(prompt: str) -> dict:
 
 def _call_model(model: str, prompt: str, require_desc: bool = True) -> dict:
     if AI["name"] == "Ollama":
-        data = _call_ollama(model, prompt)
+        data = _call_ollama(model, prompt, require_desc)
         if not require_desc:
             return data
         data["opis_html"] = clean_html(str(data.get("opis_html") or ""))
