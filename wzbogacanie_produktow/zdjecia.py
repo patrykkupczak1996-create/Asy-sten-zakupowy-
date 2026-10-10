@@ -12,7 +12,7 @@ czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
 
   py zdjecia.py --limit 20          test na 20 produktach
   py zdjecia.py                     cała baza (wznawia od miejsca przerwania, Ctrl+C = przerwa)
-  py zdjecia.py --szukaj            produkty bez zdjęcia na stronie źródłowej: także wyszukiwarka obrazów
+  py zdjecia.py --szukaj            na końcu także wyszukiwarka obrazów (inne strony z kodem/EAN są zawsze)
   py zdjecia.py --ponow-brak --szukaj   jeszcze raz produkty, które zostały bez zdjęcia
   py zdjecia.py --pomin eksport_idosell.csv   pomiń produkty, które mają już zdjęcie w sklepie
   py zdjecia.py --podglad           strona z miniaturami: PEWNE do obejrzenia, wątpliwe do akceptacji
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import html
 import json
 import logging
@@ -56,6 +57,11 @@ OK, REVIEW, NONE = "PEWNE", "DO_AKCEPTACJI", "BRAK"
 SHOP_MIN_NAME = 0.85         # min. część słów nazwy produktu obecna w tytule ze sklepu producenta
 SHOP_MIN_TITLE = 0.5         # min. część słów tytułu ze sklepu producenta obecna w nazwie produktu
 VISION_TRIES = 4             # ile zdjęć jednego produktu obejrzeć modelem, zanim zostanie bez zdjęcia
+# Zapasowe zdjęcia (gdy nie ma żadnego PEWNEGO) idą DO_AKCEPTACJI zamiast zostawiać produkt bez zdjęcia:
+# mniejsze niż 400 px, ale min. BACKUP_MIN_SIDE, oraz zdjęcia ze strony samego producenta odrzucone tylko
+# za jego własne logo (np. ALCA: napis „alca” w rogu każdego zdjęcia, biały przycisk brany za „logo”).
+BACKUP_MIN_SIDE = 300
+NOT_A_PHOTO_WORDS = ("rysun", "schemat", "tabel", "wymiar", "szkic", "diagram", "tekst", "kolor")
 DOWNLOAD_NAME = "zaakceptowane_zdjecia"
 IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
 log = w.log
@@ -66,6 +72,8 @@ for site in ("mateomarket.pl",):
         w.WATERMARK_SITES.append(site)
 # Wysokie produkty (hydranty, zasuwy z trzpieniem) mają zdjęcia ok. 1:2 — 0,5 odrzucało je jako „baner”.
 w.MIN_IMAGE_RATIO = min(w.MIN_IMAGE_RATIO, 0.4)
+# Mniejsze zdjęcia przepuszczamy dalej — pick_checked zrobi z nich tylko zapas do akceptacji (patrz wyżej).
+w.MIN_IMAGE_SIDE = min(w.MIN_IMAGE_SIDE, BACKUP_MIN_SIDE)
 # …a długie (odpływy liniowe ALCA na sanitino.*: 960x472) ok. 2:1 — 1,9 odrzucało je tak samo. Baner/logo
 # o mniej skrajnych proporcjach i tak odrzuci model wizyjny.
 w.MAX_IMAGE_RATIO = max(w.MAX_IMAGE_RATIO, 2.5)
@@ -285,6 +293,43 @@ def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
     return page_candidates(src, m, True)
 
 
+WEB_PAGES_TO_CHECK = 5       # ile stron z wyników wyszukiwania (po kodzie/EAN) otworzyć na produkt
+
+
+def web_page_candidates(record: dict, engine: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z INNYCH stron (hurtownie, sklepy) znalezionych w wyszukiwarce po kodzie i EAN.
+
+    Bierzemy tylko strony, na których jest kod albo EAN produktu — jak przy stronie źródłowej. Strona źródłowa
+    z opisów to jedna strona; ten sam kod ma zwykle kilka innych sklepów, często ze zdjęciem.
+    """
+    code, ean = record.get(COL_CODE, "").strip(), record.get(COL_EAN, "").strip()
+    producer = record.get(COL_PRODUCER, "").strip()
+    m = w.ProductMatcher(code, ean, producer)
+    skip = {record.get(COL_SOURCE, "")}
+    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    out: list[tuple[str, bool, str]] = []
+    checked, with_code, found = 0, 0, 0
+    for query in queries:
+        urls = w.with_retry(w.search_pages, query, engine, what=f"[id={record[COL_ID]}] strony '{query}'") or []
+        found += len(urls)
+        for url in urls:
+            if checked >= WEB_PAGES_TO_CHECK:
+                break
+            if not url or url in skip or w.is_watermark_site(url) or w.domain_blocked(url):
+                continue
+            skip.add(url)
+            checked += 1
+            page = w.fetch_page(url)
+            if page and m.find(page[0]) is not None:  # strona ma kod/EAN — zdjęcia potwierdzone
+                with_code += 1
+                out += page_candidates(url, m, True, page)
+        if out or checked >= WEB_PAGES_TO_CHECK:
+            break  # są zdjęcia po kodzie — EAN niepotrzebny
+    log.info("[id=%s] inne strony: wyników %d, otwarte %d, z kodem/EAN %d, zdjęć %d",
+             record[COL_ID], found, checked, with_code, len(out))
+    return out
+
+
 def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
     """Zdjęcia z karty produktu na stronie producenta znalezionej PO KODZIE (DIRECT_SEARCH w głównym skrypcie).
 
@@ -391,7 +436,9 @@ def producer_shop_candidates(record: dict) -> tuple[list[tuple[str, bool, str]],
 # Sklepy pokazują miniatury, a pełny rozmiar leży pod podobnym adresem:
 # WordPress „zdjecie-150x150.jpg” → „zdjecie.jpg”, „/thumb/”, „_small” → „/large/”, „_large”, parametry „?w=100”.
 SIZE_WORDS = [("thumbnail", "large"), ("thumbs", "large"), ("thumb", "large"), ("small", "large"),
-              ("mini", "large"), ("medium", "large"), ("_min", "_max"), ("/s/", "/l/"), ("/m/", "/l/")]
+              ("mini", "large"), ("medium", "large"), ("_min", "_max"), ("/s/", "/l/"), ("/m/", "/l/"),
+              ("/middle/", "/big/"), ("/middle/", "/large/"), ("/middle/", "/original/"),  # np. saniland.sk
+              ("large_default", "thickbox_default"), ("home_default", "large_default")]  # PrestaShop
 
 
 def bigger_variants(url: str) -> list[str]:
@@ -407,7 +454,14 @@ def bigger_variants(url: str) -> list[str]:
     prefixed = re.sub(r"/\d{2,4}_{2,3}(?=[^/]+$)", "/", path)  # rurex.pl i in.: „/f83/500___5.jpg” → „/f83/5.jpg”
     if prefixed != path:
         variants.append(prefixed)
+    # „/files/thumbs/2021/07/nazwa_123-4c16efdc.jpg” → oryginał bez katalogu miniatur (i bez skrótu rozmiaru)
+    no_thumbs = re.sub(r"/thumbs?/", "/", path, count=1, flags=re.IGNORECASE)
+    if no_thumbs != path:
+        no_hash = re.sub(r"-[0-9a-f]{6,12}(?=\.[A-Za-z]{3,4}$)", "", no_thumbs)
+        variants += [no_hash, no_thumbs] if no_hash != no_thumbs else [no_thumbs]
     for small, big in SIZE_WORDS:
+        if small == "thumb" and "thumbs" in path.lower():
+            continue  # „thumbs” już obsłużone — „thumb” dałoby „larges”
         if small in path.lower():
             variants.append(re.sub(re.escape(small), big, path, flags=re.IGNORECASE))
     out = [urlunsplit((parts.scheme, parts.netloc, v, parts.query, "")) for v in variants]
@@ -424,14 +478,44 @@ def with_bigger_variants(cands: list[tuple[str, bool, str]]) -> list[tuple[str, 
     return list(dict.fromkeys(out))
 
 
+def image_size(data: bytes) -> tuple[int, int]:
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            return img.size
+    except Exception:
+        return 0, 0
+
+
+def backup_reason(record: dict, url: str, verified: bool, note: str) -> str:
+    """Czy zdjęcie odrzucone przez model nadaje się na zapas do akceptacji — powód albo ""."""
+    if not (verified and w.is_producer_url(url, record.get(COL_PRODUCER, ""))):
+        return ""  # cudze znaki wodne / niepewne strony — nie
+    low = note.lower()
+    if note.startswith("znak wodny"):  # produkt i rodzaj OK, przeszkadza tylko napis/logo
+        return "zdjęcie producenta z jego logo — model uznał je za znak wodny"
+    if note.startswith("to nie jest zdjęcie produktu") and "logo" in low and not any(
+            word in low for word in NOT_A_PHOTO_WORDS):
+        return "zdjęcie producenta, model widział tylko logo — sprawdź"
+    return ""
+
+
 def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
-                 tried: set[str], notes: list[str]) -> tuple[str, bool, bytes, str, str]:
-    """Pierwsze zdjęcie, które przejdzie filtry i model wizyjny: (url, potwierdzone, dane, rozszerzenie, strona)."""
+                 tried: set[str], notes: list[str], backups: list[tuple]) -> tuple[str, bool, bytes, str, str]:
+    """Pierwsze zdjęcie, które przejdzie filtry i model wizyjny: (url, potwierdzone, dane, rozszerzenie, strona).
+
+    Zdjęcia „prawie dobre” (małe, logo producenta) trafiają do `backups` jako
+    (url, potwierdzone, dane, rozszerzenie, strona, powód) — użyte, gdy nic lepszego się nie znajdzie.
+    """
     cands = with_bigger_variants(cands)
     pages = {u: p for u, _, p in cands}
     base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
     for _ in range(VISION_TRIES):
-        url, verified, _, reason = w.pick_image(cands, None, base, tried)  # pobiera + filtry wymiarów/logo
+        rejected: list[str] = []
+        url, verified, _, reason = w.pick_image(cands, None, base, tried, rejected)  # pobiera + filtry
+        for line in rejected:  # tylko filtr adresu — żeby było widać, co dokładnie odpadło (404 itp. to szum)
+            if line.startswith("logo/baner"):
+                log.info("[id=%s] pominięte — %s", record[COL_ID], line)
         if not url:
             if reason:
                 notes.append(f"brak poprawnego zdjęcia ({reason})")
@@ -440,12 +524,22 @@ def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
         if err:
             notes.append(err)
             continue
+        width, height = image_size(data)
+        small = min(width, height) < 400
         if vision:
             result, note = w.check_one_image(record, data)
             if result != w.CHECK_OK:
                 notes.append(note)
                 log.info("[id=%s] odrzucone — %s: %s", record[COL_ID], note, url)
+                why = "" if small else backup_reason(record, url, verified, note)
+                if why:
+                    backups.append((url, verified, data, ext, pages.get(url, ""), why))
                 continue
+        if small:
+            notes.append(f"obrazek za mały ({width}x{height})")
+            backups.append((url, verified, data, ext, pages.get(url, ""),
+                            f"małe zdjęcie ({width}x{height}) — lepszego nie znaleziono"))
+            continue
         return url, verified, data, ext, pages.get(url, "")
     return "", False, b"", "", ""
 
@@ -460,18 +554,21 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
     stages = [("źródło", lambda: (source_candidates(record), "")),
               ("producent-kod", lambda: (producer_code_candidates(record), ""))]
     stages.append(("producent", lambda: producer_shop_candidates(record)))
+    # Gdy źródło i producent nic nie dały: inne strony z tym kodem/EAN (wyszukiwarka stron, nie obrazów).
+    stages.append(("inne strony", lambda: (web_page_candidates(record, engine), "")))
     if search:
         m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
         stages.append(("wyszukiwarka", lambda: (w.image_candidates_from_search(
             m, record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""), engine,
             f"[id={record[COL_ID]}]"), "")))
     any_candidates = False
+    backups: list[tuple] = []
     for stage, get in stages:
         cands, shop_title = get()
         if not cands:
             continue
         any_candidates = True
-        url, verified, data, ext, page = pick_checked(record, cands, vision, tried, notes)
+        url, verified, data, ext, page = pick_checked(record, cands, vision, tried, notes, backups)
         if not url:
             continue
         base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
@@ -486,6 +583,12 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
             problems.append("nie sprawdzone modelem wizyjnym")
         out[COL_IMG_STATUS] = REVIEW if problems else OK
         out[COL_IMG_REASON] = "; ".join(problems)
+        return out
+    if backups:  # nic pewnego — najlepszy zapas (z najwcześniejszego etapu) do akceptacji jednym kliknięciem
+        url, verified, data, ext, page, why = backups[0]
+        base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
+        out.update({COL_IMG_URL: url, COL_IMG_PAGE: page, COL_IMG_STATUS: REVIEW, COL_IMG_REASON: why,
+                    COL_IMG_FILE: w.save_image(data, ext, images_dir, base).replace(os.sep, "/")})
         return out
     src = record.get(COL_SOURCE, "")
     if not any_candidates and src and http.host(src) in http.limited:
