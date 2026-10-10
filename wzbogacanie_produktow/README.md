@@ -2,8 +2,13 @@
 
 Skrypt `wzbogac_produkty.py` czyta CSV z Google Sheets i dla każdego produktu:
 
-1. **szuka w internecie strony produktu** po kodzie producenta (`"AG0828" AEON`) i po EAN,
-   pobiera ją i **sprawdza, czy ten kod lub EAN faktycznie na niej występuje**,
+1. **szuka w internecie strony produktu** kaskadowo: `AEON AG0510 590…` (producent + kod + EAN) →
+   `AEON "AG0510"` → `"AG0510" zasuwa` (kod + rodzaj produktu z nazwy, gdy kod ma min. 5 znaków) → sam EAN → `site:`,
+   pobiera ją i **sprawdza, czy ten kod lub EAN faktycznie na niej występuje**. Wystarczy EAN, kod + nazwa producenta
+   na stronie albo sam kod w kluczowym miejscu karty (tytuł, H1, SKU/MPN, pole „Kod/Symbol/Indeks” tabeli parametrów,
+   adres) — wtedy strona musi wyglądać na kartę sklepu (koszyk/cena/Product w JSON-LD) i mieć nazwę producenta albo
+   (dla kodu z literami i cyframi lub min. 6 znaków) rodzaj produktu z nazwy. Szukanie idzie przez DuckDuckGo
+   (`SEARCH_ENGINE`; Google wymaga klucza `SERPAPI_API_KEY` albo `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`),
 2. **pisze opis HTML** (~1000 znaków, `<h2>`, `<p>`, `<ul>`) przez Gemini `gemini-3.8-flash` (domyślnie) albo OpenAI `gpt-4o-mini`
    **wyłącznie na podstawie nazwy i tekstu potwierdzonej strony** — model dodatkowo ocenia,
    czy strona opisuje dokładnie ten produkt (kod, DN, PN …),

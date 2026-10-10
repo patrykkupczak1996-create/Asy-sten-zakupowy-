@@ -199,7 +199,7 @@ REQUEST_TIMEOUT = 60         # timeout zapytań do API (sekundy)
 OLLAMA_NUM_CTX = 8192        # kontekst lokalnego modelu (tokeny) — mieści polecenie + tekst strony
 AI_TIMEOUT = 180             # timeout odpowiedzi modelu AI — przy przeciążeniu Gemini odpowiada wolno
 PAGE_TIMEOUT = 20            # timeout pobierania pojedynczej strony produktu (sekundy)
-MAX_PAGES_PER_PRODUCT = 12   # ile stron z wyników wyszukiwania sprawdzić łącznie na produkt
+MAX_PAGES_PER_PRODUCT = 15   # ile stron z wyników wyszukiwania sprawdzić łącznie na produkt
 MAX_PAGES_PER_QUERY = 3      # …i ile z wyników jednego zapytania (żeby jedno złe zapytanie nie zużyło limitu)
 SOURCE_EXCERPT_CHARS = 5000  # ile znaków tekstu strony przekazać modelowi
 IMAGES_DIR = "zdjecia"       # folder na pobrane zdjęcia (obok pliku wynikowego)
@@ -449,12 +449,18 @@ def code_regex(code: str) -> re.Pattern | None:
     return re.compile(r"(?<![0-9A-Za-z])" + r"[\s\-./]?".join(chars) + r"(?![0-9A-Za-z])", re.IGNORECASE)
 
 
+# Cechy karty produktu w sklepie/hurtowni — bez nich sam kod w tytule nie wystarcza (RELAX w key_match).
+SHOP_PAGE_RE = re.compile(r'"@type"\s*:\s*"Product"|do koszyka|dodaj do|add to (?:cart|basket)|warenkorb|'
+                          r'koszyk|cena|netto|brutto|\d\s?zł|PLN|\d\s?€|€\s?\d', re.I)
+
+
 class ProductMatcher:
     """Sprawdza, czy tekst zawiera EAN albo kod producenta (+ nazwę producenta)."""
 
     def __init__(self, code: str, ean: str, producer: str):
         self.ean_re = code_regex(ean) if len(re.sub(r"\D", "", ean)) >= 8 else None
         self.code_re = code_regex(code)
+        self.code = code
         self.producer = producer.lower()
 
     def find(self, text: str) -> int | None:
@@ -466,6 +472,29 @@ class ProductMatcher:
             if not self.producer or self.producer in text.lower():
                 return m.start()
         return None
+
+    def distinctive_code(self) -> bool:
+        """Kod, który sam w sobie wskazuje produkt: min. 6 znaków albo litery+cyfry (AG0510, A392B, HT-13X018).
+        Krótkie same cyfry (FLAMCO 27987) mogą być czymkolwiek — wtedy dalej wymagamy nazwy producenta."""
+        chars = re.sub(r"[^0-9A-Za-z]", "", self.code)
+        return len(chars) >= 6 or (len(chars) >= 4 and bool(re.search(r"\d", chars)) and bool(re.search(r"[A-Za-z]", chars)))
+
+    def key_match(self, key_text: str, url: str, page_text: str, name: str = "") -> bool:
+        """RELAX: dokładny kod producenta w kluczowym miejscu karty (tytuł, H1, SKU/MPN, pole „Kod/Symbol…”
+        tabeli parametrów, adres) wystarcza bez EAN i bez nazwy producenta na stronie — hurtownie często
+        ukrywają EAN w skryptach i nie piszą producenta przy kodzie. Warunki bezpieczeństwa: strona wygląda na kartę
+        sklepu (SHOP_PAGE_RE) i jest na niej nazwa producenta albo — dla unikalnego kodu — rodzaj produktu z nazwy."""
+        if not self.code_re or not self.code_re.search(f"{key_text} {url}"):
+            return False
+        if not SHOP_PAGE_RE.search(page_text):
+            return False  # kod w tytule strony, która nie jest kartą produktu (np. numer lotu AA1058, repozytorium)
+        lower, host = page_text.lower(), urlparse(url).netloc.lower()
+        names = [p for p in re.split(r"[\s\-]+", self.producer) if len(p) >= 3]
+        if any(n in lower or n in host for n in names):
+            return True
+        # Bez nazwy producenta: kod unikalny + rodzaj produktu z nazwy na karcie („AA1058” obudowa — nie baleriny).
+        stems = [n[:5] for n in name_nouns(name, self.producer)]
+        return self.distinctive_code() and any(st in lower for st in stems)
 
     def in_short_text(self, *texts: str) -> bool:
         """Dopasowanie w krótkich tekstach (tytuł, adres URL) — wystarczy sam kod lub EAN."""
@@ -548,10 +577,77 @@ def note_response(url: str, status: int) -> None:
             _refusals[host] = 0
 
 
-def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, list[str]] | None:
+# Etykiety pól z kodem katalogowym w tabelach parametrów / opisie karty (hurtownie, sklepy producentów).
+CODE_LABEL_RE = re.compile(r"^\s*(?:kod|symbol|sku|mpn|indeks|index|nr\.?\s*kat|numer\s+kat|nr\.?\s*art|art\.|"
+                           r"artyku|ref\b|referenc|part\s*n|catalog|katalog|product\s*code|item\s*n)", re.I)
+
+
+def _jsonld_values(node, keys: tuple[str, ...]) -> list[str]:
+    """Wartości pól o nazwach z `keys` z danych JSON-LD (zagnieżdżone obiekty i listy)."""
+    out: list[str] = []
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if key in keys:
+                vals = val if isinstance(val, list) else [val]
+                for v in vals:
+                    if isinstance(v, str):
+                        out.append(v)
+                    elif isinstance(v, dict):
+                        out += [x for x in (v.get("url"), v.get("contentUrl")) if isinstance(x, str)]
+            elif isinstance(val, (dict, list)):
+                out += _jsonld_values(val, keys)
+    elif isinstance(node, list):
+        for item in node:
+            out += _jsonld_values(item, keys)
+    return out
+
+
+def _jsonld_products(node) -> list[dict]:
+    """Obiekty schema.org typu Product (także w @graph i listach), bez zagnieżdżonych w ItemList/ofertach."""
+    found: list[dict] = []
+    if isinstance(node, list):
+        for item in node:
+            found += _jsonld_products(item)
+    elif isinstance(node, dict):
+        kind = node.get("@type")
+        kinds = kind if isinstance(kind, list) else [kind]
+        if any(isinstance(k, str) and k.lower() in ("product", "productmodel", "productgroup") for k in kinds):
+            found.append(node)
+        elif "@graph" in node:
+            found += _jsonld_products(node["@graph"])
+    return found
+
+
+def _img_source(img) -> tuple[str, bool]:
+    """Najlepszy adres zdjęcia z <img> (i otaczającego <picture>) oraz czy to atrybut pełnego rozmiaru."""
+    big = (img.get("data-large_image") or img.get("data-zoom-image") or img.get("data-zoom")
+           or img.get("data-large") or img.get("data-full") or img.get("data-original"))
+    if big:
+        return big, True
+    # Miniatura w linku powiększenia (lightbox): <a href="…/produkt.png"><img src="…/thumbs/produkt_300x300.png">
+    link = img.xpath("ancestor::a[@href][1]/@href")
+    if link and urlparse(link[0]).path.lower().endswith(IMAGE_EXTENSIONS):
+        return link[0], True
+    # <picture><source srcset=…>: największy wariant ze wszystkich źródeł (pomijamy .avif — nie umiemy go otworzyć).
+    # lxml nie zna <picture> i bywa, że <source> są rodzeństwem <img>, a nie dziećmi <picture>.
+    parent = img.getparent()
+    sources = (parent.xpath("./source") if parent is not None and parent.tag == "picture"
+               else img.xpath("preceding-sibling::source"))
+    sets = [s.get("srcset") or s.get("data-srcset") or "" for s in sources
+            if "avif" not in (s.get("type") or "") and ".avif" not in (s.get("srcset") or "")]
+    best = largest_from_srcset(", ".join(x for x in sets if x))
+    if best:
+        return best, False
+    return (largest_from_srcset(img.get("data-srcset") or img.get("srcset") or "")
+            or img.get("data-lazy-src") or img.get("data-lazy") or img.get("data-src")
+            or img.get("src") or ""), False
+
+
+def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, list[str], str] | None:
     """Pobiera stronę HTML.
 
-    Zwraca (tekst, og:image, [(src, alt) wszystkich <img>], tytuł, zdjęcia z galerii produktu) albo None.
+    Zwraca (tekst, og:image + zdjęcia z JSON-LD, [(src, alt) wszystkich <img>], tytuł, zdjęcia z galerii produktu,
+    kluczowe pola karty: tytuł, H1, SKU/MPN, pola „Kod/Symbol/Indeks…” z tabeli parametrów) albo None.
     """
     if domain_blocked(url):
         return None
@@ -571,28 +667,53 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, li
         '//meta[@property="og:image" or @name="og:image" or @name="twitter:image"]/@content')]
     imgs, gallery = [], []
     for img in doc.xpath("//img"):
-        # Pełny rozmiar: WooCommerce trzyma go w data-large_image, inne sklepy w data-zoom-image / srcset.
-        src = (img.get("data-large_image") or img.get("data-zoom-image") or img.get("data-large")
-               or largest_from_srcset(img.get("data-srcset") or img.get("srcset") or "")
-               or img.get("data-src") or img.get("src") or "")
+        # Pełny rozmiar: WooCommerce trzyma go w data-large_image, inne sklepy w data-zoom-image / <picture> / srcset,
+        # leniwe ładowanie w data-lazy / data-src.
+        src, full_size = _img_source(img)
         if src and not src.startswith("data:"):
             imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
             # Zdjęcie z galerii TEGO produktu (nie z „podobnych produktów”, banerów, menu czy stopki).
             around = " ".join(img.xpath("ancestor::*/@class") + img.xpath("ancestor::*/@id")).lower()
-            in_gallery = (img.get("data-large_image") or img.get("data-zoom-image")
-                          or any(k in around for k in ("gallery", "product-image", "product__image", "product-photo")))
+            in_gallery = full_size or any(k in around for k in ("gallery", "product-image", "product__image",
+                                                                "product-photo"))
             elsewhere = any(k in around for k in ("related", "upsell", "up-sells", "cross-sell", "crosssell",
                                                   "recent", "widget", "footer", "header", "menu", "banner"))
             if in_gallery and not elsewhere:
                 gallery.append(urljoin(url, src))
     # Dane strukturalne (JSON-LD: sku, gtin = EAN, mpn) — wiele sklepów pokazuje EAN tylko tam,
     # np. afriso.pl. Dopisujemy je do tekstu, zanim skrypty zostaną usunięte.
-    structured = " ".join(s.text_content() for s in doc.xpath('//script[@type="application/ld+json"]'))
+    blocks = doc.xpath('//script[@type="application/ld+json"]')
+    structured = " ".join(s.text_content() for s in blocks)
+    key_parts = doc.xpath("//title/text()") + doc.xpath('//meta[@property="og:title"]/@content') + \
+        [h.text_content() for h in doc.xpath("//h1")]
+    for block in blocks:
+        try:
+            data = json.loads(block.text_content())
+        except ValueError:
+            continue
+        products = _jsonld_products(data)
+        if len(products) != 1:
+            continue  # lista produktów (strona kategorii/wyników) — kody i zdjęcia innych pozycji
+        og_images += [urljoin(url, u) for u in _jsonld_values(products[0], ("image",)) if u.startswith(("http", "/"))]
+        key_parts += _jsonld_values(products[0], ("sku", "mpn", "productID", "gtin", "gtin8", "gtin13", "gtin14"))
+    key_parts += doc.xpath('//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="productID"]/@content')
+    key_parts += [e.text_content() for e in doc.xpath('//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="productID"]')]
+    # Pola „Kod producenta: AG0510”, „Symbol | AH0453” — wiersz tabeli, para dt/dd albo krótki element z etykietą.
+    for row in doc.xpath("//tr|//dt|//li|//p|//span|//div[not(*[self::div])]"):
+        label = re.sub(r"\s+", " ", row.text_content()).strip()
+        if not label or len(label) > 120 or not CODE_LABEL_RE.match(label):
+            continue
+        key_parts.append(label)
+        if row.tag in ("dt", "span", "div", "p"):
+            nxt = row.getnext()
+            if nxt is not None:
+                key_parts.append(nxt.text_content()[:120])
+    key_text = re.sub(r"\s+", " ", " ".join(str(k) for k in key_parts)).strip()
     for bad in doc.xpath("//script|//style|//noscript|//svg"):
         bad.drop_tree()
     # itertext + spacja: sąsiednie znaczniki (<h1>…</h1><p>Kod…) nie sklejają się w jedno słowo.
     text = re.sub(r"\s+", " ", " ".join(doc.itertext()) + " " + structured).strip()
-    return text, og_images, imgs, title, gallery
+    return text, list(dict.fromkeys(og_images)), imgs, title, gallery, key_text
 
 
 def producer_sites(producer: str) -> list[str]:
@@ -887,13 +1008,19 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
 
 
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
-                         row_label: str) -> dict | None:
+                         row_label: str, name: str = "") -> dict | None:
     """Szuka strony, na której występuje kod/EAN produktu — najpierw w wyszukiwarkach hurtowni."""
     # Najpierw zwykłe zapytania (najczęściej trafiają), "site:" tylko gdy one nic nie dadzą —
     # każde dodatkowe zapytanie zwiększa ryzyko, że DuckDuckGo zacznie blokować.
+    # Kaskada: 1) producent + kod + EAN, 2) producent + "kod" (sygnatura producenta),
+    # 3) "kod" + rodzaj produktu z nazwy (gdy kod jest unikalny, np. "AG0510" zasuwa), potem sam EAN i site:.
     queries = []
     if code:
-        queries.append(f'"{code}" {producer}'.strip())
+        queries.append(f"{producer} {code} {ean}".strip())
+        queries.append(f'{producer} "{code}"'.strip())
+        noun = next(iter(name_nouns(name, producer)), "")
+        if noun and len(re.sub(r"[^0-9A-Za-z]", "", code)) >= 5:
+            queries.append(f'"{code}" {noun}')
         queries.append(f"{producer} {code}".strip())  # bez cudzysłowu — część wyszukiwarek źle je obsługuje
     if ean:
         queries.append(ean)
@@ -923,6 +1050,10 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
                 continue
             text, og_images, imgs = page[0], page[1], page[2]
             pos = m.find(text)
+            if pos is None and m.key_match(page[5] if len(page) > 5 else page[3], url, text, name):
+                hit = m.code_re.search(text)
+                pos = hit.start() if hit else 0
+                log.info("%s kod %s w tytule/SKU/tabeli karty (bez EAN i nazwy producenta): %s", row_label, code, url)
             search_only = pos is None and query is None and code and found_only_by_search(code, url)
             if pos is None and not search_only:
                 continue
@@ -1821,7 +1952,7 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
     # 1. Strona produktu potwierdzona kodem/EAN
     source = None
     if m.code_re or m.ean_re:
-        source = find_verified_source(m, row["code"], row["ean"], row["producer"], engine, row_label)
+        source = find_verified_source(m, row["code"], row["ean"], row["producer"], engine, row_label, row["name"])
     if not source:
         reasons.append("nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy")
     elif source.get("search_only"):
