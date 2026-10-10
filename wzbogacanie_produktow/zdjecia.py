@@ -548,6 +548,9 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
     out = {c: record.get(c, "") for c in (COL_ID, COL_NAME, COL_CODE, COL_PRODUCER)}
     out.update({COL_IMG_URL: "", COL_IMG_FILE: "", COL_IMG_PAGE: "", COL_IMG_STATUS: NONE, COL_IMG_REASON: ""})
     tried: set[str] = set()
+    for bad in REJECTED.get(record[COL_ID], ()):  # odrzucone ręcznie — nie wracamy do nich ani do ich wersji
+        tried.add(bad)
+        tried.update(bigger_variants(bad))
     notes: list[str] = []
     # Kolejność: strona źródłowa (potwierdzona kodem) → strona producenta po kodzie → sklep producenta (seria
     # po nazwie) → wyszukiwarka obrazów.
@@ -608,6 +611,7 @@ def run(args) -> None:
     else:
         w.check_ollama(dict(w.AI_PROVIDERS["ollama"], models=[w.VISION_MODEL]))
     todo = products_to_do(args.output)
+    REJECTED.update(load_rejected(args.output))
     result_path = side(args.output, "zdjecia")
     done, retry = set(), set()
     if os.path.isfile(result_path) and os.path.getsize(result_path):
@@ -663,6 +667,55 @@ def load_results(output: str) -> pd.DataFrame:
 
 def accepted_store(output: str) -> str:
     return side(output, "zdjecia_zaakceptowane", ".txt")
+
+
+def rejected_store(output: str) -> str:
+    return side(output, "zdjecia_odrzucone", ".txt")
+
+
+def load_rejected(output: str) -> dict[str, set[str]]:
+    """{id: {adresy zdjęć odrzuconych ręcznie}} — przy ponownym szukaniu te adresy są pomijane."""
+    out: dict[str, set[str]] = {}
+    path = rejected_store(output)
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                pid, _, url = line.rstrip("\n").partition("\t")
+                if pid and url:
+                    out.setdefault(pid, set()).add(url)
+    return out
+
+
+REJECTED: dict[str, set[str]] = {}
+MANUAL_REJECT_REASON = "zdjęcie odrzucone ręcznie — do ponownego szukania (--ponow-brak)"
+
+
+def reject(args) -> None:
+    """--odrzuc: złe zdjęcia (np. zaznaczone w arkuszu) → BRAK, a ich adresy na listę pomijanych."""
+    ids = {v.strip() for arg in args.odrzuc for v in re.split(r"[,;\s]+", arg) if v.strip()}
+    df = load_results(args.output)
+    rows = df[df[COL_ID].isin(ids)]
+    missing = sorted(ids - set(rows[COL_ID]))
+    with open(rejected_store(args.output), "a", encoding="utf-8") as fh:
+        for r in rows.to_dict("records"):
+            if r[COL_IMG_URL]:
+                fh.write(f"{r[COL_ID]}\t{r[COL_IMG_URL]}\n")
+    out = []
+    for r in rows.to_dict("records"):
+        r.update({COL_IMG_URL: "", COL_IMG_FILE: "", COL_IMG_PAGE: "", COL_IMG_STATUS: NONE,
+                  COL_IMG_REASON: MANUAL_REJECT_REASON})
+        out.append({c: r.get(c, "") for c in COLUMNS})
+    if out:
+        w.append_batch(out, COLUMNS, side(args.output, "zdjecia"))
+    store = accepted_store(args.output)  # odrzucone nie mogą zostać „zaakceptowane”
+    if os.path.isfile(store):
+        with open(store, encoding="utf-8") as fh:
+            kept = [line.strip() for line in fh if line.strip() and line.strip() not in ids]
+        with open(store, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(kept) + ("\n" if kept else ""))
+    print(f"Odrzucone zdjęcia: {len(out)}. Te produkty dostaną nowe zdjęcie przy: py zdjecia.py --ponow-brak")
+    if missing:
+        print(f"Nie znaleziono w wynikach zdjęć: {', '.join(missing)}")
 
 
 def preview(args) -> None:
@@ -740,6 +793,8 @@ def main() -> None:
     p.add_argument("--plik", help="Plik pobrany ze strony podglądu (domyślnie najnowszy z Pobranych)")
     p.add_argument("--kolumna-zdjecia", default=IDOSELL_IMAGE_COLUMN,
                    help="Nagłówek kolumny zdjęcia w pliku dla IdoSell (jak w eksporcie IdoSell)")
+    p.add_argument("--odrzuc", nargs="+", metavar="ID",
+                   help="Złe zdjęcia tych produktów (@id, np. z arkusza): BRAK + adres na liście pomijanych")
     p.add_argument("--bez-otwierania", action="store_true")
     args = p.parse_args()
     if not os.path.isfile(args.output):
@@ -748,6 +803,8 @@ def main() -> None:
         return preview(args)
     if args.zapisz:
         return save(args)
+    if args.odrzuc:
+        return reject(args)
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)-7s %(message)s",
                         datefmt="%H:%M:%S", handlers=[logging.StreamHandler(),
                                                       logging.FileHandler("zdjecia.log", encoding="utf-8")])
