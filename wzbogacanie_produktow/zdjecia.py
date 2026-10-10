@@ -14,6 +14,7 @@ czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
   py zdjecia.py                     cała baza (wznawia od miejsca przerwania, Ctrl+C = przerwa)
   py zdjecia.py --szukaj            produkty bez zdjęcia na stronie źródłowej: także wyszukiwarka obrazów
   py zdjecia.py --ponow-brak --szukaj   jeszcze raz produkty, które zostały bez zdjęcia
+  py zdjecia.py --pomin eksport_idosell.csv   pomiń produkty, które mają już zdjęcie w sklepie
   py zdjecia.py --podglad           strona z miniaturami: PEWNE do obejrzenia, wątpliwe do akceptacji
   py zdjecia.py --zapisz            plik dla IdoSell: @id + link do zdjęcia (pewne + zaakceptowane)
 
@@ -87,6 +88,30 @@ def products_to_do(output: str) -> pd.DataFrame:
             accepted = {line.strip() for line in fh if line.strip()}
     keep = (df[w.COL_STATUS] == w.STATUS_OK) | df[COL_ID].isin(accepted)
     return df[keep]
+
+
+def ids_with_shop_photos(path: str) -> set[str]:
+    """Id produktów, które MAJĄ już zdjęcie w sklepie — z eksportu IdoSell (CSV z kolumną @id).
+
+    Jeśli w pliku jest kolumna ze zdjęciem (nazwa zawiera „image”, „zdj” albo „photo”), pomijamy tylko
+    produkty z niepustym zdjęciem; bez takiej kolumny — wszystkie id z pliku.
+    """
+    if not os.path.isfile(path):
+        sys.exit(f"Nie ma pliku {path} (--pomin).")
+    # Eksport z IdoSell bywa rozdzielany średnikiem — separator wykrywamy z pliku.
+    df = pd.read_csv(path, dtype=str, keep_default_na=False, sep=None, engine="python", encoding="utf-8-sig")
+    df.columns = [c.strip() for c in df.columns]
+    if COL_ID not in df.columns:
+        sys.exit(f"W pliku {path} brakuje kolumny {COL_ID}. Kolumny: {', '.join(df.columns[:10])}")
+    photo_cols = [c for c in df.columns if any(k in c.lower() for k in ("image", "zdj", "photo", "picture"))]
+    if photo_cols:
+        has = df[photo_cols].apply(lambda r: any(str(v).strip() for v in r), axis=1)
+        ids = set(df.loc[has, COL_ID].str.strip())
+        log.info("Pomijam %d produktów, które mają już zdjęcie w sklepie (kolumny: %s).", len(ids), ", ".join(photo_cols))
+    else:
+        ids = set(df[COL_ID].str.strip())
+        log.info("Pomijam %d produktów z pliku %s (brak kolumny ze zdjęciem — pomijam wszystkie).", len(ids), path)
+    return ids - {""}
 
 
 def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
@@ -326,7 +351,8 @@ def run(args) -> None:
         if args.ponow_brak:
             prev = prev[prev[COL_IMG_STATUS] != NONE]  # bez zdjęcia -> do ponownego przetworzenia
         done = set(prev[COL_ID])
-    records = [r for r in todo.to_dict("records") if r[COL_ID] not in done]
+    skip = ids_with_shop_photos(args.pomin) if args.pomin else set()
+    records = [r for r in todo.to_dict("records") if r[COL_ID] not in done and r[COL_ID] not in skip]
     if args.limit:
         records = records[:args.limit]
     images_dir = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(args.output)), w.IMAGES_DIR))
@@ -430,6 +456,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Zdjęcia produktów ze stron źródłowych + kontrola modelem wizyjnym.")
     p.add_argument("--output", "-o", default="opisy_wszystkie.csv", help="Plik z wynikami opisów")
     p.add_argument("--limit", type=int, help="Tylko N produktów (test)")
+    p.add_argument("--pomin", metavar="PLIK",
+                   help="Eksport z IdoSell (CSV z @id): pomiń produkty, które mają już zdjęcie w sklepie")
     p.add_argument("--ponow-brak", action="store_true",
                    help="Przetwórz ponownie produkty, które zostały bez zdjęcia (np. z --szukaj)")
     p.add_argument("--szukaj", action="store_true",
