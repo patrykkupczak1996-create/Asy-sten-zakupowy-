@@ -67,7 +67,10 @@ IDOSELL_IMAGE_COLUMN = "/images/large/image@url"
 log = w.log
 
 # Sklepy, które nakładają znak wodny na zdjęcia — szkoda czasu modelu, od razu szukamy gdzie indziej.
-for site in ("mateomarket.pl",):
+# raleo.de, telematel.com, maan.net.pl, sparepartsboilers.com, kaprys-met.pl: 64 zdjęcia ze znakiem
+# wodnym albo napisami usunięte ręcznie z arkusza gotowych — każde z tych źródeł powtarzało się kilka razy.
+for site in ("mateomarket.pl", "raleo.de", "telematel.com", "maan.net.pl", "sparepartsboilers.com",
+             "kaprys-met.pl"):
     if site not in w.WATERMARK_SITES:
         w.WATERMARK_SITES.append(site)
 # Wysokie produkty (hydranty, zasuwy z trzpieniem) mają zdjęcia ok. 1:2 — 0,5 odrzucało je jako „baner”.
@@ -86,7 +89,10 @@ w.BAD_IMAGE_WORDS = tuple(dict.fromkeys(w.BAD_IMAGE_WORDS + (
     "piktogram", "zrzut-ekranu", "zrzut_ekranu", "screenshot", "screen-shot", "screen_shot",
     # alcadrain.com: „A97_koty.png” to rysunek wymiarowy (cz. kóty = wymiary); /category/thumbs/ to miniatury
     # kategorii z menu (VirtueMart), a .avif nie umiemy otworzyć — każdy taki adres zabierał jedną z 30 prób.
-    "_koty", "-koty", "/category/", ".avif")))
+    "_koty", "-koty", "/category/", ".avif",
+    # afriso.pl: /product-constructions/…-budowa-… to przekrój z opisanymi częściami, a /product-seo-images/
+    # to grafiki z napisami — odrzucone ręcznie z arkusza gotowych; zdjęcia produktu są w innych katalogach.
+    "budowa", "/product-constructions/", "/product-seo-images/")))
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")  # „Palette images with Transparency…”
 
 # Serwery zdjęć, na których jedna karta pokazuje też warianty serii (sanitino.*: inne długości odpływu to inne
