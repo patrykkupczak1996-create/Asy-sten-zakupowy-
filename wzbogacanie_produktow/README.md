@@ -196,6 +196,9 @@ producentów; karta z wyników i tak przechodzi zwykłą weryfikację kodu/EAN. 
 | BOHAMET-ARMATURA | katalog WooCommerce `bohamet-armatura.pl/wp-json/wc/store/v1/products` (pobierany raz) | to NIE bohamet.pl (inna firma). SKU to często wzorce (`21.550.DN.1`, `10.100.X`) — kod dopasowany do wzorca, wariant wybierany po średnicy; ok. 1/3 kodów jest w sklepie |
 | ALCA | JSON `alcadrain.pl/index.php?option=com_search&searchphrase=exact&tmpl=raw&type=json&searchword=KOD` | kod w tytule wyniku i na karcie; ok. 1/4 kodów (alcaplast.pl nie działa) |
 | AWENTA | `awenta.pl/search/query:KOD` | karta serii BEZ kodu — przyjmowana tylko, gdy to jedyny wynik (`"trusted"`); ok. 40% kodów |
+| GAZEX | `gazex.com/pl/wyszukaj/?query=KOD` | karta `/pl/produkty/model/zb-40/` — kod w adresie; kody 3-znakowe (LD-2) za krótkie |
+| DAFI | `dafi.pl/catalogsearch/result/?q=KOD` (Magento) | karta `*.html` ze SKU i EAN; kody hurtowni (DLW…) nieznane |
+| CALEFFI | API Typesense `search.caleffi.com` (klucz tylko do wyszukiwania z HTML strony wyników) | karta serii z tabelą artykułów (kod w tabeli) |
 
 Gdy kod jest potwierdzony tylko wyszukiwarką producenta (karta Awenty bez kodu albo wzorzec SKU Bohamet), opis
 powstaje z tej karty, ale produkt idzie do akceptacji z powodem „kod potwierdzony tylko wyszukiwarką producenta”.
@@ -212,7 +215,9 @@ Sprawdzone i nieprzydatne do szukania po kodzie (październik 2026): blokują sk
 Flamco; wyszukiwarka nie zna kodów — Kaczmarek (kaczmarek2.pl), KAN-therm (także API WordPressa CMS), Auraton i
 Apator-Powogaz (tylko po nazwie — są w `PRODUCER_SEARCH`); AGRU (agru.at) — brak działającej wyszukiwarki, kody tylko
 w katalogach PDF; wyniki tylko w JavaScript, bez znalezionego otwartego API — Wavin (Contentstack), Galmet,
-Rothenberger; brak wyszukiwarki lub strona nie odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich (certyfikat). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
+Rothenberger; karty bez kodów i EAN — Flowair, Ferroli (ferroli.com/pl); Galmet — wyszukiwarka sklep.galmet.com.pl nic
+nie zwraca; brak wyszukiwarki lub strona nie odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich, Biawar
+i ferroli.pl (błąd certyfikatu SSL); Famas — brak strony z katalogiem (famas.eu na sprzedaż). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
 `py wzbogac_produkty.py --test-wyszukiwarki KOD`. Strony, które kilka razy z rzędu odmówią dostępu (403), są pomijane
 do końca przebiegu. Skrypt czyta też dane strukturalne JSON-LD stron (sku, gtin = EAN) — wiele sklepów pokazuje EAN tylko tam.
 

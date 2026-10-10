@@ -119,8 +119,21 @@ DEFAULT_SHOP_LINK = "/product/"
 #   ALCA    — alcadrain.pl: JSON wyszukiwarki Joomla (com_search, searchphrase=exact), kod w tytule wyniku.
 #             alcaplast.pl nie działa (błąd SSL / 500).
 #   AWENTA  — awenta.pl/search/query:KOD (Grav) zwraca kartę serii, ale karta nie pokazuje kodu → "trusted".
+#   GAZEX   — gazex.com/pl/wyszukaj/?query=KOD (parametr „query”; „q”/„s” nic nie zwracają), karta
+#             /pl/produkty/model/zb-40/ z kodem w adresie. Kody 3-znakowe (LD-2) są za krótkie do weryfikacji.
+#   DAFI    — dafi.pl (Magento): catalogsearch/result/?q=KOD, karta *.html ze SKU (= kod) i EAN.
+#             Kody DLW…/DMT… z bazy to kody hurtowni, nie Dafi — ich nie znajdzie.
+#   CALEFFI — caleffi.com: Typesense (publiczny klucz tylko do wyszukiwania, podany w HTML strony wyników),
+#             kolekcja caleffi_corporate_products, pole caleffi_search_caleffi_product_articles = kody
+#             artykułów serii; karta serii ma tabelę artykułów z kodem.
 # Sprawdzone i NIEprzydatne (październik 2026):
-#   blokują skrypty (HTTP 403): Onninen, Armacell, Flamco (flamco.aalberts-hfc.com);
+#   blokują skrypty (HTTP 403 + captcha, sprawdzone ponownie 10.2026): Onninen, Armacell (armacell.com/pl-PL),
+#   Flamco (flamco.pl → flamco.aalberts-hfc.com);
+#   karty bez kodów i EAN, wyszukiwarka nie zna kodów: Flowair (flowair.com/pl, Drupal; 56134, 52042),
+#   Ferroli (ferroli.com/pl, Next.js; LSMBA06A, GRZ4430A); Galmet — sklep.galmet.com.pl/szukaj?search= nie
+#   zwraca nic nawet po nazwie, galmet.com.pl (Nuxt) bez wyszukiwarki;
+#   błąd certyfikatu SSL (też przez http → przekierowanie na https): Biawar (biawar.com.pl), Ferroli (ferroli.pl);
+#   brak oficjalnej strony z katalogiem: Famas (Łódź, grupa BOA — famas.eu na sprzedaż; produkty tylko w sklepach);
 #   wyszukiwarka nie zna kodów: Kaczmarek (kaczmarek2.pl), KAN-therm; tylko po nazwie (PRODUCER_SEARCH,
 #   zdjęcia): Auraton (karty bez kodów AUR… i EAN), Apator-Powogaz (apator.com/wyszukiwarka, kody 60-… nieznane);
 #   AGRU (agru.at, TYPO3) — brak działającej wyszukiwarki, kody tylko w katalogach PDF;
@@ -158,6 +171,20 @@ DIRECT_SEARCH = {
         "items": "results", "url_field": "url", "code_fields": ["Title"], "base": "https://www.alcadrain.pl"}},
     "awenta.pl": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/", "code_in_url": False,
                   "trusted": True, "producers": ["AWENTA"]},
+    "gazex.com": {"url": "https://www.gazex.com/pl/wyszukaj/?query={q}", "link": "/pl/produkty/model/",
+                  "code_in_url": True, "producers": ["GAZEX"]},
+    "dafi.pl": {"url": "https://dafi.pl/catalogsearch/result/?q={q}", "link": ".html", "code_in_url": False,
+                "producers": ["DAFI"]},
+    "caleffi.com": {"producers": ["CALEFFI"], "api": {
+        "url": "https://search.caleffi.com/collections/caleffi_corporate_products/documents/search",
+        "params": {"q": "{q}", "query_by": "caleffi_search_caleffi_product_articles,field_product_code,title",
+                   "filter_by": "langcode:=pl-pl", "per_page": 5},
+        "headers": {"X-TYPESENSE-API-KEY": "{key}"},
+        "key_from": {"page": "https://www.caleffi.com/pl-pl/products/search?query=zawor",
+                     "regex": r'typesense":\{"server":\{"apiKey":"([^"]+)"'},
+        "items": "hits", "item_key": "document", "url_field": "caleffi_path_alias",
+        "code_fields": ["caleffi_search_caleffi_product_articles", "field_product_code"],
+        "base": "https://www.caleffi.com"}},
 }
 SEARCH_ONLY_REASON = "kod potwierdzony tylko wyszukiwarką producenta (karta bez kodu)"
 MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
@@ -769,6 +796,8 @@ def _result_links(resp, link_fragment: str) -> list[str]:
     out = []
     for found in re.findall(rf'(?:https?://[^"\'\s<>]*)?{link}[^"\'\s<>\\]+', page):
         url = urljoin(resp.url, found).split("#")[0]
+        if re.search(r"[(){}$]|/\.html", url):
+            continue  # szablon JavaScriptu, np. „/.html(fullname)” na dafi.pl — nie adres karty
         if url not in out:
             out.append(url)
     return out
@@ -819,7 +848,8 @@ def direct_search_api(domain: str, cfg: dict, m: ProductMatcher, code: str) -> l
     """Wyszukiwarka z API JSON (strony, które wyniki ładują JavaScriptem). Karty z kodem/EAN produktu.
 
     cfg["api"]: method, url ({q}), params/json (z {q}), headers (z {key}), key_from {page, regex},
-    items (klucz z listą wyników), url_field, code_fields (pola z kodem/EAN), base (adres do dołączenia).
+    items (klucz z listą wyników), item_key (pole z właściwą pozycją w każdym wyniku, np. Typesense „document”),
+    url_field, code_fields (pola z kodem/EAN), base (adres do dołączenia).
     """
     api = cfg["api"]
 
@@ -838,6 +868,8 @@ def direct_search_api(domain: str, cfg: dict, m: ProductMatcher, code: str) -> l
         resp.raise_for_status()
         data = resp.json()
         items = (data if api.get("items") is None else data.get(api["items"], [])) or []
+        if api.get("item_key"):  # Typesense: {"hits": [{"document": {...}}]}
+            items = [i.get(api["item_key"], {}) for i in items if isinstance(i, dict)]
     except Exception as exc:
         log.debug("API wyszukiwarki %s niedostępne: %s", domain, exc)
         return []
