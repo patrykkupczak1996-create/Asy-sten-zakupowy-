@@ -187,6 +187,8 @@ DIRECT_SEARCH = {
         "base": "https://www.caleffi.com"}},
 }
 SEARCH_ONLY_REASON = "kod potwierdzony tylko wyszukiwarką producenta (karta bez kodu)"
+# Strony nie da się otworzyć (np. onninen.pl blokuje skrypty), ale wyszukiwarka pokazuje jej tytuł i fragment z kodem.
+SNIPPET_REASON = "źródło: tylko tytuł i fragment z wyników wyszukiwarki (strona blokuje pobieranie) — sprawdź opis"
 MAX_DIRECT_RESULTS = 3       # ile kart z wyników bezpośredniego wyszukiwania sprawdzić (gdy kod nie jest w adresie)
 # Hurtownie z rzetelnymi kartami produktów (kod producenta + EAN) — przeszukiwane zaraz po stronach producenta.
 TRUSTED_SITES = ["cetel-hurtownia.pl", "mateomarket.pl"]  # Onninen odpada — blokuje skrypty (HTTP 403)
@@ -442,13 +444,21 @@ def _ddg_call(method: str, query: str, max_results: int) -> list[dict]:
         raise
 
 
+def search_results(query: str, engine: str) -> list[dict]:
+    """Wyniki wyszukiwania: [{"url", "title", "body"}] — tytuł i fragment strony pokazane przez wyszukiwarkę."""
+    if engine == "ddg":
+        return [{"url": r.get("href", ""), "title": r.get("title", ""), "body": r.get("body", "")}
+                for r in _ddg_call("text", query, 10)]
+    if engine == "serpapi":
+        items = _serpapi({"engine": "google", "q": query}).get("organic_results", [])
+    else:
+        items = _google({"q": query}).get("items", [])
+    return [{"url": i.get("link", ""), "title": i.get("title", ""), "body": i.get("snippet", "")} for i in items]
+
+
 def search_pages(query: str, engine: str) -> list[str]:
     """Zwraca listę adresów stron z wyników wyszukiwania."""
-    if engine == "ddg":
-        return [r.get("href", "") for r in _ddg_call("text", query, 10)]
-    if engine == "serpapi":
-        return [r.get("link", "") for r in _serpapi({"engine": "google", "q": query}).get("organic_results", [])]
-    return [i.get("link", "") for i in _google({"q": query}).get("items", [])]
+    return [r["url"] for r in search_results(query, engine)]
 
 
 def search_images(query: str, engine: str) -> list[dict]:
@@ -551,6 +561,16 @@ class ProductMatcher:
         # Bez nazwy producenta: kod unikalny + rodzaj produktu z nazwy na karcie („AA1058” obudowa — nie baleriny).
         stems = [n[:5] for n in name_nouns(name, self.producer)]
         return self.distinctive_code() and any(st in lower for st in stems)
+
+    def snippet_match(self, title: str, body: str, url: str) -> bool:
+        """Wynik wyszukiwarki (tytuł + fragment) dotyczy tego produktu: EAN, albo kod w tytule/fragmencie
+        (nie tylko w adresie) i do tego nazwa producenta albo kod unikalny (AG0510, HT-13X018)."""
+        text = f"{title} {body}"
+        if self.ean_re and self.ean_re.search(text):
+            return True
+        if not (self.code_re and self.code_re.search(text)):
+            return False
+        return self.producer_on_page(f"{text} {url}") or self.distinctive_code()
 
     def in_short_text(self, *texts: str) -> bool:
         """Dopasowanie w krótkich tekstach (tytuł, adres URL) — wystarczy sam kod lub EAN."""
@@ -1120,13 +1140,30 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
         queries += [f"site:{domain} {code}" for domain in producer_sites(producer) + TRUSTED_SITES]
 
     checked: set[str] = set()
+    snippets: dict[str, dict] = {}  # url → wynik wyszukiwarki (tytuł, fragment) — zapas, gdy strony nie da się otworzyć
+    snippet_hit: dict | None = None
+
+    def snippet_source() -> dict | None:
+        """Gdy żadnej strony nie udało się potwierdzić: tytuł + fragment z wyników wyszukiwarki strony, której
+        nie da się pobrać (np. onninen.pl blokuje skrypty) — sama strona nie jest otwierana."""
+        if not snippet_hit:
+            return None
+        trace(f"  → źródło z wyników wyszukiwarki (bez otwierania strony): {snippet_hit['url']}")
+        log.info("%s źródło: tylko tytuł i fragment z wyników wyszukiwarki — %s", row_label, snippet_hit["url"])
+        return {"url": snippet_hit["url"], "excerpt": f"{snippet_hit['title']}. {snippet_hit['body']}".strip(),
+                "search_only": False, "snippet": True, "og_images": [], "imgs": [], "producer_site": False,
+                "title": snippet_hit["title"], "gallery": []}
+
     direct = direct_search_urls(m, code, producer) if code else []
     for query in ([None] if direct else []) + queries:
         if query is None:
             urls = direct  # wyniki z wyszukiwarek hurtowni — sprawdzane przed DuckDuckGo
         else:
-            urls = [u for u in (with_retry(search_pages, query, engine, what=f"{row_label} szukanie '{query}'") or [])
-                    if u and u not in checked and not urlparse(u).path.lower().endswith(".pdf")]
+            results = with_retry(search_results, query, engine, what=f"{row_label} szukanie '{query}'") or []
+            for r in results:
+                snippets.setdefault(r["url"], r)
+            urls = [r["url"] for r in results
+                    if r["url"] and r["url"] not in checked and not urlparse(r["url"]).path.lower().endswith(".pdf")]
         if query and query.startswith("site:"):
             # Część wyszukiwarek ignoruje "site:" i zwraca przypadkowe strony — zostawiamy tylko tę domenę.
             domain = query.split()[0].removeprefix("site:")
@@ -1138,11 +1175,15 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
         for url in urls[:MAX_PAGES_PER_QUERY]:
             if len(checked) >= MAX_PAGES_PER_PRODUCT:
                 trace(f"  limit {MAX_PAGES_PER_PRODUCT} stron na produkt — koniec szukania")
-                return None
+                return snippet_source()
             checked.add(url)
             page = fetch_page(url)
             if not page:
                 trace(f"    ✗ {url}\n      nie udało się pobrać (blokada, błąd, PDF albo strona tylko w JavaScript)")
+                hit = snippets.get(url)
+                if snippet_hit is None and hit and m.snippet_match(hit["title"], hit["body"], url):
+                    snippet_hit = hit
+                    trace(f"      kod/EAN jest w tytule lub fragmencie z wyszukiwarki — zapas: „{hit['title']}”")
                 continue
             if TRACE:
                 code_hit = bool(m.code_re and m.code_re.search(page[0]))
@@ -1165,7 +1206,7 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
             return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS], "search_only": bool(search_only),
                     "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
                     "title": page[3] if len(page) > 3 else "", "gallery": page[4] if len(page) > 4 else []}
-    return None
+    return snippet_source()
 
 
 def is_watermark_site(url: str) -> bool:
@@ -2061,6 +2102,8 @@ def process_row(record: dict, position: int, engine: str, images_dir: str | None
         reasons.append("nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy")
     elif source.get("search_only"):
         reasons.append(SEARCH_ONLY_REASON)
+    elif source.get("snippet"):
+        reasons.append(SNIPPET_REASON)
 
     # 2. Opis
     desc = ""
