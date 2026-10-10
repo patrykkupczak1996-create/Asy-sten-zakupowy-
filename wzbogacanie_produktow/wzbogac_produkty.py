@@ -451,7 +451,7 @@ def code_regex(code: str) -> re.Pattern | None:
 
 # Cechy karty produktu w sklepie/hurtowni — bez nich sam kod w tytule nie wystarcza (RELAX w key_match).
 SHOP_PAGE_RE = re.compile(r'"@type"\s*:\s*"Product"|do koszyka|dodaj do|add to (?:cart|basket)|warenkorb|'
-                          r'koszyk|cena|netto|brutto|\d\s?zł|PLN|\d\s?€|€\s?\d', re.I)
+                          r'\bkoszyk|\bcena\b|\bnetto\b|\bbrutto\b|\d\s?zł\b|\bPLN\b|\d\s?€|€\s?\d', re.I)
 
 
 # Człony nazw producentów, które same nic nie mówią — nie wystarczą jako „producent na stronie”.
@@ -997,6 +997,29 @@ def make_sample(input_path: str, n: int, sep: str = ",", out_path: str = "produk
     print(f"Test:  py wzbogac_produkty.py --input {out_path} --output wyniki_probka.csv")
 
 
+def diagnose(output_path: str, ids: list[str], engine: str) -> None:
+    """--diagnoza: to samo szukanie co w przebiegu, z opisem każdego kroku."""
+    global TRACE
+    if not os.path.exists(output_path):
+        sys.exit(f"Nie ma pliku {output_path} — podaj --output z wynikami opisów.")
+    rows = {r[COL_ID]: r for r in read_csv(output_path).to_dict("records")}
+    TRACE = True
+    for pid in ids:
+        r = rows.get(str(pid).strip())
+        if not r:
+            print(f"\n[id={pid}] nie ma w {output_path}")
+            continue
+        code, ean, producer, name = (str(r.get(c, "") or "").strip() for c in (COL_CODE, COL_EAN, COL_PRODUCER, COL_NAME))
+        print(f"\n=== [id={pid}] {name}\n    producent: {producer}, kod: {code or '—'}, EAN: {ean or '—'}, "
+              f"wyszukiwarka: {engine}")
+        if code and not code_regex(code):
+            print("    UWAGA: kod ma mniej niż 4 litery/cyfry — skrypt nie potwierdzi go na stronie")
+        source = find_verified_source(ProductMatcher(code, ean, producer), code, ean, producer, engine,
+                                      f"[id={pid}]", name)
+        print(f"\n  WYNIK: {source['url'] if source else 'nie znaleziono strony'}")
+    TRACE = False
+
+
 def test_direct_search(code: str, producer: str | None = None) -> None:
     """Diagnostyka: co zwracają wyszukiwarki hurtowni dla kodu i czy karta zawiera ten kod."""
     from urllib.parse import quote_plus
@@ -1036,6 +1059,14 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
         print("  Brak — wyszukiwarka pewnie ładuje wyniki przez JavaScript; skrypt użyje wtedy DuckDuckGo.")
 
 
+TRACE = False  # --diagnoza: wypisuje każde zapytanie i powód odrzucenia każdej strony
+
+
+def trace(msg: str) -> None:
+    if TRACE:
+        print(msg, flush=True)
+
+
 def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, engine: str,
                          row_label: str, name: str = "") -> dict | None:
     """Szuka strony, na której występuje kod/EAN produktu — najpierw w wyszukiwarkach hurtowni."""
@@ -1070,13 +1101,23 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
             urls = [u for u in urls if urlparse(u).netloc.lower().removeprefix("www.").endswith(domain)]
         # Najpierw adresy, w których jest kod/EAN (np. onninen.pl/produkt/…-AG0828) — najczęściej trafione.
         urls.sort(key=lambda u: not m.in_short_text(u))
+        trace(f"\n  ZAPYTANIE: {query or 'wyszukiwarka na stronie producenta'} → wyników: {len(urls)}"
+              + (f" (sprawdzam {min(len(urls), MAX_PAGES_PER_QUERY)})" if urls else ""))
         for url in urls[:MAX_PAGES_PER_QUERY]:
             if len(checked) >= MAX_PAGES_PER_PRODUCT:
+                trace(f"  limit {MAX_PAGES_PER_PRODUCT} stron na produkt — koniec szukania")
                 return None
             checked.add(url)
             page = fetch_page(url)
             if not page:
+                trace(f"    ✗ {url}\n      nie udało się pobrać (blokada, błąd, PDF albo strona tylko w JavaScript)")
                 continue
+            if TRACE:
+                code_hit = bool(m.code_re and m.code_re.search(page[0]))
+                ean_hit = bool(m.ean_re and m.ean_re.search(page[0]))
+                trace(f"    · {url}\n      kod na stronie: {'TAK' if code_hit else 'NIE'}, EAN: {'TAK' if ean_hit else 'NIE'}, "
+                      f"producent: {'TAK' if m.producer_on_page(page[0]) else 'NIE'}, "
+                      f"karta sklepu: {'TAK' if SHOP_PAGE_RE.search(page[0]) else 'NIE'}")
             text, og_images, imgs = page[0], page[1], page[2]
             pos = m.find(text)
             if pos is None and m.key_match(page[5] if len(page) > 5 else page[3], url, text, name):
@@ -1085,7 +1126,9 @@ def find_verified_source(m: ProductMatcher, code: str, ean: str, producer: str, 
                 log.info("%s kod %s w tytule/SKU/tabeli karty (bez EAN i nazwy producenta): %s", row_label, code, url)
             search_only = pos is None and query is None and code and found_only_by_search(code, url)
             if pos is None and not search_only:
+                trace("      ✗ odrzucona")
                 continue
+            trace("      ✓ PRZYJĘTA jako źródło")
             start = max(0, (pos or 0) - SOURCE_EXCERPT_CHARS // 3)
             return {"url": url, "excerpt": text[start:start + SOURCE_EXCERPT_CHARS], "search_only": bool(search_only),
                     "og_images": og_images, "imgs": imgs, "producer_site": is_producer_url(url, producer),
@@ -2720,6 +2763,8 @@ def main() -> None:
                              "(proporcjonalnie do producentów) — do testów na całej bazie")
     parser.add_argument("--producenci", metavar="LISTA",
                         help="Z --utworz-probke: tylko ci producenci, po przecinku (np. \"GEBERIT,WAVIN\")")
+    parser.add_argument("--diagnoza", nargs="+", metavar="ID",
+                        help="Pokaż krok po kroku, jak skrypt szuka strony produktu (id z pliku --output)")
     parser.add_argument("--test-wyszukiwarki", metavar="KOD",
                         help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
     parser.add_argument("--aktualizuj", action="store_true",
@@ -2747,6 +2792,9 @@ def main() -> None:
         return
     if args.test_wyszukiwarki:
         test_direct_search(args.test_wyszukiwarki)
+        return
+    if args.diagnoza:
+        diagnose(args.output, args.diagnoza, args.search)
         return
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
