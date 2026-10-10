@@ -506,14 +506,21 @@ def run(args) -> None:
         w.check_ollama(dict(w.AI_PROVIDERS["ollama"], models=[w.VISION_MODEL]))
     todo = products_to_do(args.output)
     result_path = side(args.output, "zdjecia")
-    done = set()
+    done, retry = set(), set()
     if os.path.isfile(result_path) and os.path.getsize(result_path):
         prev = w.read_csv(result_path).drop_duplicates(subset=[COL_ID], keep="last")
+        retry = set(prev.loc[prev[COL_IMG_STATUS] == NONE, COL_ID]) if args.ponow_brak else set()
         if args.ponow_brak:
             prev = prev[prev[COL_IMG_STATUS] != NONE]  # bez zdjęcia -> do ponownego przetworzenia
         done = set(prev[COL_ID])
     skip = ids_with_shop_photos(args.pomin) if args.pomin else set()
     records = [r for r in todo.to_dict("records") if r[COL_ID] not in done and r[COL_ID] not in skip]
+    # Najpierw produkty, których jeszcze nie było, a ponowienia „bez zdjęcia” na końcu — inaczej przebieg
+    # zaczyna od tych samych trudnych produktów (np. AEON) i długo nie widać efektów.
+    records.sort(key=lambda r: r[COL_ID] in retry)
+    if retry:
+        log.info("Nowe produkty: %d, ponowienia bez zdjęcia (na końcu): %d.",
+                 sum(r[COL_ID] not in retry for r in records), sum(r[COL_ID] in retry for r in records))
     if args.limit:
         records = records[:args.limit]
     images_dir = os.path.relpath(os.path.join(os.path.dirname(os.path.abspath(args.output)), w.IMAGES_DIR))
