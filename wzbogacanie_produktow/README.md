@@ -58,10 +58,12 @@ w Google AI Studio, inaczej skrypt będzie często czekał na limit (to nie bł�
 Inny model Gemini ustawisz zmienną `GEMINI_MODEL`, np. `$env:GEMINI_MODEL="gemini-3.7-flash"`.
 
 **Ollama (darmowo, lokalnie, bez klucza)** — model działa na Twoim komputerze; potrzebna karta graficzna
-(np. RTX 3060 12 GB wystarcza na domyślny `gemma3:12b`):
+(np. RTX 3060 12 GB). Opisy pisze **Bielik** (polski model SpeakLeash) — lepsza polszczyzna niż qwen; skrypt bierze
+go automatycznie, gdy jest pobrany (kolejność w `OLLAMA_PREFERRED`), tak samo `uruchom_cala_baze.ps1`
+i `ponow_brak_strony.ps1`:
 
 1. Zainstaluj Ollamę z https://ollama.com/download i uruchom ją.
-2. Pobierz model (jednorazowo, kilka GB): `ollama pull gemma3:12b`
+2. Pobierz model (jednorazowo, 6,7 GB): `ollama pull SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M`
 3. Uruchamiaj skrypt z `--ai ollama`, np. `py wzbogac_produkty.py --input produkty.csv --ai ollama --limit 10`
 
 Inny model: `$env:OLLAMA_MODEL="nazwa:tag"` (najpierw `ollama pull nazwa:tag`). Przy 6–8 GB VRAM wybierz mniejszy model.
@@ -132,6 +134,12 @@ Każdy wygenerowany opis przechodzi kontrole:
   źródłowej). Jeśli po usunięciu opis ma mniej niż 200 znaków, produkt idzie do akceptacji.
 * **Nagłówek `<h2>`** musi zawierać rodzaj produktu z nazwy (pierwsze słowo, np. „zasuwa”, „trójnik”; odmiana
   dozwolona; wystarczy rdzeń dowolnego rzeczownika z nazwy).
+* **Każdy opis jest ogólny i marketingowy** (także gdy jest strona producenta) — przeznaczenie i korzyści dla
+  instalatora, bez parametrów technicznych, norm, certyfikatów, ciśnień, gwintów, temperatur i materiałów, które
+  nie wynikają wprost z nazwy (z rozwiniętymi skrótami: PE → polietylen, PN16 → ciśnienie nominalne). Strona
+  źródłowa służy tylko do potwierdzenia produktu i jego przeznaczenia. Skrypt usuwa każde zdanie z taką daną albo
+  z liczbą spoza nazwy (`NAME_ONLY_TECH`); nagłówek z danymi spoza nazwy dostaje osobny powód (do akceptacji).
+  Opisy zapisane wcześniej zmienią się dopiero po ponownym wygenerowaniu.
 
 Zapisane już opisy można poprawić i przeliczyć bez generowania od nowa (najpierw powstaje kopia
 `*_kopia_przed_przeliczeniem_*.csv`):

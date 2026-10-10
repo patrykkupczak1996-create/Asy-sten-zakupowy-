@@ -267,15 +267,17 @@ Zasady:
    ustaw "ten_sam_produkt": false i w "uwagi" napisz krótko, co.
    Jeśli EAN w kartotece to „brak”, NIE oceniaj EAN ze strony (my go po prostu nie mamy) —
    o zgodności decyduje kod producenta i parametry.
-2. Opis: DO około 1000 znaków (bez znaczników HTML). Rozwiń skróty techniczne z nazwy, np.
-   {abbreviations}. Wyjaśnij zastosowanie produktu. Jeśli źródło ma mało danych, opis ma być
-   KRÓTSZY — 400 znaków samych faktów jest lepsze niż 1000 znaków z ogólnikami.
-3. Używaj WYŁĄCZNIE faktów z nazwy i z tekstu źródłowego. Jeśli czegoś tam nie ma
-   (materiał, norma, masa, wymiary, certyfikaty), POMIŃ to — nie zgaduj. Pisz rzeczowo.
-   ZAKAZANE są ogólniki, których nie ma w źródle: o jakości, trwałości, odporności (na korozję,
-   chemikalia, warunki atmosferyczne), zgodności z normami/standardami, łatwości montażu, niezawodności.
-4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <ul>, <li>, <strong>.
-   Bez <html>, <body>, stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu.
+2. Opis: ok. 300–600 znaków (bez znaczników HTML), 2–3 krótkie akapity. Opis ma być ogólny, marketingowy,
+   skupiony na przeznaczeniu i korzyściach dla instalatora: do czego służy produkt, w jakich instalacjach
+   się go stosuje, jakie zadanie w nich spełnia. Tekst źródłowy służy do potwierdzenia produktu i zrozumienia
+   jego przeznaczenia — NIE przepisuj z niego danych technicznych.
+3. ZABRANIAM CI dodawać jakichkolwiek parametrów technicznych, norm, certyfikatów, ciśnień, gwintów,
+   temperatur ani materiałów, jeśli nie wynikają one wprost z nazwy produktu — nawet jeśli są w tekście
+   źródłowym. Żadnych liczb spoza nazwy. Skróty z nazwy rozwijaj, np. {abbreviations}.
+   Nie pisz o jakości, trwałości, niezawodności, odporności, zgodności z normami ani o łatwym czy szybkim
+   montażu, jeśli źródło tego wprost nie mówi.
+4. Formatowanie opisu: wyłącznie czysty HTML z tagami <h2>, <p>, <strong>. Bez list, <html>, <body>,
+   stylów i Markdown. Zacznij od <h2> z czytelną nazwą produktu — w nagłówku tylko to, co jest w nazwie.
 5. Nie wspominaj w opisie o stronie źródłowej ani o innych sklepach.
 6. "pelna_nazwa": pełna nazwa handlowa produktu ze strony źródłowej (bez ceny i kodów sklepu).
 7. "zapytanie_producent": 2–5 słów do znalezienia TEJ SERII w sklepie producenta: nazwa serii/linii
@@ -309,15 +311,18 @@ DANE Z KARTOTEKI:
 - Kod producenta: {code}
 - Kategoria: {category}
 
-Nie mamy karty katalogowej tego produktu, więc NIE piszemy opisu, tylko listę parametrów z nazwy:
+Nie mamy karty katalogowej tego produktu. Napisz krótki opis (ok. 300–600 znaków tekstu):
 1. <h2> — pełna nazwa produktu po polsku: rozwinięte skróty z nazwy, normalna pisownia (nie WIELKIE LITERY).
-2. Pod nagłówkiem jedna lista <ul> z punktami <li> w formie „<strong>Parametr:</strong> wartość”,
-   wyłącznie dla parametrów, które WPROST wynikają z nazwy, np.: rodzaj produktu, średnica nominalna (DN),
-   ciśnienie nominalne (PN), średnica zewnętrzna rury, gwint / typ złącza, materiał, przeznaczenie (woda/gaz).
-   Skróty rozwijaj według słownika: {abbreviations}.
-3. ZAKAZANE: akapity <p>, zdania o zastosowaniu, zalety, ogólniki, parametry i liczby, których nie ma w nazwie.
-   Jeśli nie wiesz, co znaczy skrót, przepisz go bez rozwijania.
-4. Wyłącznie czysty HTML z tagami <h2>, <ul>, <li>, <strong>. Bez <html>, <body>, stylów i Markdown.
+   Skróty rozwijaj według słownika: {abbreviations}. Jeśli nie wiesz, co znaczy skrót, przepisz go bez zmian.
+   W nagłówku NIC nie dodawaj od siebie — tylko to, co jest w nazwie (np. nie dopisuj materiału ani rodzaju rur).
+2. Pod nagłówkiem 2–3 krótkie akapity <p>. Opis ma być ogólny, marketingowy, skupiony na przeznaczeniu
+   i korzyściach dla instalatora: do czego służy produkt, w jakich instalacjach się go stosuje, jakie zadanie
+   w nich spełnia.
+3. ZABRANIAM CI dodawać jakichkolwiek parametrów technicznych, norm, certyfikatów, ciśnień, gwintów,
+   temperatur ani materiałów, jeśli nie wynikają one wprost z nazwy produktu. Żadnych liczb spoza nazwy.
+4. Nie pisz o jakości, trwałości, niezawodności, odporności, zgodności z normami ani o łatwym czy szybkim
+   montażu — tego o tym produkcie nie wiemy. Korzyści mają wynikać z rodzaju i przeznaczenia produktu.
+5. Wyłącznie czysty HTML z tagami <h2>, <p>, <strong>. Bez <html>, <body>, stylów i Markdown.
 
 Odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"opis_html": "..."}}"""
@@ -1070,7 +1075,9 @@ _openai_client: OpenAI | None = None
 
 
 # Gdy OLLAMA_MODEL nie jest ustawione, skrypt bierze pierwszy pobrany model z tej listy (od najlepszego po polsku).
-OLLAMA_PREFERRED = ["qwen2.5:14b-instruct", "qwen2.5:14b", "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M",
+# Bielik (SpeakLeash, trenowany na polskich tekstach) pisze poprawniejszą polszczyzną niż qwen (literówki,
+# chińskie wtrącenia) — dlatego jest pierwszy.
+OLLAMA_PREFERRED = ["SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M", "qwen2.5:14b-instruct", "qwen2.5:14b",
                     "gemma3:12b", "qwen3:14b", "qwen3:8b", "qwen2.5:7b-instruct", "qwen2.5:7b", "llama3.1:latest"]
 
 
@@ -1433,6 +1440,7 @@ BANNED_PHRASES = [
     (r"(?:dług[oi]?\w*\s*)?trwał(?:ość|ości|y|a|e|ego|ej|ym|ych)\b|długotrwał\w*|żywotnoś\w*", r"trwał|żywotnoś"),
 ]
 MIN_DESC_CHARS = 200          # opis krótszy po usunięciu ogólników idzie do akceptacji
+MIN_NAME_ONLY_CHARS = 150     # opis (bez nagłówka) krótszy po usunięciu danych spoza nazwy — do akceptacji
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ0-9<])")
 
 
@@ -1532,20 +1540,87 @@ def _numbers(text: str) -> set[str]:
     return {n.replace(",", ".") for n in re.findall(r"\d+(?:[.,]\d+)?", text)}
 
 
+# Opis „tylko z nazwy”: dane techniczne, które wolno podać tylko wtedy, gdy wynikają z nazwy (z rozwiniętymi
+# skrótami). (wzorzec w opisie, wzorzec w nazwie, który go uzasadnia; None = to samo słowo musi być w nazwie)
+NAME_ONLY_TECH = [
+    (r"\bnorm\w*|\bPN-EN\b|\bEN\s?\d+|\bISO\b|\bDIN\b|atest\w*|certyfika\w*|aprobat\w*|DVGW|homologac\w*|"
+     r"deklaracj\w*\s+zgodnoś\w*|\bCE\b", r"\bnorm|\bEN\s?\d|\bISO\b|\bDIN\b|atest|certyfik|PZH|CNBOP|DVGW"),
+    (r"ciśnieni\w*|\bbar\b|\bMPa\b|\bPN\s?\d+", r"\bPN\s?\d|\bbar\b|ciśn"),
+    (r"gwint\w*|\bG\s?\d/\d|\bR\s?\d/\d|\bGW\b|\bGZ\b|\bcal\w*\b|\d\s?\"", r"gwint|\bGW|\bGZ|\bG\s?\d|\bR\s?\d|\"|cal"),
+    (r"temperatur\w*|°\s?C\b|stopni\w*\s+Celsjusza", r"temperatur|°"),
+    (r"mosiądz\w*|mosiężn\w*|\bstal(?:i|ą|owy|owa|owe|owej|owego|owych|owym)?\b|nierdzewn\w*|żeliw\w*|\bGJ[SL]\b|"
+     r"\bPVC\b|polichlor\w*|\bPE\b|polietylen\w*|\bPP\b|polipropylen\w*|\bPE-?X\b|miedź|miedzi\b|miedzian\w*|"
+     r"brąz\w*|\bEPDM\b|\bNBR\b|kauczuk\w*|gum\w*|tworzyw\w*|alumini\w*|chromowan\w*|ocynk\w*|cynkow\w*|"
+     r"ceramik\w*|ceramiczn\w*|\bPOM\b|\bABS\b|poliamid\w*|tytan\w*|silikon\w*", None),
+]
+
+
+def _fold(text: str) -> str:
+    """Małe litery bez polskich znaków — nazwy w bazie bywają pisane bez ogonków (ZELIWO, MOSIADZ)."""
+    return text.lower().translate(str.maketrans("ąćęłńóśźż", "acelnoszz"))
+
+
+def _name_with_expansions(name: str) -> str:
+    """Nazwa + rozwinięcia skrótów ze słownika, które w niej występują (PE → polietylen, ŻEL. → żeliwna)."""
+    extra = []
+    for key, value in re.findall(r"([^\s,=/]+(?:/[^\s,=]+)?)\s*=\s*([^,=]+?)(?=,\s*[^\s,=]+\s*=|$)",
+                                 ABBREVIATIONS.replace("\n", " ")):
+        for part in key.split("/"):
+            letters = re.sub(r"\d+", "", part).strip()
+            if len(letters) >= 2 and re.search(rf"(?<![^\W\d_]){re.escape(letters)}(?![^\W\d_])", name, re.I):
+                extra.append(value)
+    return name + " " + " ".join(extra)
+
+
+def _unsupported_tech(sentence: str, name_ext: str) -> str:
+    """Pierwsza dana techniczna w zdaniu, której nie uzasadnia nazwa produktu, albo ""."""
+    plain = _plain(sentence)
+    name_words = re.findall(r"[^\W_]+", _fold(name_ext))
+    for pattern, allowed in NAME_ONLY_TECH:
+        for hit in re.finditer(pattern, plain, flags=re.I):
+            word = hit.group(0)
+            if allowed is not None:
+                if not re.search(allowed, name_ext, flags=re.I):
+                    return word
+                continue
+            stem = _fold(word)[:4]  # stalowy/stal, żeliwna/ŻELIWO; krótkie (PE, PP) — całe słowo
+            if not any(w.startswith(stem) if len(stem) == 4 else w == stem for w in name_words):
+                return word
+    return ""
+
+
 def strip_name_only_extras(desc_html: str, name: str) -> tuple[str, list[str]]:
-    """Opis „tylko z nazwy”: usuwa akapity i punkty listy z liczbami spoza nazwy (np. zmyślone „OD63”)."""
+    """Opis „tylko z nazwy”: usuwa zdania i punkty listy z liczbami spoza nazwy (np. zmyślone „OD63”) oraz
+    z normami, certyfikatami, ciśnieniem, gwintem, temperaturą, materiałem — gdy nie wynikają z nazwy."""
     removed: list[str] = []
     allowed = _numbers(name) | ABBREVIATION_NUMBERS
+    name_ext = _name_with_expansions(name)
 
-    def check_li(match: re.Match) -> str:
-        invented = _numbers(_plain(match.group(1))) - allowed
+    def bad(fragment: str) -> str:
+        invented = _numbers(_plain(fragment)) - allowed
         if invented:
-            removed.append(f"liczby spoza nazwy {sorted(invented)}: {_plain(match.group(1))[:60]}")
-            return ""
-        return match.group(0)
+            return f"liczby spoza nazwy {sorted(invented)}"
+        tech = _unsupported_tech(fragment, name_ext)
+        return f"„{tech}” spoza nazwy" if tech else ""
 
-    out = re.sub(r"<p>.*?</p>", lambda mt: removed.append("akapit") or "", desc_html, flags=re.I | re.S)
-    out = re.sub(r"<li>(.*?)</li>", check_li, out, flags=re.I | re.S)
+    def clean_block(match: re.Match) -> str:
+        tag, inner = match.group(1).lower(), match.group(2)
+        if tag == "li":
+            why = bad(inner)
+            if why:
+                removed.append(f"{why}: {_plain(inner)[:60]}")
+                return ""
+            return match.group(0)
+        kept = []
+        for sentence in _SENTENCE_END.split(inner):
+            why = bad(sentence)
+            if why:
+                removed.append(f"{why}: {_plain(sentence)[:60]}")
+            else:
+                kept.append(sentence)
+        return f"<p>{' '.join(kept)}</p>" if _plain(" ".join(kept)) else ""
+
+    out = re.sub(r"<(p|li)>(.*?)</\1>", clean_block, desc_html, flags=re.I | re.S)
     out = re.sub(r"<ul>\s*</ul>", "", out, flags=re.I)
     return out, removed
 
@@ -1680,12 +1755,19 @@ def review_description(desc_html: str, row: dict, source: dict | None, row_label
     if typo_fixes:
         log.info("%s poprawione literówki: %s", row_label, ", ".join(typo_fixes))
         reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
-    if not source:
-        desc_html, extras = strip_name_only_extras(desc_html, row["name"])
-        if extras:
-            log.info("%s opis z nazwy — usunięte: %s", row_label, "; ".join(extras))
-        if not re.search(r"<li>", desc_html, flags=re.I):
-            reasons.append("opis z nazwy bez listy parametrów")
+    # Każdy opis (także ze strony źródłowej) ma być ogólny: dane techniczne tylko te, które wynikają z nazwy.
+    desc_html, extras = strip_name_only_extras(desc_html, row["name"])
+    if extras:
+        log.info("%s usunięte dane spoza nazwy: %s", row_label, "; ".join(extras))
+    length = len(_plain(re.sub(r"<h2>.*?</h2>", "", desc_html, flags=re.I | re.S)))
+    if length < MIN_NAME_ONLY_CHARS:
+        reasons.append(f"opis za krótki po usunięciu danych spoza nazwy ({length} znaków)")
+    heading = re.search(r"<h2>(.*?)</h2>", desc_html, flags=re.I | re.S)
+    if heading:
+        invented = sorted(_numbers(_plain(heading.group(1))) - _numbers(row["name"]) - ABBREVIATION_NUMBERS)
+        tech = _unsupported_tech(heading.group(1), _name_with_expansions(row["name"]))
+        if invented or tech:
+            reasons.append(f"nagłówek zawiera dane spoza nazwy: {tech or ', '.join(invented)}")
     source_text = " ".join([row["name"], row["category"], (source or {}).get("excerpt", "")])
     desc_html, removed = filter_generic_claims(desc_html, source_text)
     if removed:

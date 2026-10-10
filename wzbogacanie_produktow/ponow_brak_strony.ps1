@@ -4,7 +4,7 @@
 # Skrypt Pythona blokuje plik wyników (*.lock), więc nie ruszy równolegle z uruchom_cala_baze.ps1.
 Set-Location $PSScriptRoot
 $env:AI_PROVIDER = "ollama"
-$env:OLLAMA_MODEL = "qwen2.5:14b-instruct"
+$env:OLLAMA_MODEL = "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"   # lepsza polszczyzna niż qwen2.5:14b-instruct
 $env:PYTHONIOENCODING = "utf-8"
 
 for ($i = 1; $i -le 100; $i++) {
