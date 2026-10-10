@@ -500,6 +500,9 @@ def backup_reason(record: dict, url: str, verified: bool, note: str) -> str:
     return ""
 
 
+LOGGED_SKIPS: set[str] = set()
+
+
 def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
                  tried: set[str], notes: list[str], backups: list[tuple]) -> tuple[str, bool, bytes, str, str]:
     """Pierwsze zdjęcie, które przejdzie filtry i model wizyjny: (url, potwierdzone, dane, rozszerzenie, strona).
@@ -513,8 +516,9 @@ def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
     for _ in range(VISION_TRIES):
         rejected: list[str] = []
         url, verified, _, reason = w.pick_image(cands, None, base, tried, rejected)  # pobiera + filtry
-        for line in rejected:  # tylko filtr adresu — żeby było widać, co dokładnie odpadło (404 itp. to szum)
-            if line.startswith("logo/baner"):
+        for line in rejected:  # tylko filtr adresu, każdy adres raz na przebieg (logo sklepu jest na każdej karcie)
+            if line.startswith("logo/baner") and line not in LOGGED_SKIPS:
+                LOGGED_SKIPS.add(line)
                 log.info("[id=%s] pominięte — %s", record[COL_ID], line)
         if not url:
             if reason:
