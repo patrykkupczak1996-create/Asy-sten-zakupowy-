@@ -39,6 +39,7 @@ import warnings
 import webbrowser
 
 import pandas as pd
+import requests
 
 try:
     import wzbogac_produkty as w
@@ -114,18 +115,91 @@ def ids_with_shop_photos(path: str) -> set[str]:
     return ids - {""}
 
 
+def _jsonld_images(node) -> list[str]:
+    """Adresy z pól „image” w danych strukturalnych (schema.org Product) — zwykle główne, duże zdjęcie."""
+    out: list[str] = []
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if key in ("image", "contentUrl"):
+                if isinstance(val, str):
+                    out.append(val)
+                elif isinstance(val, dict):
+                    out += [v for v in (val.get("url"), val.get("contentUrl")) if isinstance(v, str)]
+                elif isinstance(val, list):
+                    for v in val:
+                        out += [v] if isinstance(v, str) else _jsonld_images({"image": v})
+            elif isinstance(val, (dict, list)):
+                out += _jsonld_images(val)
+    elif isinstance(node, list):
+        for item in node:
+            out += _jsonld_images(item)
+    return out
+
+
+def extra_page_images(url: str, known: list[str]) -> tuple[list[str], list[str]]:
+    """Zdjęcia, których fetch_page nie widzi: (z danych strukturalnych JSON-LD, pełne wersje z linków powiększenia).
+
+    Link powiększenia bierzemy tylko wtedy, gdy obejmuje miniaturę, która JUŻ jest kandydatem —
+    wtedy to na pewno ta sama fotografia (nie „podobne produkty” ani baner).
+    """
+    from urllib.parse import urljoin
+
+    if w.domain_blocked(url):
+        return [], []
+    try:
+        resp = requests.get(url, headers=w.BROWSER_HEADERS, timeout=w.PAGE_TIMEOUT)
+        if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
+            return [], []
+        doc = w.html_doc(resp)
+    except Exception:
+        return [], []
+    ld: list[str] = []
+    for block in doc.xpath('//script[@type="application/ld+json"]/text()'):
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        ld += [urljoin(url, u) for u in _jsonld_images(data) if u.startswith(("http", "/"))]
+    known_set = set(known)
+    big: list[str] = []
+    for a in doc.xpath("//a[@href]"):
+        href = urljoin(url, a.get("href"))
+        if not w.is_direct_image_url(href) or href in known_set:
+            continue
+        for img in a.xpath(".//img"):
+            src = img.get("data-src") or img.get("src") or ""
+            if src and urljoin(url, src) in known_set:
+                big.append(href)
+                break
+    for node in doc.xpath("//picture/source[@srcset]"):  # <picture>: największy wariant
+        if node.getparent() is not None and any(urljoin(url, i.get("src") or "") in known_set
+                                                for i in node.getparent().xpath(".//img")):
+            biggest = w.largest_from_srcset(node.get("srcset"))
+            if biggest:
+                big.append(urljoin(url, biggest))
+    return list(dict.fromkeys(ld)), list(dict.fromkeys(big))
+
+
+def page_candidates(url: str, m, verified: bool, page=None) -> list[tuple[str, bool, str]]:
+    """Kandydaci ze strony produktu: JSON-LD → pełne wersje z linków → galeria/og:image (jak dotąd)."""
+    page = page or w.fetch_page(url)
+    if not page:
+        return []
+    shop = {"url": url, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
+            "producer_site": True}
+    base = w.image_candidates_from_source(m, shop)
+    ld, big = extra_page_images(url, base + [s for s, _ in page[2]])
+    return [(u, verified, url) for u in dict.fromkeys(ld + big + base)]
+
+
 def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
     """Zdjęcia ze strony źródłowej potwierdzonej kodem/EAN przy opisach."""
     m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
     src = record.get(COL_SOURCE, "")
     if not src or w.is_watermark_site(src):
         return []
-    page = w.fetch_page(src)
-    if not page:
-        return []
-    source = {"url": src, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
-              "producer_site": True}  # strona potwierdzona kodem/EAN — galeria to ten produkt
-    return [(u, True, src) for u in w.image_candidates_from_source(m, source)]
+    # strona potwierdzona kodem/EAN — galeria i dane strukturalne to ten produkt
+    return page_candidates(src, m, True)
 
 
 def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
@@ -148,9 +222,7 @@ def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
         page = w.fetch_page(url)
         if not page or (m.find(page[0]) is None and not m.in_short_text(url, page[3] if len(page) > 3 else "")):
             continue
-        shop = {"url": url, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
-                "producer_site": True}
-        found += [(u, True, url) for u in w.image_candidates_from_source(m, shop)]
+        found += page_candidates(url, m, True, page)
     return found
 
 
