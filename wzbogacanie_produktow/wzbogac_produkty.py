@@ -1908,6 +1908,7 @@ Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"zdjecie_produktu": true lub false,
   "rodzaj_zgodny": true lub false,
   "znak_wodny": true lub false,
+  "zbedne_napisy": true lub false,
   "uwagi": "krótko po polsku, co jest nie tak (puste, jeśli wszystko w porządku)"}}
 
 - "zdjecie_produktu": true tylko jeśli widać fizyczny produkt (np. zasuwa, zawór, łącznik, kształtka, rura).
@@ -1917,7 +1918,14 @@ Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
 - "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny SKLEPU lub innej firmy niż producent, adres strony
   www, numer telefonu albo napis przez środek zdjęcia, który nie jest częścią produktu.
   NIE są znakiem wodnym (wtedy false): nazwa lub logo producenta „{producer}” (także małe, w rogu zdjęcia),
-  napisy odlane/nadrukowane na produkcie, napisy na opakowaniu produktu."""
+  napisy odlane/nadrukowane na produkcie, napisy na opakowaniu produktu.
+- "zbedne_napisy": true, jeśli OBOK produktu (na tle, nie na nim) są napisy, które nie są znakiem wodnym:
+  nazwa lub opis produktu, wymiary, strzałki, ikonki, tabelka — da się je odciąć, kadrując samo zdjęcie produktu."""
+
+PRODUCT_BOX_PROMPT = """Locate the product ({name}) in this image. Exclude any text, captions, dimensions, arrows,
+icons or logos that are next to the product (not printed on it). Answer ONLY with JSON:
+{{"bbox_2d": [x1, y1, x2, y2]}}"""
+LAST_VISION_ANSWER: dict = {}  # ostatnia odpowiedź check_one_image (zdjecia.py sprawdza pole „zbedne_napisy”)
 
 
 def check_file_path(output_path: str) -> str:
@@ -1986,13 +1994,50 @@ def _shrink_for_vision(data: bytes) -> bytes:
         return out.getvalue()
 
 
+def product_box(data: bytes, name: str) -> tuple[int, int, int, int] | None:
+    """Prostokąt (x1, y1, x2, y2) z samym produktem w pikselach oryginału — wskazany przez model wizyjny."""
+    import base64
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        width, height = img.size
+        # Qwen2.5-VL podaje współrzędne w pikselach obrazu, który widzi; boki będące wielokrotnością 28
+        # Ollama zostawia bez zmian, więc łatwo przeliczyć je z powrotem na oryginał.
+        scale = min(1.0, 1008 / max(width, height))
+        sent_w, sent_h = (max(28, round(width * scale / 28) * 28), max(28, round(height * scale / 28) * 28))
+        out = io.BytesIO()
+        img.resize((sent_w, sent_h)).save(out, "JPEG", quality=90)
+    host = AI_PROVIDERS["ollama"]["base_url"].removesuffix("/v1")
+    resp = requests.post(host + "/api/chat", timeout=300, json={
+        "model": VISION_MODEL, "stream": False, "format": "json",
+        "messages": [{"role": "user", "content": PRODUCT_BOX_PROMPT.format(name=name),
+                      "images": [base64.b64encode(out.getvalue()).decode("ascii")]}],
+        "options": {"temperature": 0, "num_ctx": 4096},
+    })
+    resp.raise_for_status()
+    box = parse_json((resp.json().get("message") or {}).get("content") or "{}").get("bbox_2d")
+    if isinstance(box, list) and len(box) == 1 and isinstance(box[0], list):
+        box = box[0]
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    x1, x2 = sorted((max(0.0, min(x1, sent_w)), max(0.0, min(x2, sent_w))))
+    y1, y2 = sorted((max(0.0, min(y1, sent_h)), max(0.0, min(y2, sent_h))))
+    fx, fy = width / sent_w, height / sent_h
+    return round(x1 * fx), round(y1 * fy), round(x2 * fx), round(y2 * fy)
+
+
 def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
     """(wynik, uwagi) dla zdjęcia produktu — z rekordu albo z podanych bajtów (zdjęcie zastępcze)."""
+    LAST_VISION_ANSWER.clear()
     try:
         image = _shrink_for_vision(data) if data is not None else _image_for_vision(record)
     except Exception as exc:
         return CHECK_REJECTED, str(exc)
     answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), record.get(COL_PRODUCER, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
+    LAST_VISION_ANSWER.update(answer or {})
     if answer is None:
         return CHECK_REJECTED, "model nie ocenił zdjęcia"
     problems = []

@@ -8,7 +8,9 @@ a gdy jej brak albo zdjęcie odpada — z karty produktu w sklepie producenta (A
 którą skrypt opisów już znalazł i potwierdził kodem/EAN (kolumna Zrodlo_URL) — bez ponownego
 wyszukiwania. Każde zdjęcie przechodzi filtry (logo/baner w adresie, rozmiar min. 400 px,
 proporcje, prawdziwy plik obrazu) i model wizyjny Ollamy (czy to produkt, czy ten rodzaj,
-czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
+czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane. Zdjęcie z napisami
+OBOK produktu (wymiary, nazwa, strzałki) jest kadrowane do samego produktu i trafia do akceptacji,
+jeśli nie znajdzie się czyste; znaków wodnych sklepów nie wycinamy.
 
   py zdjecia.py --limit 20          test na 20 produktach
   py zdjecia.py                     cała baza (wznawia od miejsca przerwania, Ctrl+C = przerwa)
@@ -17,6 +19,7 @@ czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
   py zdjecia.py --pomin eksport_idosell.csv   pomiń produkty, które mają już zdjęcie w sklepie
   py zdjecia.py --podglad           strona z miniaturami: PEWNE do obejrzenia, wątpliwe do akceptacji
   py zdjecia.py --zapisz            plik dla IdoSell: @id + link do zdjęcia (pewne + zaakceptowane)
+  py zdjecia.py --zapisz --adres-kadrow https://sklep.pl/data/kadry   wykadrowane z folderu zdjecia_kadry/
 
 Wyniki: opisy_wszystkie_zdjecia.csv, pliki w folderze zdjecia/.
 Model wizyjny i model opisów nie mieszczą się razem na karcie 12 GB — uruchamiaj ten skrypt,
@@ -33,6 +36,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import unicodedata
@@ -511,6 +515,46 @@ def backup_reason(record: dict, url: str, verified: bool, note: str) -> str:
     return ""
 
 
+CROP_REASON = "wykadrowane — odcięto napisy obok produktu, sprawdź kadr"
+CROP_PAD = 0.04              # margines wokół produktu (część boku prostokąta)
+CROP_SUFFIX = "_kadr"        # pliki wykadrowanych zdjęć: <id>_<kod>_kadr.jpg
+
+
+def crop_text_away(record: dict, data: bytes) -> bytes:
+    """Samo zdjęcie produktu bez napisów obok (wymiary, nazwa, strzałki) — albo b"", gdy się nie da.
+
+    Tylko dla napisów, które model uznał za NIE-znak wodny: znaków wodnych sklepów nie wycinamy, takie
+    zdjęcie po prostu odpada i szukamy innego.
+    """
+    from PIL import Image
+
+    try:
+        box = w.with_retry(w.product_box, data, record.get(COL_NAME, ""), what=f"[id={record[COL_ID]}] kadr")
+    except Exception:
+        box = None
+    if not box:
+        return b""
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        width, height = img.size
+        x1, y1, x2, y2 = box
+        if (x2 - x1) * (y2 - y1) < 0.1 * width * height or (x2 - x1) * (y2 - y1) > 0.92 * width * height:
+            return b""  # model wskazał byle co albo prawie całe zdjęcie — kadr nic nie da
+        pad_x, pad_y = (x2 - x1) * CROP_PAD, (y2 - y1) * CROP_PAD
+        crop = img.crop((max(0, round(x1 - pad_x)), max(0, round(y1 - pad_y)),
+                         min(width, round(x2 + pad_x)), min(height, round(y2 + pad_y))))
+        if min(crop.size) < 400:
+            return b""
+        out = io.BytesIO()
+        crop.save(out, "JPEG", quality=92)
+    cropped = out.getvalue()
+    result, note = w.check_one_image(record, cropped)  # kadr musi przejść tę samą kontrolę od nowa
+    if result != w.CHECK_OK or w.LAST_VISION_ANSWER.get("zbedne_napisy") is True:
+        log.info("[id=%s] kadr odrzucony — %s", record[COL_ID], note or "nadal widać napisy")
+        return b""
+    return cropped
+
+
 LOGGED_SKIPS: set[str] = set()
 
 
@@ -543,6 +587,17 @@ def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
         small = min(width, height) < 400
         if vision:
             result, note = w.check_one_image(record, data)
+            answer = dict(w.LAST_VISION_ANSWER)
+            if (answer.get("zdjecie_produktu") is True and answer.get("rodzaj_zgodny") is True
+                    and answer.get("znak_wodny") is False and answer.get("zbedne_napisy") is True):
+                # Produkt dobry, przeszkadzają tylko napisy obok niego: szukamy dalej czystego zdjęcia,
+                # a wykadrowane zostaje jako zapas do akceptacji.
+                log.info("[id=%s] napisy obok produktu — kadruję: %s", record[COL_ID], url)
+                cropped = b"" if small else crop_text_away(record, data)
+                if cropped:
+                    backups.append((url, verified, cropped, ".jpg", pages.get(url, ""), CROP_REASON))
+                notes.append("napisy obok produktu" + ("" if cropped else " (kadr się nie udał)"))
+                continue
             if result != w.CHECK_OK:
                 notes.append(note)
                 log.info("[id=%s] odrzucone — %s: %s", record[COL_ID], note, url)
@@ -607,6 +662,8 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
     if backups:  # nic pewnego — najlepszy zapas (z najwcześniejszego etapu) do akceptacji jednym kliknięciem
         url, verified, data, ext, page, why = backups[0]
         base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
+        if why == CROP_REASON:
+            base += CROP_SUFFIX
         out.update({COL_IMG_URL: url, COL_IMG_PAGE: page, COL_IMG_STATUS: REVIEW, COL_IMG_REASON: why,
                     COL_IMG_FILE: w.save_image(data, ext, images_dir, base).replace(os.sep, "/")})
         return out
@@ -784,7 +841,22 @@ def save(args) -> None:
         with open(store, encoding="utf-8") as fh:
             accepted = {line.strip() for line in fh if line.strip()}
     ok = df[(df[COL_IMG_STATUS] == OK) | ((df[COL_IMG_STATUS] == REVIEW) & df[COL_ID].isin(accepted))]
-    ok = ok[ok[COL_IMG_URL].str.strip().ne("")]
+    ok = ok[ok[COL_IMG_URL].str.strip().ne("")].copy()
+    # Wykadrowane zdjęcia są tylko na dysku (link prowadzi do oryginału z napisami): kopiujemy je do
+    # jednego folderu jako <id>.jpg — po wgraniu ich do sklepu link to --adres-kadrow + <id>.jpg.
+    cropped = ok[ok[COL_IMG_REASON].eq(CROP_REASON) & ok[COL_IMG_FILE].map(lambda f: bool(f) and os.path.isfile(f))]
+    if len(cropped):
+        folder = os.path.join(os.path.dirname(os.path.abspath(args.output)), "zdjecia_kadry")
+        os.makedirs(folder, exist_ok=True)
+        for r in cropped.to_dict("records"):
+            shutil.copyfile(r[COL_IMG_FILE], os.path.join(folder, f"{r[COL_ID]}.jpg"))
+        if args.adres_kadrow:
+            ok.loc[cropped.index, COL_IMG_URL] = [args.adres_kadrow.rstrip("/") + f"/{i}.jpg" for i in cropped[COL_ID]]
+        else:
+            ok = ok.drop(index=cropped.index)
+        print(f"Wykadrowane zdjęcia: {len(cropped)} — skopiowane do {folder}. "
+              + ("Linki w pliku wskazują na --adres-kadrow." if args.adres_kadrow else
+                 "Wgraj je do sklepu i uruchom ponownie z --adres-kadrow <adres folderu> — na razie pominięte."))
     path = side(args.output, "zdjecia_idosell")
     ok[[COL_ID, COL_IMG_URL]].rename(columns={COL_IMG_URL: args.kolumna_zdjecia}).to_csv(
         path, index=False, encoding="utf-8-sig")
@@ -808,6 +880,8 @@ def main() -> None:
     p.add_argument("--podglad", action="store_true", help="Strona z miniaturami i akceptacją")
     p.add_argument("--zapisz", action="store_true", help="Plik dla IdoSell (@id + link do zdjęcia)")
     p.add_argument("--plik", help="Plik pobrany ze strony podglądu (domyślnie najnowszy z Pobranych)")
+    p.add_argument("--adres-kadrow", metavar="URL",
+                   help="Adres folderu w sklepie z wgranymi wykadrowanymi zdjęciami (pliki <id>.jpg z zdjecia_kadry/)")
     p.add_argument("--kolumna-zdjecia", default=IDOSELL_IMAGE_COLUMN,
                    help="Nagłówek kolumny zdjęcia w pliku dla IdoSell (jak w eksporcie IdoSell)")
     p.add_argument("--odrzuc", nargs="+", metavar="ID",
