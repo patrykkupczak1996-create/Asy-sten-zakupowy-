@@ -66,14 +66,87 @@ for site in ("mateomarket.pl",):
         w.WATERMARK_SITES.append(site)
 # Wysokie produkty (hydranty, zasuwy z trzpieniem) mają zdjęcia ok. 1:2 — 0,5 odrzucało je jako „baner”.
 w.MIN_IMAGE_RATIO = min(w.MIN_IMAGE_RATIO, 0.4)
+# …a długie (odpływy liniowe ALCA na sanitino.*: 960x472) ok. 2:1 — 1,9 odrzucało je tak samo. Baner/logo
+# o mniej skrajnych proporcjach i tak odrzuci model wizyjny.
+w.MAX_IMAGE_RATIO = max(w.MAX_IMAGE_RATIO, 2.5)
 # Kilka etapów (źródło, producent, wyszukiwarka) + większe wersje miniatur — 15 prób to za mało.
 w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 30)
 # Rysunki techniczne, części zamienne i schematy wymiarowe to nie zdjęcia produktu (np. ALCA: /spareparts/).
 w.BAD_IMAGE_WORDS = tuple(dict.fromkeys(w.BAD_IMAGE_WORDS + (
     "sparepart", "spare-part", "spare_part", "drawing", "rysunek", "schemat", "scheme", "wymiar",
     "dimension", "technical", "/cad/", "_cad", "-cad", ".dwg", "diagram", "certyfikat", "certificate", "pictogram",
-    "piktogram", "zrzut-ekranu", "zrzut_ekranu", "screenshot", "screen-shot", "screen_shot")))
+    "piktogram", "zrzut-ekranu", "zrzut_ekranu", "screenshot", "screen-shot", "screen_shot",
+    # alcadrain.com: „A97_koty.png” to rysunek wymiarowy (cz. kóty = wymiary); /category/thumbs/ to miniatury
+    # kategorii z menu (VirtueMart), a .avif nie umiemy otworzyć — każdy taki adres zabierał jedną z 30 prób.
+    "_koty", "-koty", "/category/", ".avif")))
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")  # „Palette images with Transparency…”
+
+# Serwery zdjęć, na których jedna karta pokazuje też warianty serii (sanitino.*: inne długości odpływu to inne
+# PRODUCT-…): bierzemy tylko zdjęcia z tym samym numerem co og:image karty.
+SAME_ITEM_ID = {"data.sanitino.eu": r"/PRODUCT-(\d+)/"}
+# Strony, które przy szybkich zapytaniach odpowiadają HTTP 429 (alcadrain.com: „Too many requests”) — odstęp
+# między zapytaniami w sekundach. To nie obchodzi limitu, tylko się w nim mieści.
+HOST_DELAY = {"alcadrain.com": 4.0}
+RETRY_429_WAIT = 90          # s — jedna ponowna próba po 429; potem domena jest pomijana do końca przebiegu
+
+
+class PoliteRequests:
+    """Zamiast modułu requests w wzbogac_produkty: odstęp między zapytaniami do HOST_DELAY i obsługa HTTP 429.
+
+    Po 429 czeka (Retry-After albo RETRY_429_WAIT) i ponawia raz; drugi 429 = domena pominięta do końca
+    przebiegu (jak przy 403), a produkty dostają powód „HTTP 429”, więc --ponow-brak je dokończy.
+    """
+
+    def __init__(self, module):
+        self._mod = module
+        self._last: dict[str, float] = {}
+        self.limited: set[str] = set()
+        self._page: tuple[str, object] | None = None
+
+    def __getattr__(self, name):  # requests.RequestException, requests.Response itd.
+        return getattr(self._mod, name)
+
+    @staticmethod
+    def host(url: str) -> str:
+        from urllib.parse import urlsplit
+        return urlsplit(url).netloc.lower().removeprefix("www.")
+
+    def _pace(self, host: str) -> None:
+        delay = next((d for h, d in HOST_DELAY.items() if host == h or host.endswith("." + h)), 0)
+        wait = self._last.get(host, 0) + delay - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        self._last[host] = time.time()
+
+    def get(self, url, *args, **kwargs):
+        # Ta sama karta jest czytana dwa razy z rzędu (fetch_page, potem extra_page_images) — drugi raz z pamięci.
+        cacheable = not kwargs.get("stream")
+        if cacheable and self._page and self._page[0] == url:
+            return self._page[1]
+        host = self.host(url)
+        self._pace(host)
+        resp = self._mod.get(url, *args, **kwargs)
+        if cacheable and resp.status_code == 200:
+            self._page = (url, resp)
+        if resp.status_code != 429 or host in self.limited:
+            return resp
+        retry = resp.headers.get("Retry-After", "")
+        wait = min(int(retry), 300) if retry.isdigit() else RETRY_429_WAIT
+        log.warning("%s: HTTP 429 (za dużo zapytań) — czekam %d s i ponawiam.", host, wait)
+        resp.close()
+        time.sleep(wait)
+        self._pace(host)
+        resp = self._mod.get(url, *args, **kwargs)
+        if resp.status_code == 429:
+            self.limited.add(host)
+            log.warning("%s nadal odpowiada 429 — pomijam do końca przebiegu (dokończy --ponow-brak).", host)
+            for _ in range(w.BLOCK_AFTER):
+                w.note_response(url, 403)  # ten sam mechanizm co przy blokadzie 403: domain_blocked() = True
+        return resp
+
+
+http = PoliteRequests(requests)
+w.requests = http  # fetch_page / fetch_image w głównym skrypcie też idą przez odstępy i obsługę 429
 
 
 def side(output: str, suffix: str, ext: str = ".csv") -> str:
@@ -147,7 +220,7 @@ def extra_page_images(url: str, known: list[str]) -> tuple[list[str], list[str]]
     if w.domain_blocked(url):
         return [], []
     try:
-        resp = requests.get(url, headers=w.BROWSER_HEADERS, timeout=w.PAGE_TIMEOUT)
+        resp = http.get(url, headers=w.BROWSER_HEADERS, timeout=w.PAGE_TIMEOUT)
         if resp.status_code != 200 or "html" not in resp.headers.get("Content-Type", "").lower():
             return [], []
         doc = w.html_doc(resp)
@@ -189,7 +262,17 @@ def page_candidates(url: str, m, verified: bool, page=None) -> list[tuple[str, b
             "producer_site": True}
     base = w.image_candidates_from_source(m, shop)
     ld, big = extra_page_images(url, base + [s for s, _ in page[2]])
-    return [(u, verified, url) for u in dict.fromkeys(ld + big + base)]
+    return [(u, verified, url) for u in same_item(dict.fromkeys(ld + big + base), page[1])]
+
+
+def same_item(urls, og_images: list[str]) -> list[str]:
+    """Bez zdjęć innych wariantów serii z tej samej karty (SAME_ITEM_ID) — gdy og:image wskazuje numer pozycji."""
+    out = list(urls)
+    for host, pattern in SAME_ITEM_ID.items():
+        ids = {m.group(1) for u in og_images if http.host(u) == host and (m := re.search(pattern, u))}
+        if ids:
+            out = [u for u in out if http.host(u) != host or (m := re.search(pattern, u)) is None or m.group(1) in ids]
+    return out
 
 
 def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
@@ -321,6 +404,9 @@ def bigger_variants(url: str) -> list[str]:
     stripped = re.sub(r"-\d{2,4}x\d{2,4}(?=\.[A-Za-z]{3,4}$)", "", path)  # WordPress/WooCommerce
     if stripped != path:
         variants.append(stripped)
+    prefixed = re.sub(r"/\d{2,4}_{2,3}(?=[^/]+$)", "/", path)  # rurex.pl i in.: „/f83/500___5.jpg” → „/f83/5.jpg”
+    if prefixed != path:
+        variants.append(prefixed)
     for small, big in SIZE_WORDS:
         if small in path.lower():
             variants.append(re.sub(re.escape(small), big, path, flags=re.IGNORECASE))
@@ -401,8 +487,11 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
         out[COL_IMG_STATUS] = REVIEW if problems else OK
         out[COL_IMG_REASON] = "; ".join(problems)
         return out
-    if not any_candidates:
-        out[COL_IMG_REASON] = "brak zdjęcia na stronie źródłowej" if record.get(COL_SOURCE) else "brak strony źródłowej"
+    src = record.get(COL_SOURCE, "")
+    if not any_candidates and src and http.host(src) in http.limited:
+        out[COL_IMG_REASON] = "strona źródłowa ogranicza liczbę zapytań (HTTP 429) — ponów: --ponow-brak"
+    elif not any_candidates:
+        out[COL_IMG_REASON] = "brak zdjęcia na stronie źródłowej" if src else "brak strony źródłowej"
         if w.PRODUCER_SEARCH.get(record.get(COL_PRODUCER, "").strip().upper()):
             out[COL_IMG_REASON] += "; brak pasującej pozycji w sklepie producenta"
     else:
