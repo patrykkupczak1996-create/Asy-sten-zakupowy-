@@ -1820,6 +1820,7 @@ CHECK_OK, CHECK_REJECTED = "OK", "ODRZUCONE"
 
 VISION_PROMPT = """To zdjęcie ma być zdjęciem produktu w sklepie internetowym z armaturą instalacyjną.
 Produkt: {name}
+Producent: {producer}
 
 Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"zdjecie_produktu": true lub false,
@@ -1831,9 +1832,10 @@ Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
   false dla: logo, banera, samego napisu, rysunku technicznego, tabeli, zrzutu strony, zdjęcia innego przedmiotu.
 - "rodzaj_zgodny": true tylko jeśli na zdjęciu jest TEN SAM RODZAJ produktu co w nazwie powyżej
   (np. nazwa „łącznik” → na zdjęciu łącznik; hydrant, zasuwa, rura czy zawór to wtedy false).
-- "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny, logo sklepu lub firmy, adres strony www,
-  numer telefonu albo inny napis, który nie jest częścią samego produktu (napisy odlane/nadrukowane
-  na produkcie się nie liczą)."""
+- "znak_wodny": true, jeśli na zdjęcie nałożono znak wodny SKLEPU lub innej firmy niż producent, adres strony
+  www, numer telefonu albo napis przez środek zdjęcia, który nie jest częścią produktu.
+  NIE są znakiem wodnym (wtedy false): nazwa lub logo producenta „{producer}” (także małe, w rogu zdjęcia),
+  napisy odlane/nadrukowane na produkcie, napisy na opakowaniu produktu."""
 
 
 def check_file_path(output_path: str) -> str:
@@ -1875,7 +1877,7 @@ def _image_for_vision(record: dict) -> bytes:
         return out.getvalue()
 
 
-def _ask_vision(image_jpeg: bytes, name: str) -> dict:
+def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
     import base64
 
     host = AI_PROVIDERS["ollama"]["base_url"].removesuffix("/v1")
@@ -1883,7 +1885,7 @@ def _ask_vision(image_jpeg: bytes, name: str) -> dict:
         "model": VISION_MODEL,
         "stream": False,
         "format": "json",
-        "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name),
+        "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych"),
                       "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
         "options": {"temperature": 0, "num_ctx": 4096},
     })
@@ -1908,7 +1910,7 @@ def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
         image = _shrink_for_vision(data) if data is not None else _image_for_vision(record)
     except Exception as exc:
         return CHECK_REJECTED, str(exc)
-    answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
+    answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), record.get(COL_PRODUCER, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
     if answer is None:
         return CHECK_REJECTED, "model nie ocenił zdjęcia"
     problems = []
