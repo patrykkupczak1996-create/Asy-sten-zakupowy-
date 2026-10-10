@@ -12,7 +12,7 @@ czy nie ma znaku wodnego). Strony ze znakami wodnymi (onninen.pl) są pomijane.
 
   py zdjecia.py --limit 20          test na 20 produktach
   py zdjecia.py                     cała baza (wznawia od miejsca przerwania, Ctrl+C = przerwa)
-  py zdjecia.py --szukaj            produkty bez zdjęcia na stronie źródłowej: także wyszukiwarka obrazów
+  py zdjecia.py --szukaj            na końcu także wyszukiwarka obrazów (inne strony z kodem/EAN są zawsze)
   py zdjecia.py --ponow-brak --szukaj   jeszcze raz produkty, które zostały bez zdjęcia
   py zdjecia.py --pomin eksport_idosell.csv   pomiń produkty, które mają już zdjęcie w sklepie
   py zdjecia.py --podglad           strona z miniaturami: PEWNE do obejrzenia, wątpliwe do akceptacji
@@ -293,6 +293,39 @@ def source_candidates(record: dict) -> list[tuple[str, bool, str]]:
     return page_candidates(src, m, True)
 
 
+WEB_PAGES_TO_CHECK = 5       # ile stron z wyników wyszukiwania (po kodzie/EAN) otworzyć na produkt
+
+
+def web_page_candidates(record: dict, engine: str) -> list[tuple[str, bool, str]]:
+    """Zdjęcia z INNYCH stron (hurtownie, sklepy) znalezionych w wyszukiwarce po kodzie i EAN.
+
+    Bierzemy tylko strony, na których jest kod albo EAN produktu — jak przy stronie źródłowej. Strona źródłowa
+    z opisów to jedna strona; ten sam kod ma zwykle kilka innych sklepów, często ze zdjęciem.
+    """
+    code, ean = record.get(COL_CODE, "").strip(), record.get(COL_EAN, "").strip()
+    producer = record.get(COL_PRODUCER, "").strip()
+    m = w.ProductMatcher(code, ean, producer)
+    skip = {record.get(COL_SOURCE, "")}
+    queries = [q for q in (f"{producer} {code}".strip() if code else "", ean) if q]
+    out: list[tuple[str, bool, str]] = []
+    checked = 0
+    for query in queries:
+        urls = w.with_retry(w.search_pages, query, engine, what=f"[id={record[COL_ID]}] strony '{query}'") or []
+        for url in urls:
+            if checked >= WEB_PAGES_TO_CHECK:
+                return out
+            if not url or url in skip or w.is_watermark_site(url) or w.domain_blocked(url):
+                continue
+            skip.add(url)
+            checked += 1
+            page = w.fetch_page(url)
+            if page and m.find(page[0]) is not None:  # strona ma kod/EAN — zdjęcia potwierdzone
+                out += page_candidates(url, m, True, page)
+        if out:
+            break  # są zdjęcia po kodzie — EAN niepotrzebny
+    return out
+
+
 def producer_code_candidates(record: dict) -> list[tuple[str, bool, str]]:
     """Zdjęcia z karty produktu na stronie producenta znalezionej PO KODZIE (DIRECT_SEARCH w głównym skrypcie).
 
@@ -517,6 +550,8 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
     stages = [("źródło", lambda: (source_candidates(record), "")),
               ("producent-kod", lambda: (producer_code_candidates(record), ""))]
     stages.append(("producent", lambda: producer_shop_candidates(record)))
+    # Gdy źródło i producent nic nie dały: inne strony z tym kodem/EAN (wyszukiwarka stron, nie obrazów).
+    stages.append(("inne strony", lambda: (web_page_candidates(record, engine), "")))
     if search:
         m = w.ProductMatcher(record.get(COL_CODE, ""), record.get(COL_EAN, ""), record.get(COL_PRODUCER, ""))
         stages.append(("wyszukiwarka", lambda: (w.image_candidates_from_search(
