@@ -454,6 +454,18 @@ SHOP_PAGE_RE = re.compile(r'"@type"\s*:\s*"Product"|do koszyka|dodaj do|add to (
                           r'koszyk|cena|netto|brutto|\d\s?zł|PLN|\d\s?€|€\s?\d', re.I)
 
 
+# Człony nazw producentów, które same nic nie mówią — nie wystarczą jako „producent na stronie”.
+GENERIC_PRODUCER_WORDS = {"armatura", "polska", "poland", "group", "grupa", "technika", "instal", "systems",
+                          "system", "plast", "industry", "industries", "company", "metal", "trade", "service"}
+
+
+def fold(text: str) -> str:
+    """Bez polskich i niemieckich znaków diakrytycznych (Bänninger → banninger, Łódź → lodz)."""
+    import unicodedata
+    text = text.replace("ł", "l").replace("Ł", "L")
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
+
+
 class ProductMatcher:
     """Sprawdza, czy tekst zawiera EAN albo kod producenta (+ nazwę producenta)."""
 
@@ -461,7 +473,7 @@ class ProductMatcher:
         self.ean_re = code_regex(ean) if len(re.sub(r"\D", "", ean)) >= 8 else None
         self.code_re = code_regex(code)
         self.code = code
-        self.producer = producer.lower()
+        self.producer = fold(producer.lower().strip())
 
     def find(self, text: str) -> int | None:
         """Pozycja potwierdzającego dopasowania w tekście albo None."""
@@ -469,9 +481,26 @@ class ProductMatcher:
             return m.start()
         if self.code_re and (m := self.code_re.search(text)):
             # Sam kod (np. AG0828) może się powtórzyć u innego producenta — wymagamy też nazwy producenta.
-            if not self.producer or self.producer in text.lower():
+            if self.producer_on_page(text):
                 return m.start()
         return None
+
+    def producer_on_page(self, text: str) -> bool:
+        """Nazwa producenta na stronie, także zapisana inaczej niż w bazie: „BOHAMET-ARMATURA” → „Bohamet”,
+        „APATOR-POWOGAZ” → „Apator Powogaz”, „BMETERS” → „B Meters”, „CONEX” → „Conex Bänninger”."""
+        if not self.producer:
+            return True
+        lower = fold(text.lower())
+        if self.producer in lower:
+            return True
+        squashed = re.sub(r"[^0-9a-z]", "", self.producer)
+        if len(squashed) >= 4 and squashed in re.sub(r"[^0-9a-z]", "", lower):
+            return True
+        return any(re.search(r"(?<![0-9a-z])" + re.escape(t), lower) for t in self.producer_words())
+
+    def producer_words(self) -> list[str]:
+        """Charakterystyczne człony nazwy producenta (min. 4 znaki, bez słów typu „armatura”, „polska”)."""
+        return [t for t in re.split(r"[^0-9a-z]+", self.producer) if len(t) >= 4 and t not in GENERIC_PRODUCER_WORDS]
 
     def distinctive_code(self) -> bool:
         """Kod, który sam w sobie wskazuje produkt: min. 6 znaków albo litery+cyfry (AG0510, A392B, HT-13X018).
@@ -490,7 +519,7 @@ class ProductMatcher:
             return False  # kod w tytule strony, która nie jest kartą produktu (np. numer lotu AA1058, repozytorium)
         lower, host = page_text.lower(), urlparse(url).netloc.lower()
         names = [p for p in re.split(r"[\s\-]+", self.producer) if len(p) >= 3]
-        if any(n in lower or n in host for n in names):
+        if any(n in lower or n in host for n in names) or self.producer_on_page(page_text):
             return True
         # Bez nazwy producenta: kod unikalny + rodzaj produktu z nazwy na karcie („AA1058” obudowa — nie baleriny).
         stems = [n[:5] for n in name_nouns(name, self.producer)]
