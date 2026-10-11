@@ -366,6 +366,33 @@ log = logging.getLogger("wzbogacanie")
 # =============================================================================
 # PONAWIANIE PRÓB
 # =============================================================================
+class ReopeningFileHandler(logging.FileHandler):
+    """Plik logu na dysku sieciowym (Z:): po chwilowym zerwaniu połączenia uchwyt pliku jest martwy i każdy wpis
+    kończył się „Logging error … OSError: Invalid argument”. Tu plik jest otwierany na nowo; gdy dysk nadal
+    nie odpowiada, wpis idzie tylko na ekran — bez zalewania go błędami, a przebieg działa dalej."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record) + self.terminator
+        except Exception:
+            self.handleError(record)
+            return
+        for _ in range(2):
+            try:
+                if self.stream is None:
+                    self.stream = self._open()
+                self.stream.write(msg)
+                self.stream.flush()
+                return
+            except OSError:
+                try:
+                    if self.stream:
+                        self.stream.close()
+                except OSError:
+                    pass
+                self.stream = None  # następny wpis spróbuje otworzyć plik na nowo
+
+
 class FatalError(Exception):
     """Błąd, którego ponawianie nie ma sensu (np. zły klucz API) — zatrzymuje skrypt."""
 
@@ -2931,7 +2958,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
         handlers=[logging.StreamHandler(),
-                  logging.FileHandler("wzbogacanie.log", encoding="utf-8")],
+                  ReopeningFileHandler("wzbogacanie.log", encoding="utf-8")],
     )
     # Biblioteki (httpx, ddgs, openai) logują każde zapytanie — to zasłania komunikaty skryptu.
     logging.getLogger().setLevel(logging.WARNING)

@@ -889,7 +889,7 @@ def main() -> None:
         return reject(args)
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)-7s %(message)s",
                         datefmt="%H:%M:%S", handlers=[logging.StreamHandler(),
-                                                      logging.FileHandler("zdjecia.log", encoding="utf-8")])
+                                                      w.ReopeningFileHandler("zdjecia.log", encoding="utf-8")])
     log.setLevel(logging.INFO)
     run(args)
 
