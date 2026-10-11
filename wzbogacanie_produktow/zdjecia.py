@@ -686,6 +686,7 @@ def run(args) -> None:
         if batch:
             w.append_batch(batch, COLUMNS, result_path)
         log.error("Zatrzymuję: %s", exc)
+        sys.exit(3)  # kod ≠ 0: zdjecia_noc.ps1 odczeka minutę i wznowi, gdy Ollama znów działa
     except Exception:
         if batch:
             w.append_batch(batch, COLUMNS, result_path)

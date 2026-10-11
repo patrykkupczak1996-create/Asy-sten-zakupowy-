@@ -2260,7 +2260,8 @@ def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
                       "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
         "options": {"temperature": 0, "num_ctx": 4096},
     })
-    resp.raise_for_status()
+    if resp.status_code >= 400:  # Ollama podaje przyczynę w treści (np. brak pamięci karty) — pokazujemy ją w logu
+        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text.strip()[:200]}")
     return parse_json((resp.json().get("message") or {}).get("content") or "{}")
 
 
@@ -2275,6 +2276,10 @@ def _shrink_for_vision(data: bytes) -> bytes:
         return out.getvalue()
 
 
+VISION_FAILS_TO_STOP = 3     # tyle zdjęć z rzędu bez odpowiedzi modelu wizyjnego = awaria Ollamy, nie złe zdjęcia
+_vision_fails_in_row = 0
+
+
 def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
     """(wynik, uwagi) dla zdjęcia produktu — z rekordu albo z podanych bajtów (zdjęcie zastępcze)."""
     try:
@@ -2283,7 +2288,15 @@ def check_one_image(record: dict, data: bytes | None = None) -> tuple[str, str]:
         return CHECK_REJECTED, str(exc)
     answer = with_retry(_ask_vision, image, record.get(COL_NAME, ""), record.get(COL_PRODUCER, ""), what=f"[id={record.get(COL_ID)}] kontrola zdjęcia")
     if answer is None:
+        global _vision_fails_in_row
+        _vision_fails_in_row += 1
+        if _vision_fails_in_row >= VISION_FAILS_TO_STOP:
+            # Nie oznaczamy kolejnych produktów jako „bez zdjęcia” z powodu awarii modelu — przebieg staje.
+            raise FatalError(f"model wizyjny nie odpowiada przy {_vision_fails_in_row} zdjęciach z rzędu — zwykle "
+                             "brakuje pamięci karty, bo działa drugi model (np. opisy w innym oknie). "
+                             "Sprawdź: ollama ps; zatrzymaj drugi przebieg albo zrestartuj Ollamę.")
         return CHECK_REJECTED, "model nie ocenił zdjęcia"
+    _vision_fails_in_row = 0
     problems = []
     if answer.get("zdjecie_produktu") is not True:
         problems.append("to nie jest zdjęcie produktu")
