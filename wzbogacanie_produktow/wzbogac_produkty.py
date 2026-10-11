@@ -2252,17 +2252,24 @@ def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
     import base64
 
     host = AI_PROVIDERS["ollama"]["base_url"].removesuffix("/v1")
-    resp = requests.post(host + "/api/chat", timeout=300, json={
-        "model": VISION_MODEL,
-        "stream": False,
-        "format": "json",
-        "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych"),
-                      "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
-        "options": {"temperature": 0, "num_ctx": 4096},
-    })
-    if resp.status_code >= 400:  # Ollama podaje przyczynę w treści (np. brak pamięci karty) — pokazujemy ją w logu
-        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text.strip()[:200]}")
-    return parse_json((resp.json().get("message") or {}).get("content") or "{}")
+    # Druga próba z inną temperaturą tylko wtedy, gdy model zapętlił się na tym zdjęciu (patrz niżej).
+    for temperature in (0, 0.4):
+        resp = requests.post(host + "/api/chat", timeout=300, json={
+            "model": VISION_MODEL,
+            "stream": False,
+            "format": "json",
+            "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych"),
+                          "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
+            "options": {"temperature": temperature, "num_ctx": 4096, "num_predict": 400},
+        })
+        if resp.status_code < 400:
+            return parse_json((resp.json().get("message") or {}).get("content") or "{}")
+        if "repeat" not in resp.text.lower():
+            # Ollama podaje przyczynę w treści (np. brak pamięci karty) — pokazujemy ją w logu
+            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text.strip()[:200]}")
+    # „token repeat limit reached”: model powtarza w kółko to samo na TYM zdjęciu (np. gęsty napis, siatka).
+    # To nie awaria Ollamy — zdjęcie odpada, a przebieg sprawdza następne (bez 6 ponowień i bez zatrzymania).
+    return {"zdjecie_produktu": False, "znak_wodny": False, "uwagi": "model wizyjny zapętlił się na tym zdjęciu"}
 
 
 def _shrink_for_vision(data: bytes) -> bytes:
