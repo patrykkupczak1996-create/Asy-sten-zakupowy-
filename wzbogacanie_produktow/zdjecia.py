@@ -652,8 +652,19 @@ def run(args) -> None:
              len(records), len(done), os.path.abspath(images_dir))
     started, batch, counts = time.time(), [], {OK: 0, REVIEW: 0, NONE: 0}
     try:
+        failed = 0
         for i, record in enumerate(records, 1):
-            out = process(record, images_dir, args.szukaj, args.search, not args.bez_wizji)
+            try:
+                out = process(record, images_dir, args.szukaj, args.search, not args.bez_wizji)
+            except (KeyboardInterrupt, w.FatalError):
+                raise
+            except Exception as exc:  # jedna dziwna strona nie może zatrzymać całej nocy
+                failed += 1
+                log.exception("[id=%s] błąd — pomijam produkt (wróci przy następnym uruchomieniu): %s",
+                              record[COL_ID], exc)
+                if failed >= 50 and failed > i // 2:
+                    raise  # błąd przy większości produktów to nie pojedyncza strona — zatrzymujemy
+                continue
             counts[out[COL_IMG_STATUS]] += 1
             log.info("[id=%s] %s%s", out[COL_ID], out[COL_IMG_STATUS],
                      f" — {out[COL_IMG_REASON]}" if out[COL_IMG_REASON] else "")
@@ -664,6 +675,9 @@ def run(args) -> None:
                 left = (len(records) - i) * (time.time() - started) / i / 3600
                 log.info("CHECKPOINT: %d/%d. Pewne %d, do akceptacji %d, bez zdjęcia %d. Pozostało ok. %.1f h.",
                          i, len(records), counts[OK], counts[REVIEW], counts[NONE], left)
+        if batch:  # ostatni produkt pominięty przez błąd — reszta paczki i tak musi trafić do pliku
+            w.append_batch(batch, COLUMNS, result_path)
+            batch = []
     except KeyboardInterrupt:
         if batch:
             w.append_batch(batch, COLUMNS, result_path)
@@ -672,6 +686,10 @@ def run(args) -> None:
         if batch:
             w.append_batch(batch, COLUMNS, result_path)
         log.error("Zatrzymuję: %s", exc)
+    except Exception:
+        if batch:
+            w.append_batch(batch, COLUMNS, result_path)
+        raise
     log.info("Wyniki: %s. Podgląd: py zdjecia.py --podglad", result_path)
 
 

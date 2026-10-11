@@ -786,6 +786,8 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, li
         key_parts.append(label)
         if row.tag in ("dt", "span", "div", "p"):
             nxt = row.getnext()
+            while nxt is not None and not isinstance(nxt.tag, str):  # komentarz HTML <!-- --> nie ma tekstu
+                nxt = nxt.getnext()
             if nxt is not None:
                 key_parts.append(nxt.text_content()[:120])
     key_text = re.sub(r"\s+", " ", " ".join(str(k) for k in key_parts)).strip()
