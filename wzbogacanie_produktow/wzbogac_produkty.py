@@ -2197,7 +2197,7 @@ CHECK_OK, CHECK_REJECTED = "OK", "ODRZUCONE"
 
 VISION_PROMPT = """To zdjęcie ma być zdjęciem produktu w sklepie internetowym z armaturą instalacyjną.
 Produkt: {name}
-Producent: {producer}
+Producent: {producer}{sign_note}
 
 Oceń zdjęcie i odpowiedz WYŁĄCZNIE obiektem JSON:
 {{"zdjecie_produktu": true lub false,
@@ -2254,6 +2254,14 @@ def _image_for_vision(record: dict) -> bytes:
         return out.getvalue()
 
 
+# Produkty, których zdjęcie to z natury tablica/napis (Gazex: „Tablica ostrzegawcza TP-4.A/H9” — czerwona
+# tablica „ALARM CO2 OPUŚĆ POMIESZCZENIE”); bez tej uwagi model odrzucał je jako „sam napis, brak produktu”.
+# Tylko gdy nazwa się od tego ZACZYNA — „Zawór z tabliczką” to nadal zawór.
+SIGN_PRODUCT_RE = re.compile(r"^\W*(?:tablic|tabliczk|naklejk|piktogram|oznakowan|etykiet|plansz|znak\w* (?:bezpiecz|ostrzeg|informac|ewakua))", re.I)
+SIGN_NOTE = ("\nUWAGA: ten produkt to tablica / naklejka / oznakowanie — zdjęcie samej tablicy z napisem (także napis "
+             "na kolorowym tle) JEST zdjęciem produktu, a napis na tablicy to NIE znak wodny.")
+
+
 def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
     import base64
 
@@ -2264,7 +2272,8 @@ def _ask_vision(image_jpeg: bytes, name: str, producer: str = "") -> dict:
             "model": VISION_MODEL,
             "stream": False,
             "format": "json",
-            "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych"),
+            "messages": [{"role": "user", "content": VISION_PROMPT.format(name=name, producer=producer or "brak danych",
+                                                                  sign_note=SIGN_NOTE if SIGN_PRODUCT_RE.search(name) else ""),
                           "images": [base64.b64encode(image_jpeg).decode("ascii")]}],
             "options": {"temperature": temperature, "num_ctx": 4096, "num_predict": 400},
         })
