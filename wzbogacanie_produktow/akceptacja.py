@@ -191,7 +191,7 @@ def write_page(df: pd.DataFrame, accepted: set[str], path: str, storage_key: str
 
 
 def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_column: str,
-                 image_column: str = IDOSELL_IMAGE_COLUMN) -> str:
+                 image_column: str = IDOSELL_IMAGE_COLUMN, extra_columns: list[str] | None = None) -> str:
     ok = df[df[COL_STATUS] == STATUS_OK]
     acc = df[(df[COL_STATUS] != STATUS_OK) & df[COL_ID].isin(accepted) & df[COL_DESC].str.strip().ne("")].copy()
     acc[COL_STATUS] = STATUS_ACCEPTED
@@ -215,8 +215,14 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_co
                          for st, pid, url in zip(photos["Status_zdjecia"], photos[COL_ID], photos["Zdjecie_URL"])]]
         ready = result[[COL_ID, COL_DESC]].merge(photos[[COL_ID, "Zdjecie_URL"]], on=COL_ID)
         ready_path = side_path(output_path, "gotowe_idosell")
-        ready.rename(columns={COL_DESC: desc_column, "Zdjecie_URL": image_column}).to_csv(
-            ready_path, index=False, encoding="utf-8-sig")
+        ready = ready.rename(columns={COL_DESC: desc_column, "Zdjecie_URL": image_column})
+        # --dodaj-kolumne "NAZWA=WARTOŚĆ": ta sama wartość dla wszystkich gotowych produktów (np. widoczność
+        # w sklepie) — nazwa kolumny dokładnie jak w eksporcie IdoSell; tylko w pliku GOTOWE (opis + zdjęcie).
+        for spec in extra_columns or []:
+            name, _, value = spec.partition("=")
+            ready[name.strip()] = value.strip()
+            print(f"Dodana kolumna „{name.strip()}” = „{value.strip()}” dla wszystkich gotowych produktów.")
+        ready.to_csv(ready_path, index=False, encoding="utf-8-sig")
         print(f"GOTOWE (opis + zdjęcie): {len(ready)} -> {ready_path}")
         # Plik opisów ma własne (puste przy --bez-zdjec) kolumny zdjęć — bierzemy te z wyników zdjecia.py.
         base = result.drop(columns=["Zdjecie_URL", "Zdjecie_plik"], errors="ignore")
@@ -271,6 +277,9 @@ def main() -> None:
                         help="Nagłówek kolumny opisu w pliku dla IdoSell (jak w eksporcie IdoSell)")
     parser.add_argument("--kolumna-zdjecia", default=IDOSELL_IMAGE_COLUMN,
                         help="Nagłówek kolumny zdjęcia w pliku GOTOWE dla IdoSell (jak w eksporcie IdoSell)")
+    parser.add_argument("--dodaj-kolumne", action="append", default=[], metavar="NAZWA=WARTOŚĆ",
+                        help="Dodatkowa kolumna w pliku GOTOWE dla IdoSell, ta sama wartość dla wszystkich "
+                             "(np. widoczność w sklepie); nazwa jak w eksporcie IdoSell; można podać kilka razy")
     parser.add_argument("--bez-otwierania", action="store_true", help="Nie otwieraj przeglądarki")
     args = parser.parse_args()
 
@@ -300,7 +309,7 @@ def main() -> None:
         save_accepted(store_path, accepted)
 
     if args.zapisz:
-        build_import(df, accepted, args.output, args.kolumna_opisu, args.kolumna_zdjecia)
+        build_import(df, accepted, args.output, args.kolumna_opisu, args.kolumna_zdjecia, args.dodaj_kolumne)
         return
 
     page_path = side_path(args.output, "akceptacja").rsplit(".", 1)[0] + ".html"
