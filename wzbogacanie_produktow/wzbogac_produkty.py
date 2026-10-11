@@ -723,6 +723,12 @@ def _img_source(img) -> tuple[str, bool]:
             or img.get("src") or ""), False
 
 
+# Fragmenty klas/id kontenera, po których rozpoznajemy galerię zdjęć produktu (także karuzele slajdów).
+GALLERY_HINTS = ("gallery", "product-image", "product__image", "product-photo", "product-media", "product__media",
+                 "productimage", "product_image", "product-img", "swiper", "slick", "owl-", "carousel", "splide",
+                 "fotorama", "glide", "lightbox", "zoom", "main-image", "product-pictures", "product-slider")
+
+
 def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, list[str], str] | None:
     """Pobiera stronę HTML.
 
@@ -754,8 +760,8 @@ def fetch_page(url: str) -> tuple[str, list[str], list[tuple[str, str]], str, li
             imgs.append((urljoin(url, src), img.get("alt", "") or img.get("title", "")))
             # Zdjęcie z galerii TEGO produktu (nie z „podobnych produktów”, banerów, menu czy stopki).
             around = " ".join(img.xpath("ancestor::*/@class") + img.xpath("ancestor::*/@id")).lower()
-            in_gallery = full_size or any(k in around for k in ("gallery", "product-image", "product__image",
-                                                                "product-photo"))
+            # Galerie-karuzele (pierwsze zdjęcie bywa logo producenta, produkt jest na kolejnych slajdach).
+            in_gallery = full_size or any(k in around for k in GALLERY_HINTS)
             elsewhere = any(k in around for k in ("related", "upsell", "up-sells", "cross-sell", "crosssell",
                                                   "recent", "widget", "footer", "header", "menu", "banner"))
             if in_gallery and not elsewhere:

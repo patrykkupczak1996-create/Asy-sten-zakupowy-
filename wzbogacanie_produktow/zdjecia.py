@@ -56,7 +56,7 @@ COLUMNS = [COL_ID, COL_NAME, COL_CODE, COL_PRODUCER, COL_IMG_URL, COL_IMG_FILE, 
 OK, REVIEW, NONE = "PEWNE", "DO_AKCEPTACJI", "BRAK"
 SHOP_MIN_NAME = 0.85         # min. część słów nazwy produktu obecna w tytule ze sklepu producenta
 SHOP_MIN_TITLE = 0.5         # min. część słów tytułu ze sklepu producenta obecna w nazwie produktu
-VISION_TRIES = 4             # ile zdjęć jednego produktu obejrzeć modelem, zanim zostanie bez zdjęcia
+VISION_TRIES = 7             # ile zdjęć z jednego etapu obejrzeć modelem (galeria: pierwsze bywa logo)
 # Zapasowe zdjęcia (gdy nie ma żadnego PEWNEGO) idą DO_AKCEPTACJI zamiast zostawiać produkt bez zdjęcia:
 # mniejsze niż 400 px, ale min. BACKUP_MIN_SIDE, oraz zdjęcia ze strony samego producenta odrzucone tylko
 # za jego własne logo (np. ALCA: napis „alca” w rogu każdego zdjęcia, biały przycisk brany za „logo”).
@@ -81,7 +81,7 @@ w.MIN_IMAGE_SIDE = min(w.MIN_IMAGE_SIDE, BACKUP_MIN_SIDE)
 # o mniej skrajnych proporcjach i tak odrzuci model wizyjny.
 w.MAX_IMAGE_RATIO = max(w.MAX_IMAGE_RATIO, 2.5)
 # Kilka etapów (źródło, producent, wyszukiwarka) + większe wersje miniatur — 15 prób to za mało.
-w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 30)
+w.MAX_IMAGE_TRIES = max(w.MAX_IMAGE_TRIES, 40)
 # Rysunki techniczne, części zamienne i schematy wymiarowe to nie zdjęcia produktu (np. ALCA: /spareparts/).
 w.BAD_IMAGE_WORDS = tuple(dict.fromkeys(w.BAD_IMAGE_WORDS + (
     "sparepart", "spare-part", "spare_part", "drawing", "rysunek", "schemat", "scheme", "wymiar",
