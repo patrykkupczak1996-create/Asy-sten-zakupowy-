@@ -513,6 +513,30 @@ def backup_reason(record: dict, url: str, verified: bool, note: str) -> str:
 
 LOGGED_SKIPS: set[str] = set()
 
+# Ta sama seria w innym rozmiarze: klucz = producent + nazwa bez wymiarów (DN/PN, mm, cale, 15x1,5…).
+# Kąty (kolano 90° / 45°) zostają w kluczu — wyglądają inaczej.
+SERIES: dict[str, dict] = {}
+SERIES_REASON = "zdjęcie z tej samej serii w innym rozmiarze — sprawdź"
+
+
+def series_key(name: str, producer: str) -> str:
+    text = w.fold(str(name).lower())
+    text = re.sub(r"(\d+)\s*(?:°|st\b|stopn\w*)", r" kat\1 ", text)              # 90° → kat90 (zostaje)
+    text = re.sub(r"\b(?:dn|pn|fi|ø|d|r|g)\s*\d[\d.,/]*(?![a-z])", " ", text)              # DN50, PN16, fi 110, G1/2
+    text = re.sub(r"(?<![a-z0-9])\d+(?:[.,/x×*-]\d+)*\s*(?:mm|cm|m|\"|”|''|cal\w*|bar)?(?![a-z])", " ", text)
+    words = re.findall(r"[a-z]+\d*|kat\d+", text)
+    if len([x for x in words if len(x) >= 2]) < 3:
+        return ""  # sam rodzaj („Kolano 90°”, „Zawór kulowy”) — za mało, żeby uznać produkty za jedną serię
+    return f"{str(producer).strip().upper()}|{' '.join(words)}"
+
+
+def remember_series(record: dict, out: dict) -> None:
+    """Pewne (albo zaakceptowane) zdjęcie produktu staje się zdjęciem zapasowym dla innych rozmiarów serii."""
+    key = series_key(record.get(COL_NAME, ""), record.get(COL_PRODUCER, ""))
+    if key and key not in SERIES and out.get(COL_IMG_FILE) and os.path.isfile(out[COL_IMG_FILE]):
+        SERIES[key] = {"id": out[COL_ID], "name": record.get(COL_NAME, ""), "url": out.get(COL_IMG_URL, ""),
+                       "page": out.get(COL_IMG_PAGE, ""), "file": out[COL_IMG_FILE]}
+
 
 def pick_checked(record: dict, cands: list[tuple[str, bool, str]], vision: bool,
                  tried: set[str], notes: list[str], backups: list[tuple]) -> tuple[str, bool, bytes, str, str]:
@@ -604,6 +628,17 @@ def process(record: dict, images_dir: str, search: bool, engine: str, vision: bo
         out[COL_IMG_STATUS] = REVIEW if problems else OK
         out[COL_IMG_REASON] = "; ".join(problems)
         return out
+    sibling = SERIES.get(series_key(record.get(COL_NAME, ""), record.get(COL_PRODUCER, "")))
+    if sibling and sibling["id"] != record[COL_ID] and os.path.isfile(sibling["file"]):
+        # Nic własnego — zdjęcie produktu z tej samej serii w innym rozmiarze (kształtki DN15/DN22 wyglądają tak samo).
+        with open(sibling["file"], "rb") as fh:
+            data = fh.read()
+        base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
+        out.update({COL_IMG_URL: sibling["url"], COL_IMG_PAGE: sibling["page"], COL_IMG_STATUS: REVIEW,
+                    COL_IMG_REASON: f"{SERIES_REASON} („{sibling['name']}”, id {sibling['id']})",
+                    COL_IMG_FILE: w.save_image(data, os.path.splitext(sibling["file"])[1] or ".jpg",
+                                               images_dir, base).replace(os.sep, "/")})
+        return out
     if backups:  # nic pewnego — najlepszy zapas (z najwcześniejszego etapu) do akceptacji jednym kliknięciem
         url, verified, data, ext, page, why = backups[0]
         base = w.safe_filename(f"{record[COL_ID]}_{record.get(COL_CODE, '')}")
@@ -633,6 +668,15 @@ def run(args) -> None:
     done, retry = set(), set()
     if os.path.isfile(result_path) and os.path.getsize(result_path):
         prev = w.read_csv(result_path).drop_duplicates(subset=[COL_ID], keep="last")
+        accepted = set()
+        if os.path.isfile(accepted_store(args.output)):
+            with open(accepted_store(args.output), encoding="utf-8") as fh:
+                accepted = {line.strip() for line in fh if line.strip()}
+        names = {r[COL_ID]: r for r in todo.to_dict("records")}
+        for r in prev.to_dict("records"):  # zdjęcia serii z poprzednich przebiegów (pewne + zaakceptowane)
+            if r[COL_ID] in names and (r[COL_IMG_STATUS] == OK or r[COL_ID] in accepted) \
+                    and SERIES_REASON not in r[COL_IMG_REASON]:
+                remember_series(names[r[COL_ID]], r)
         retry = set(prev.loc[prev[COL_IMG_STATUS] == NONE, COL_ID]) if args.ponow_brak else set()
         if args.ponow_brak:
             prev = prev[prev[COL_IMG_STATUS] != NONE]  # bez zdjęcia -> do ponownego przetworzenia
@@ -666,6 +710,8 @@ def run(args) -> None:
                     raise  # błąd przy większości produktów to nie pojedyncza strona — zatrzymujemy
                 continue
             counts[out[COL_IMG_STATUS]] += 1
+            if out[COL_IMG_STATUS] == OK:
+                remember_series(record, out)
             log.info("[id=%s] %s%s", out[COL_ID], out[COL_IMG_STATUS],
                      f" — {out[COL_IMG_REASON]}" if out[COL_IMG_REASON] else "")
             batch.append(out)
