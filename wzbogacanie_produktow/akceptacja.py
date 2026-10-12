@@ -196,6 +196,18 @@ def build_import(df: pd.DataFrame, accepted: set[str], output_path: str, desc_co
     acc = df[(df[COL_STATUS] != STATUS_OK) & df[COL_ID].isin(accepted) & df[COL_DESC].str.strip().ne("")].copy()
     acc[COL_STATUS] = STATUS_ACCEPTED
     result = pd.concat([ok, acc], ignore_index=True).drop(columns=[COL_ACCEPT], errors="ignore")
+    # Ostatnie sito: opis z ceną, listą parametrów, obcym językiem albo linkiem nie trafia do sklepu,
+    # nawet jeśli był PEWNY lub zaakceptowany (popraw: py wzbogac_produkty.py --popraw-opisy).
+    try:
+        from wzbogac_produkty import description_quality_problems
+    except ImportError:
+        description_quality_problems = None
+    if description_quality_problems is not None:
+        bad = [bool(description_quality_problems(d, n)) for d, n in zip(result[COL_DESC], result[COL_NAME])]
+        if any(bad):
+            print(f"Pominięte opisy łamiące zasady sklepu (ceny, listy, obcy język, linki): {sum(bad)} — "
+                  f"popraw je: py wzbogac_produkty.py --popraw-opisy --output {os.path.basename(output_path)}")
+            result = result[[not b for b in bad]]
     import_path = side_path(output_path, "do_importu")
     result.to_csv(import_path, index=False, encoding="utf-8-sig")
     print(f"Pewne: {len(ok)}, zaakceptowane: {len(acc)}, "

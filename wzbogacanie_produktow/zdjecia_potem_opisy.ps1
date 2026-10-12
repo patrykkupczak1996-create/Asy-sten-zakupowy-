@@ -1,5 +1,5 @@
-﻿# Jedno okno na całą noc: najpierw zdjęcia (zdjecia_noc.ps1), potem opisy produktów bez strony
-# (ponow_brak_strony.ps1). Oba modele naraz nie mieszczą się w karcie graficznej, więc idą po kolei.
+﻿# Jedno okno na całą noc: zdjęcia (zdjecia_noc.ps1), opisy produktów bez strony
+# (ponow_brak_strony.ps1), na końcu poprawa złych opisów (popraw_opisy.ps1). Oba modele naraz nie mieszczą się w karcie graficznej, więc idą po kolei.
 # Uruchomienie:
 #   powershell -ExecutionPolicy Bypass -File zdjecia_potem_opisy.ps1
 Set-Location $PSScriptRoot
@@ -9,14 +9,17 @@ function Note($text) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $text" | Tee-O
 # Komputer nie zaśnie przez całą noc (zdjecia_noc.ps1 na końcu zwalnia blokadę, więc ustawiamy ją tu ponownie).
 Add-Type -Namespace Lancuch -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
 
-Note "=== ŁAŃCUCH: 1/2 zdjęcia"
+Note "=== ŁAŃCUCH: 1/3 zdjęcia"
 & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "zdjecia_noc.ps1")
 
 [Lancuch.Power]::SetThreadExecutionState([uint32]"0x80000001") | Out-Null   # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
 # Zwalniamy kartę z modelu wizyjnego, zanim wystartuje model opisów.
 ollama stop "qwen2.5vl:7b" 2>$null | Out-Null
-Note "=== ŁAŃCUCH: 2/2 opisy produktów bez strony (np. De Dietrich z e-katalogu)"
+Note "=== ŁAŃCUCH: 2/3 opisy produktów bez strony (np. De Dietrich z e-katalogu)"
 & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "ponow_brak_strony.ps1")
+# Na końcu poprawa — obejmuje też opisy wygenerowane w kroku 2, jeśli któryś złamał zasady.
+Note "=== ŁAŃCUCH: 3/3 poprawa złych opisów (ceny, listy, obcy język, linki)"
+& powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "popraw_opisy.ps1")
 
 [Lancuch.Power]::SetThreadExecutionState([uint32]"0x80000000") | Out-Null
 Note "=== ŁAŃCUCH ZAKOŃCZONY — rano: py zdjecia.py --podglad oraz py akceptacja.py"

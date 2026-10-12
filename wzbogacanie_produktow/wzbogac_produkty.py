@@ -2316,6 +2316,61 @@ def status_for(reasons: list[str]) -> str:
     return STATUS_REVIEW if any(not r.startswith(INFO_REASON_PREFIXES) for r in reasons) else STATUS_OK
 
 
+# =============================================================================
+# KONTROLA JAKOŚCI OPISU (sklep: prosty polski opis, bez cen, list parametrów, obcych języków i linków)
+# =============================================================================
+QUALITY_REASON_PREFIX = "OPIS DO POPRAWY"
+# Słowa, które w polskim opisie nie występują, a w tekstach z hurtowni zagranicznych — tak (EN, DE, IT, TR, CS/SK).
+FOREIGN_WORDS = {
+    "the", "and", "with", "for", "is", "are", "this", "designed", "made", "of", "from", "which", "its",
+    "und", "mit", "für", "der", "die", "das", "ist", "ohne", "aus", "von", "zur", "zum", "bei", "oder",
+    "della", "delle", "degli", "il", "per", "con", "che", "sono", "questo", "questa", "una",
+    "ve", "için", "ile", "bir", "olan",
+    "nebo", "pro", "jsou", "který", "která", "které", "pouze", "ke", "při",
+}
+# Bez IGNORECASE: wtedy „ı” (tureckie i bez kropki) pasowałoby do zwykłego „i”. Tekst jest wcześniej zamieniany na małe litery.
+FOREIGN_LETTERS_RE = re.compile(r"[řůěťďľĺŕığşßäöüõâîãçèéêàùñ]")
+QUALITY_CHECKS = [
+    (re.compile(r"€|\beur\b|\beuro\b|\d\s*zł|\bzł\b|\bpln\b|\bcen[aęyie]\b|\bvat\b|\bnetto\b|\bbrutto\b",
+                re.IGNORECASE), "cena/waluta/netto-brutto"),
+    (re.compile(r"\bwag[aię]\b|\bmas[aęy]\s+(?:netto|brutto|\d)|objętoś\w*\s+(?:\d|wynosi)", re.IGNORECASE),
+     "waga/objętość z katalogu"),
+    (re.compile(r"www\.|https?:|\.(?:pl|com|eu|de|it)\b|stron\w*\s+producenta|\bsklep\w*", re.IGNORECASE),
+     "link/strona/sklep"),
+    (re.compile(r"\bkod\w*\s+(?:producenta|katalogow\w*)|\bEAN\b|\bGTIN\b|\bMPN\b|\bindeks\w*\b", re.IGNORECASE),
+     "kody/EAN w opisie"),
+]
+MAX_PLAIN_CHARS = 1100        # dłuższy opis to zwykle przepisana karta katalogowa — ma być prosty
+
+
+def description_quality_problems(desc_html: str, name: str = "") -> list[str]:
+    """Problemy, przez które opisu nie wolno wrzucić do sklepu ([] = opis w porządku)."""
+    if not str(desc_html or "").strip():
+        return []
+    plain = _plain(desc_html)
+    name_l = str(name or "").lower()
+    problems = []
+    if re.search(r"<li\b|<ul\b|<ol\b|<table\b|•", desc_html, re.IGNORECASE):
+        problems.append("lista/tabela parametrów")
+    for pattern, label in QUALITY_CHECKS:
+        hit = pattern.search(plain)
+        if hit and hit.group(0).lower() not in name_l:
+            problems.append(label)
+    name_words = set(re.findall(r"\w+", name_l))
+    words = [w for w in re.findall(r"\w+", plain.lower()) if w not in name_words]
+    foreign = [w for w in words if w in FOREIGN_WORDS]
+    letters = [c for c in FOREIGN_LETTERS_RE.findall(plain.lower()) if c not in name_l]
+    if len(foreign) >= 2 or len(letters) >= 2:
+        problems.append("obcy język (" + ", ".join(dict.fromkeys(foreign + letters))[:40] + ")")
+    if len(plain) > MAX_PLAIN_CHARS:
+        problems.append(f"za długi ({len(plain)} znaków)")
+    return problems
+
+
+def quality_reason(problems: list[str]) -> str:
+    return f"{QUALITY_REASON_PREFIX}: {', '.join(problems)}"
+
+
 def review_description(desc_html: str, row: dict, source: dict | None, row_label: str) -> tuple[str, list[str]]:
     """Poprawka literówek + filtr ogólników + kontrola nagłówka. Zwraca (opis po filtrze, powody)."""
     reasons: list[str] = []
@@ -2349,6 +2404,10 @@ def review_description(desc_html: str, row: dict, source: dict | None, row_label
             reasons.append(f"opis po usunięciu ogólników za krótki ({length} znaków)")
     if not heading_has_type(desc_html, row["name"], row["producer"]):
         reasons.append(heading_reason(row["name"], row["producer"]))
+    problems = description_quality_problems(desc_html, row["name"])
+    if problems:
+        log.info("%s opis do poprawy: %s", row_label, ", ".join(problems))
+        reasons.append(quality_reason(problems))
     return desc_html, reasons
 
 
@@ -3029,6 +3088,7 @@ def recheck_statuses(output_path: str) -> None:
     changes = {"→ PEWNY": 0, "→ DO_AKCEPTACJI": 0, "zmieniony powód": 0}
     typo_rows, typo_examples = 0, []
     foreign_rows, foreign_examples = 0, []
+    quality_rows = 0
     for i in df.index:
         row = df.loc[i]
         old_reasons = [r for r in row[COL_REASON].split("; ") if r]
@@ -3050,14 +3110,18 @@ def recheck_statuses(output_path: str) -> None:
                 reasons.append(f"{TYPO_REASON_PREFIX}: {', '.join(typo_fixes)}")
                 row = df.loc[i]
         for reason in old_reasons:
-            if reason.startswith(HEADING_REASON_PREFIX):
-                continue  # nagłówek sprawdzamy na nowo poniżej
+            if reason.startswith((HEADING_REASON_PREFIX, QUALITY_REASON_PREFIX)):
+                continue  # nagłówek i jakość opisu sprawdzamy na nowo poniżej
             if (reason.startswith("AI: strona nie pasuje") and not row[COL_EAN].strip()
                     and ean_only_mismatch(reason)):
                 continue  # tylko EAN, którego nie mamy w danych — liczy się kod producenta
             reasons.append(reason)
         if row[COL_DESC] and not heading_has_type(row[COL_DESC], row[COL_NAME], row[COL_PRODUCER]):
             reasons.append(heading_reason(row[COL_NAME], row[COL_PRODUCER]))
+        problems = description_quality_problems(row[COL_DESC], row[COL_NAME])
+        if problems:
+            reasons.append(quality_reason(problems))
+            quality_rows += 1
         status = status_for(reasons)
         if reasons != old_reasons or status != row[COL_STATUS]:
             changes["zmieniony powód"] += 1
@@ -3072,9 +3136,91 @@ def recheck_statuses(output_path: str) -> None:
     log.info("PRZELICZ: poprawione literówki w %d opisach. Przykłady:", typo_rows)
     for example in typo_examples[:10]:
         log.info("   %s", example)
+    log.info("PRZELICZ: %d opisów do poprawy (ceny, listy parametrów, obcy język, linki) — popraw: --popraw-opisy",
+             quality_rows)
     log.info("PRZELICZ: usunięte obce znaki (np. chińskie) w %d opisach — te produkty są do akceptacji.%s",
              foreign_rows, (" Np. " + "; ".join(foreign_examples[:5])) if foreign_examples else "")
     split_results(output_path)
+
+
+REWRITE_REASON_PREFIX = "opis napisany od nowa z nazwy (poprzedni łamał zasady sklepu)"
+INFO_REASON_PREFIXES = INFO_REASON_PREFIXES + (REWRITE_REASON_PREFIX,)
+
+
+def rewrite_bad_descriptions(args) -> None:
+    """--popraw-opisy: opisy z cenami, listami parametrów, obcym językiem lub linkami pisze od nowa — krótko,
+    po polsku, tylko z nazwy produktu (bez przepisywania karty katalogowej). Produkt zachowuje status, bo jego
+    tożsamość była już potwierdzona; nowy opis przechodzi wszystkie kontrole, inaczej idzie do akceptacji."""
+    if not os.path.exists(args.output):
+        sys.exit(f"Nie ma pliku {args.output}.")
+    df = read_csv(args.output)
+    full = os.path.join(os.path.dirname(os.path.abspath(args.output)), "produkty.csv")
+    build_name_word_freq(read_csv(full)[COL_NAME] if os.path.isfile(full) else df[COL_NAME])
+    todo = [i for i in df.index if description_quality_problems(df.at[i, COL_DESC], df.at[i, COL_NAME])]
+    # Najpierw najgorsze (obcy język, ceny, linki), potem same listy/za długie.
+    severe = ("obcy", "cena", "link")
+    todo.sort(key=lambda i: not any(p.startswith(severe) for p in
+                                    description_quality_problems(df.at[i, COL_DESC], df.at[i, COL_NAME])))
+    if args.limit:
+        todo = todo[:args.limit]
+    log.info("POPRAW: %d z %d opisów łamie zasady sklepu. AI: %s (%s).", len(todo), len(df), AI["name"],
+             ", ".join(AI["models"]))
+    backup = f"{os.path.splitext(args.output)[0]}_kopia_przed_poprawa_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    shutil.copy2(args.output, backup)
+    started, fixed, unsaved, exit_code = time.time(), 0, 0, 0
+
+    def rewrite(i):
+        rec = df.loc[i].to_dict()
+        row = {"name": str(rec.get(COL_NAME, "")), "producer": str(rec.get(COL_PRODUCER, "")),
+               "code": str(rec.get(COL_CODE, "")), "ean": str(rec.get(COL_EAN, "")),
+               "category": str(rec.get(COL_CATEGORY, ""))}
+        label = f"[id={rec.get(COL_ID, '')}]"
+        old_problems = description_quality_problems(rec.get(COL_DESC, ""), row["name"])
+        result = generate_description(row, None, label)
+        if not result or not str(result.get("opis_html") or "").strip():
+            return None
+        desc, reasons = review_description(result["opis_html"], row, None, label)
+        return desc, reasons, old_problems
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            for b in range(0, len(todo), CHECKPOINT_EVERY):
+                batch = todo[b:b + CHECKPOINT_EVERY]
+                for i, out in zip(batch, pool.map(rewrite, batch)):
+                    old_reasons = [r for r in str(df.at[i, COL_REASON]).split("; ")
+                                   if r and not r.startswith((QUALITY_REASON_PREFIX, HEADING_REASON_PREFIX,
+                                                              REWRITE_REASON_PREFIX, FOREIGN_REASON_PREFIX))]
+                    if out is None:
+                        reasons = old_reasons + [quality_reason(description_quality_problems(
+                            df.at[i, COL_DESC], df.at[i, COL_NAME])), "nie udało się napisać opisu od nowa"]
+                    else:
+                        desc, new_reasons, old_problems = out
+                        df.at[i, COL_DESC] = desc
+                        reasons = old_reasons + [f"{REWRITE_REASON_PREFIX}: {', '.join(old_problems)}"] + \
+                            [r for r in new_reasons if not r.startswith(TYPO_REASON_PREFIX)]
+                        fixed += not any(r.startswith(QUALITY_REASON_PREFIX) for r in new_reasons)
+                    df.at[i, COL_REASON] = "; ".join(dict.fromkeys(reasons))
+                    df.at[i, COL_STATUS] = status_for(reasons) if df.at[i, COL_STATUS] == STATUS_OK else \
+                        df.at[i, COL_STATUS]
+                unsaved += len(batch)
+                if unsaved >= REPROCESS_SAVE_EVERY or b + CHECKPOINT_EVERY >= len(todo):
+                    save_dataframe(df, args.output)
+                    unsaved = 0
+                done = b + len(batch)
+                log.info("POPRAW: %d/%d, poprawne nowe opisy: %d. Pozostało ok. %.1f h.", done, len(todo), fixed,
+                         (len(todo) - done) * (time.time() - started) / done / 3600)
+    except FatalError as exc:
+        log.error("Zatrzymuję: %s", exc)
+        exit_code = 1
+    except KeyboardInterrupt:
+        log.warning("Przerwano (Ctrl+C) — zapisuję to, co już poprawione. Ta sama komenda dokończy resztę.")
+        exit_code = 130
+    if unsaved:
+        save_dataframe(df, args.output)
+    split_results(args.output)
+    log.info("POPRAW: koniec. Nowe opisy bez zastrzeżeń: %d. Kopia pliku sprzed poprawek: %s", fixed, backup)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def reprocess_missing_sources(args) -> None:
@@ -3170,6 +3316,9 @@ def main() -> None:
     parser.add_argument("--przelicz-statusy", action="store_true",
                         help="Ponowna kontrola zapisanych opisów w --output bez generowania; poprawia statusy "
                              "na miejscu (przed zmianą robi kopię pliku)")
+    parser.add_argument("--popraw-opisy", action="store_true",
+                        help="Opisy z cenami, listami parametrów, obcym językiem lub linkami napisz od nowa "
+                             "(krótko, po polsku, z nazwy). Kopia pliku przed zmianą.")
     parser.add_argument("--ponow-brak-strony", action="store_true",
                         help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony” albo „AI: strona nie pasuje”; "
                              "pozostałe wiersze zostają bez zmian")
@@ -3196,7 +3345,8 @@ def main() -> None:
     if args.zatwierdz:
         approve(args.output, args.zatwierdz)
         return
-    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony and not args.przelicz_statusy:
+    if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony and not args.przelicz_statusy \
+            and not args.popraw_opisy:
         parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia, --ponow-brak-strony albo --zatwierdz")
 
     logging.basicConfig(
@@ -3220,6 +3370,11 @@ def main() -> None:
     if args.ponow_brak_strony:
         configure_ai(args.ai)
         reprocess_missing_sources(args)
+        return
+
+    if args.popraw_opisy:
+        configure_ai(args.ai)
+        rewrite_bad_descriptions(args)
         return
 
     if args.sprawdz_zdjecia:
