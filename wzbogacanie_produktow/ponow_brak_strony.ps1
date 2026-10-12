@@ -1,13 +1,16 @@
-# Ponowne przetworzenie produktów "nie znaleziono strony" w opisy_wszystkie.csv (Ollama, tylko opisy),
+﻿# Ponowne przetworzenie produktów "nie znaleziono strony" w opisy_wszystkie.csv (Ollama, tylko opisy),
 # z automatycznym wznawianiem. Uruchomienie (osobne okno, działa niezależnie od Claude):
 #   powershell -ExecutionPolicy Bypass -File ponow_brak_strony.ps1
 # Skrypt Pythona blokuje plik wyników (*.lock), więc nie ruszy równolegle z uruchom_cala_baze.ps1.
 Set-Location $PSScriptRoot
+# Dysk sieciowy Z: potrafi na chwilę zniknąć — czekamy, aż wróci, zamiast zużywać kolejne uruchomienia.
+function WaitForDisk { while (-not (Test-Path (Join-Path $PSScriptRoot "wzbogac_produkty.py"))) { Write-Host "Brak dostępu do folderu skryptu (dysk sieciowy?) — czekam 30 s…" -ForegroundColor Yellow; Start-Sleep -Seconds 30 } }
 $env:AI_PROVIDER = "ollama"
 $env:OLLAMA_MODEL = "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"   # lepsza polszczyzna niż qwen2.5:14b-instruct
 $env:PYTHONIOENCODING = "utf-8"
 
 for ($i = 1; $i -le 100; $i++) {
+    WaitForDisk
     "=== ponow ${i}: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -Append -Encoding utf8 ponow_restarty.log
     py wzbogac_produkty.py --ponow-brak-strony --output opisy_wszystkie.csv --bez-zdjec
     $code = $LASTEXITCODE

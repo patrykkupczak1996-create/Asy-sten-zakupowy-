@@ -8,6 +8,8 @@
 #   4) strona podglądu (otwierasz rano: opisy_wszystkie_zdjecia_podglad.html).
 # Każde zdjęcie sprawdza model wizyjny; niepewne idą DO_AKCEPTACJI, a nie od razu do sklepu.
 Set-Location $PSScriptRoot
+# Dysk sieciowy Z: potrafi na chwilę zniknąć — czekamy, aż wróci, zamiast zużywać kolejne uruchomienia.
+function WaitForDisk { while (-not (Test-Path (Join-Path $PSScriptRoot "wzbogac_produkty.py"))) { Write-Host "Brak dostępu do folderu skryptu (dysk sieciowy?) — czekam 30 s…" -ForegroundColor Yellow; Start-Sleep -Seconds 30 } }
 $env:PYTHONIOENCODING = "utf-8"
 $log = "zdjecia_noc.log"
 function Note($text) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $text" | Tee-Object -Append -FilePath $log }
@@ -37,6 +39,7 @@ if (-not $already) {
 }
 
 for ($i = 1; $i -le 50; $i++) {
+    WaitForDisk
     Note "=== zdjęcia, uruchomienie $i"
     py zdjecia.py --szukaj
     $code = $LASTEXITCODE
@@ -48,6 +51,7 @@ for ($i = 1; $i -le 50; $i++) {
 # Ponowienie „bez zdjęcia” robimy raz (po awarii najwyżej 3 razy) — każde uruchomienie z --ponow-brak
 # zaczyna je od nowa, więc pętla bez limitu kręciłaby się w kółko po tych samych produktach.
 for ($i = 1; $i -le 3; $i++) {
+    WaitForDisk
     Note "=== ponowienie bez zdjęcia, uruchomienie $i"
     py zdjecia.py --ponow-brak --szukaj
     $code = $LASTEXITCODE
@@ -56,6 +60,7 @@ for ($i = 1; $i -le 3; $i++) {
     Start-Sleep -Seconds 60
 }
 
+WaitForDisk
 py zdjecia.py --podglad --bez-otwierania
 [Noc.Power]::SetThreadExecutionState([uint32]"0x80000000") | Out-Null
 Note "=== NOC ZAKOŃCZONA — rano: py zdjecia.py --podglad"
