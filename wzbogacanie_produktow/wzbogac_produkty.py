@@ -96,8 +96,11 @@ PRODUCER_SEARCH = {
     "APATOR-POWOGAZ": {"url": "https://www.apator.com/wyszukiwarka?search={q}", "link": "/produkty-i-uslugi/"},
     "AWENTA": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/"},
     # dedietrich.pl (WordPress): karty serii /produkty/technika-dla-domu/pompy-ciepla/gshp-b200-ghl/ bez kodów
-    # katalogowych (7612220…) — wyszukiwarka po nazwie serii, zdjęcie serii idzie do akceptacji.
-    "DE DIETRICH": {"url": "https://dedietrich.pl/?s={q}", "link": "/produkty/"},
+    # katalogowych (7612220…), a wyszukiwarka strony nie zwraca kart produktów — skrypt raz przechodzi cały katalog
+    # /produkty/ ("crawl") i dopasowuje kartę po oznaczeniu serii z tytułu (GSHP, B200, GHL…). Zdjęcie serii idzie
+    # do akceptacji.
+    "DE DIETRICH": {"crawl": "https://dedietrich.pl/produkty/", "link": "/produkty/", "min_depth": 4,
+                    "match": "series"},
 }
 DEFAULT_SHOP_LINK = "/product/"
 # Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
@@ -1285,14 +1288,75 @@ _shop_cache: dict[str, list[tuple[str, str]]] = {}
 _shop_cache_lock = threading.Lock()
 
 
+CATALOG_MAX_PAGES = 400        # limit stron przy przechodzeniu katalogu producenta ("crawl" w PRODUCER_SEARCH)
+CATALOG_CACHE_DAYS = 7         # katalog zapisany na dysku (katalog_<strona>.json) jest używany przez tyle dni
+
+
+def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
+    """[(tytuł strony, adres)] wszystkich kart z katalogu producenta — dla stron, których wyszukiwarka nie zwraca
+    kart produktów. Przechodzi linki zawierające cfg["link"] od cfg["crawl"]; wynik zapisuje na dysku."""
+    start, link = cfg["crawl"], cfg.get("link") or DEFAULT_SHOP_LINK
+    host = urlparse(start).netloc
+    cache_key = "katalog:" + start
+    with _shop_cache_lock:
+        if cache_key in _shop_cache:
+            return _shop_cache[cache_key]
+    cache_file = f"katalog_{safe_filename(host)}.json"
+    try:
+        if time.time() - os.path.getmtime(cache_file) < CATALOG_CACHE_DAYS * 86400:
+            with open(cache_file, encoding="utf-8") as fh:
+                items = [tuple(x) for x in json.load(fh)]
+            with _shop_cache_lock:
+                _shop_cache[cache_key] = items
+            return items
+    except (OSError, ValueError):
+        pass
+    log.info("Katalog %s: przechodzę strony (jednorazowo, potem z pliku %s)…", host, cache_file)
+    min_depth = int(cfg.get("min_depth") or 0)
+    seen, queue, items = {start}, [start], []
+    while queue and len(seen) <= CATALOG_MAX_PAGES:
+        url = queue.pop(0)
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+            resp.raise_for_status()
+            doc = html_doc(resp)
+        except Exception as exc:
+            log.info("Katalog %s: %s — %s", host, url, exc)
+            continue
+        title = re.sub(r"\s+", " ", (doc.findtext(".//title") or "")).strip()
+        if title and len([p for p in urlparse(url).path.split("/") if p]) >= min_depth:
+            items.append((title, url))
+        for raw in doc.xpath("//a/@href"):
+            href = urljoin(url, html.unescape(raw)).split("#")[0].split("?")[0]
+            if urlparse(href).netloc == host and link in href and href not in seen:
+                seen.add(href)
+                queue.append(href)
+        time.sleep(0.3)
+    log.info("Katalog %s: %d kart", host, len(items))
+    if items:
+        try:
+            with open(cache_file, "w", encoding="utf-8") as fh:
+                json.dump(items, fh, ensure_ascii=False)
+        except OSError:
+            pass
+    with _shop_cache_lock:
+        _shop_cache[cache_key] = items
+    return items
+
+
 def search_producer_shop(template: str | dict, query: str) -> list[tuple[str, str]]:
     """[(tytuł, adres)] produktów z wyników wewnętrznej wyszukiwarki sklepu producenta (z pamięcią podręczną).
 
     template: adres z {q} albo wpis z PRODUCER_SEARCH {"url": …, "link": fragment adresu karty produktu}.
+    Wpis z "crawl" (strona bez działającej wyszukiwarki): karty z katalogu, których tytuł zawiera słowa zapytania.
     """
     from urllib.parse import quote_plus
 
     cfg = template if isinstance(template, dict) else {"url": template}
+    if cfg.get("crawl"):
+        words = [x for x in re.findall(r"\w{2,}", query.lower())]
+        scored = [(sum(x in t.lower() for x in words), t, u) for t, u in crawl_producer_catalog(cfg)]
+        return [(t, u) for n, t, u in sorted(scored, key=lambda z: -z[0]) if n][:40]
     link = cfg.get("link") or DEFAULT_SHOP_LINK
     url = cfg["url"].format(q=quote_plus(query))
     with _shop_cache_lock:

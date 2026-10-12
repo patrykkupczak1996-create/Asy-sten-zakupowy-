@@ -406,10 +406,53 @@ def name_match(name: str, title: str) -> tuple[float, float]:
     return name_cov, title_cov
 
 
+SERIES_GENERIC = {"de", "dietrich", "produkty", "kw", "dla", "domu"}
+
+
+def series_tokens(title: str) -> list[str]:
+    """Oznaczenia serii z tytułu karty: część przed „ - ” („GSHP B200 GHL - geotermalna pompa… - De Dietrich”)."""
+    head = re.split(r"\s[-–|]\s", title)[0]
+    return [t for t in _tokens(head) if t not in SERIES_GENERIC]
+
+
+def series_page_candidates(record: dict, template: dict) -> tuple[list[tuple[str, bool, str]], str]:
+    """Karta serii w katalogu producenta (dedietrich.pl), której WSZYSTKIE oznaczenia z tytułu (GSHP, B200, GHL)
+    są w nazwie produktu; przy kilku pasujących — najdokładniejsza (najwięcej oznaczeń). Remis = pomijamy."""
+    name_t = _tokens(record.get(COL_NAME, ""))
+    try:
+        catalog = w.crawl_producer_catalog(template)
+    except Exception as exc:
+        log.info("[id=%s] katalog producenta: %s", record[COL_ID], exc)
+        return [], ""
+    scored = []
+    for t, u in catalog:
+        toks = series_tokens(t)
+        # Same słowa ogólne („pompy ciepła”) to strona kategorii, nie seria — potrzebne oznaczenie z cyfrą/skrótem.
+        if toks and any(not x.isalpha() or len(x) <= 4 for x in toks) and \
+                all(any(_same_word(x, n) for n in name_t) for x in toks):
+            scored.append((len(toks), t, u))
+    scored.sort(reverse=True)
+    if not scored:
+        return [], ""
+    if len(scored) > 1 and scored[1][0] == scored[0][0] and scored[1][2] != scored[0][2]:
+        log.info("[id=%s] katalog producenta: kilka równie pasujących serii (%s / %s) — pomijam",
+                 record[COL_ID], scored[0][1], scored[1][1])
+        return [], ""
+    _, title, url = scored[0]
+    page = w.fetch_page(url)
+    if not page:
+        return [], ""
+    shop = {"url": url, "og_images": page[1], "imgs": page[2], "gallery": page[4] if len(page) > 4 else [],
+            "producer_site": True}
+    return [(u, False, url) for u in w.image_candidates_from_source(w.ProductMatcher("", "", ""), shop)], title
+
+
 def producer_shop_candidates(record: dict) -> tuple[list[tuple[str, bool, str]], str]:
     """Zdjęcia z karty produktu w sklepie producenta (AEON…), znalezionej po nazwie. Zwraca (kandydaci, tytuł)."""
     template = w.PRODUCER_SEARCH.get(record.get(COL_PRODUCER, "").strip().upper())
     name = record.get(COL_NAME, "")
+    if isinstance(template, dict) and template.get("match") == "series":
+        return series_page_candidates(record, template)
     words = [t for t in re.findall(r"[^\W\d_]{4,}", name)]  # słowa z liter — bez DN80, PN16, skrótów
     if not template or not words:
         return [], ""
