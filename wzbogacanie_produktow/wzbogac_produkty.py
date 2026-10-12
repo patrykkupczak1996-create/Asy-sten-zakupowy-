@@ -86,6 +86,9 @@ PRODUCER_SEARCH = {
     "AURATON": {"url": "https://www.auraton.pl/szukaj?s={q}", "link": "/oferta/"},
     "APATOR-POWOGAZ": {"url": "https://www.apator.com/wyszukiwarka?search={q}", "link": "/produkty-i-uslugi/"},
     "AWENTA": {"url": "https://awenta.pl/search/query:{q}", "link": "/produkty/"},
+    # dedietrich.pl (WordPress): karty serii /produkty/technika-dla-domu/pompy-ciepla/gshp-b200-ghl/ bez kodów
+    # katalogowych (7612220…) — wyszukiwarka po nazwie serii, zdjęcie serii idzie do akceptacji.
+    "DE DIETRICH": {"url": "https://dedietrich.pl/?s={q}", "link": "/produkty/"},
 }
 DEFAULT_SHOP_LINK = "/product/"
 # Bezpośrednie wyszukiwanie po KODZIE we własnej wyszukiwarce producenta/hurtowni — bez DuckDuckGo, więc wynik
@@ -139,7 +142,7 @@ DEFAULT_SHOP_LINK = "/product/"
 #   AGRU (agru.at, TYPO3) — brak działającej wyszukiwarki, kody tylko w katalogach PDF;
 #   wyniki tylko przez JavaScript, bez znalezionego API: Wavin, Galmet, Rothenberger;
 #   brak wyszukiwarki / strona nie odpowiada: Purmo, Georg Fischer (gfps.com), Vesbo, Grundfos (przekroczony czas),
-#   De Dietrich (błąd certyfikatu SSL).
+#   De Dietrich — www/certyfikat SSL nie działał; dedietrich.pl jest w PRODUCER_SEARCH (po nazwie serii).
 DIRECT_SEARCH = {
     "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
                   "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
