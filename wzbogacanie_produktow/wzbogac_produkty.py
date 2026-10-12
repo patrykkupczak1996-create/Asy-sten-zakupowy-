@@ -1414,7 +1414,7 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
     # Najpierw mapa strony (WordPress/Yoast): listy produktów w kategoriach bywają ładowane przez JavaScript,
     # więc same linki ze stron kategorii nie prowadzą do kart (dedietrich.pl — 0 kart).
     from_map = [u for u in sitemap_urls(f"{urlparse(start).scheme}://{host}/")
-                if link in u and deep_enough(u)]
+                if link in u and deep_enough(u) and "/attachment/" not in u]  # WordPress: strony załączników
     if from_map:
         log.info("Katalog %s: %d kart z mapy strony — pobieram tytuły…", host, len(from_map))
         items = []
