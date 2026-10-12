@@ -1328,7 +1328,8 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
             items.append((title, url))
         for raw in doc.xpath("//a/@href"):
             href = urljoin(url, html.unescape(raw)).split("#")[0].split("?")[0]
-            if urlparse(href).netloc == host and link in href and href not in seen:
+            if urlparse(href).netloc.removeprefix("www.") == host.removeprefix("www.") and link in href \
+                    and href not in seen:
                 seen.add(href)
                 queue.append(href)
         time.sleep(0.3)
@@ -1342,6 +1343,32 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
     with _shop_cache_lock:
         _shop_cache[cache_key] = items
     return items
+
+
+def test_catalog(producer: str) -> None:
+    """Pokazuje, co widzi skrypt na stronie startowej katalogu i jakie karty z niego zbiera (bez pliku z dysku)."""
+    cfg = PRODUCER_SEARCH.get(producer.strip().upper())
+    if not isinstance(cfg, dict) or not cfg.get("crawl"):
+        print(f"Brak wpisu \"crawl\" w PRODUCER_SEARCH dla {producer!r}")
+        return
+    resp = requests.get(cfg["crawl"], headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+    print(f"HTTP {resp.status_code}, adres po przekierowaniu: {resp.url}, {len(resp.text)} znaków")
+    hrefs = re.findall(r'href=["\']([^"\']+)', resp.text)
+    print(f"Linków w HTML: {len(hrefs)}; zawierających {cfg.get('link')!r}:")
+    for h in [h for h in hrefs if (cfg.get("link") or "") in h][:30]:
+        print("   ", h)
+    if not hrefs:
+        print("Początek strony:", re.sub(r"\s+", " ", resp.text[:800]))
+    try:
+        os.remove(f"katalog_{safe_filename(urlparse(cfg['crawl']).netloc)}.json")
+    except OSError:
+        pass
+    with _shop_cache_lock:
+        _shop_cache.pop("katalog:" + cfg["crawl"], None)
+    items = crawl_producer_catalog(cfg)
+    print(f"Kart w katalogu: {len(items)}")
+    for t, u in items[:40]:
+        print(f"    {t}  ->  {u}")
 
 
 def search_producer_shop(template: str | dict, query: str) -> list[tuple[str, str]]:
@@ -3001,6 +3028,8 @@ def main() -> None:
                         help="Pokaż krok po kroku, jak skrypt szuka strony produktu (id z pliku --output)")
     parser.add_argument("--test-wyszukiwarki", metavar="KOD",
                         help="Pokaż, co skrypt znajduje w wyszukiwarkach hurtowni dla kodu (diagnostyka)")
+    parser.add_argument("--test-katalog", metavar="PRODUCENT",
+                        help="Diagnostyka katalogu producenta z PRODUCER_SEARCH (\"crawl\"), np. \"DE DIETRICH\"")
     parser.add_argument("--aktualizuj", action="store_true",
                         help="Pobierz najnowszą wersję skryptu z GitHuba i zakończ")
     parser.add_argument("--zatwierdz", metavar="PLIK",
@@ -3026,6 +3055,9 @@ def main() -> None:
         return
     if args.test_wyszukiwarki:
         test_direct_search(args.test_wyszukiwarki)
+        return
+    if args.test_katalog:
+        test_catalog(args.test_katalog)
         return
     if args.diagnoza:
         diagnose(args.output, args.diagnoza, args.search)
