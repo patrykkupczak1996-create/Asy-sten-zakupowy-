@@ -1362,6 +1362,30 @@ CATALOG_MAX_PAGES = 400        # limit stron przy przechodzeniu katalogu produce
 CATALOG_CACHE_DAYS = 7         # katalog zapisany na dysku (katalog_<strona>.json) jest używany przez tyle dni
 
 
+def sitemap_urls(site: str, limit: int = 5000) -> list[str]:
+    """Adresy z mapy strony (sitemap_index.xml / wp-sitemap.xml / sitemap.xml, z podmapami)."""
+    found: list[str] = []
+    for start in ("sitemap_index.xml", "wp-sitemap.xml", "sitemap.xml"):
+        queue, seen = [urljoin(site, start)], set()
+        while queue and len(found) < limit and len(seen) < 200:
+            url = queue.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+                if resp.status_code != 200 or "<loc>" not in resp.text:
+                    continue
+            except Exception:
+                continue
+            for loc in re.findall(r"<loc>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", resp.text):
+                loc = html.unescape(loc)
+                (queue if re.search(r"\.xml(\.gz)?$", loc) or "sitemap" in loc.rsplit("/", 1)[-1] else found).append(loc)
+        if found:
+            break
+    return list(dict.fromkeys(found))
+
+
 def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
     """[(tytuł strony, adres)] wszystkich kart z katalogu producenta — dla stron, których wyszukiwarka nie zwraca
     kart produktów. Przechodzi linki zawierające cfg["link"] od cfg["crawl"]; wynik zapisuje na dysku."""
@@ -1383,7 +1407,32 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
         pass
     log.info("Katalog %s: przechodzę strony (jednorazowo, potem z pliku %s)…", host, cache_file)
     min_depth = int(cfg.get("min_depth") or 0)
-    seen, queue, items = {start}, [start], []
+
+    def deep_enough(u: str) -> bool:
+        return len([p for p in urlparse(u).path.split("/") if p]) >= min_depth
+
+    # Najpierw mapa strony (WordPress/Yoast): listy produktów w kategoriach bywają ładowane przez JavaScript,
+    # więc same linki ze stron kategorii nie prowadzą do kart (dedietrich.pl — 0 kart).
+    from_map = [u for u in sitemap_urls(f"{urlparse(start).scheme}://{host}/")
+                if link in u and deep_enough(u)]
+    if from_map:
+        log.info("Katalog %s: %d kart z mapy strony — pobieram tytuły…", host, len(from_map))
+        items = []
+        for url in from_map[:CATALOG_MAX_PAGES]:
+            try:
+                resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+                resp.raise_for_status()
+                title = re.sub(r"\s+", " ", (html_doc(resp).findtext(".//title") or "")).strip()
+            except Exception as exc:
+                log.info("Katalog %s: %s — %s", host, url, exc)
+                continue
+            if title:
+                items.append((title, url))
+            time.sleep(0.2)
+        queue: list[str] = []
+        seen: set[str] = set()
+    else:
+        seen, queue, items = {start}, [start], []
     while queue and len(seen) <= CATALOG_MAX_PAGES:
         url = queue.pop(0)
         try:
@@ -1394,7 +1443,7 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
             log.info("Katalog %s: %s — %s", host, url, exc)
             continue
         title = re.sub(r"\s+", " ", (doc.findtext(".//title") or "")).strip()
-        if title and len([p for p in urlparse(url).path.split("/") if p]) >= min_depth:
+        if title and deep_enough(url):
             items.append((title, url))
         for raw in doc.xpath("//a/@href"):
             href = urljoin(url, html.unescape(raw)).split("#")[0].split("?")[0]
@@ -1417,6 +1466,7 @@ def crawl_producer_catalog(cfg: dict) -> list[tuple[str, str]]:
 
 def test_catalog(producer: str) -> None:
     """Pokazuje, co widzi skrypt na stronie startowej katalogu i jakie karty z niego zbiera (bez pliku z dysku)."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     cfg = PRODUCER_SEARCH.get(producer.strip().upper())
     if not isinstance(cfg, dict) or not cfg.get("crawl"):
         print(f"Brak wpisu \"crawl\" w PRODUCER_SEARCH dla {producer!r}")
