@@ -8,3 +8,5 @@ ddgs>=9.0
 lxml>=5.0
 # Sprawdzanie wymiarow zdjec (odrzucanie logotypow, banerow, ikon)
 Pillow>=10.0
+# Certyfikaty z magazynu systemu (strony z niepełnym łańcuchem certyfikatów, np. dedietrich.pl)
+truststore>=0.10

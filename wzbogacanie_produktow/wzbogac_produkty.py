@@ -40,6 +40,15 @@ from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
+
+# Certyfikaty sprawdza magazyn systemu (Windows), jak przeglądarka. Python ma własną listę i nie dociąga brakujących
+# certyfikatów pośrednich, więc strony z niepełnym łańcuchem (np. dedietrich.pl: „unable to get local issuer
+# certificate”) były dla skryptu niedostępne, choć w przeglądarce działają. Weryfikacja zostaje włączona.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 from openai import OpenAI
 import openai
 
