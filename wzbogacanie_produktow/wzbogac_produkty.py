@@ -156,6 +156,11 @@ DEFAULT_SHOP_LINK = "/product/"
 #   brak wyszukiwarki / strona nie odpowiada: Purmo, Georg Fischer (gfps.com), Vesbo, Grundfos (przekroczony czas),
 #   De Dietrich — www/certyfikat SSL nie działał; dedietrich.pl jest w PRODUCER_SEARCH (po nazwie serii).
 DIRECT_SEARCH = {
+    # e-katalog De Dietrich (FlipHTML5): wersja tekstowa każdej strony /files/basic-html/pageN.html zawiera indeksy
+    # (7612220…), opisy i ceny. Skrypt raz pobiera wszystkie strony (zapis w katalog_<strona>.json na 7 dni) i szuka
+    # w nich kodu — strona katalogu z kodem jest potwierdzonym źródłem opisu.
+    "dedietrich.pl": {"page_index": "https://dedietrich.pl/ekatalog/domowa/files/basic-html/page{n}.html",
+                      "max_pages": 600, "producers": ["DE DIETRICH"]},
     "afriso.pl": {"url": "https://afriso.pl/wyszukiwanie?search={q}",
                   "link": "/katalog-produktow-afriso/", "code_in_url": True, "producers": ["AFRISO"]},
     "conexbanninger.com": {"url": "https://conexbanninger.com/products/?lang=en&srch={q}",
@@ -982,6 +987,9 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
                     with _trusted_lock:
                         _trusted_results.add((code.lower(), url))
             continue
+        if "page_index" in cfg:
+            urls += [u for u in page_index_match(cfg, code) if u not in urls]
+            continue
         if "api" in cfg:
             urls += [u for u in direct_search_api(domain, cfg, m, code) if u not in urls]
             continue
@@ -1004,6 +1012,65 @@ def direct_search_urls(m: ProductMatcher, code: str, producer: str | None = None
                 _trusted_results.add((code.lower(), found_here[0]))
         urls += found_here if cfg.get("code_in_url", True) else found_here[:MAX_DIRECT_RESULTS]
     return urls
+
+
+_page_indexes: dict[str, list[tuple[str, str]]] = {}
+
+
+def _squash(text: str) -> str:
+    """Tekst do szukania kodu: małe litery, wszystko poza literami/cyframi → jedna spacja (granice kodu zostają,
+    żeby 7612220 nie „znalazło się” w sklejeniu sąsiednich liczb)."""
+    return " " + re.sub(r"[^0-9a-ząćęłńóśźż]+", " ", text.lower()).strip() + " "
+
+
+def _page_index(cfg: dict) -> list[tuple[str, str]]:
+    """[(adres strony, tekst bez spacji i znaków)] wszystkich stron katalogu "page_index" — raz, potem z dysku."""
+    template = cfg["page_index"]
+    with _woo_lock:
+        if template in _page_indexes:
+            return _page_indexes[template]
+        cache_file = f"katalog_{safe_filename(urlparse(template).netloc + urlparse(template).path.split('/files/')[0])}.json"
+        pages: list[tuple[str, str]] = []
+        try:
+            if time.time() - os.path.getmtime(cache_file) < CATALOG_CACHE_DAYS * 86400:
+                with open(cache_file, encoding="utf-8") as fh:
+                    pages = [tuple(x) for x in json.load(fh)]
+        except (OSError, ValueError):
+            pages = []
+        if not pages:
+            log.info("Katalog %s: pobieram strony (jednorazowo, potem z pliku %s)…", template, cache_file)
+            misses = 0
+            for n in range(1, int(cfg.get("max_pages") or 500) + 1):
+                url = template.format(n=n)
+                try:
+                    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT)
+                    if resp.status_code == 404:
+                        misses += 1
+                        if misses >= 3:
+                            break  # koniec katalogu
+                        continue
+                    resp.raise_for_status()
+                    misses = 0
+                    pages.append((url, _squash(html_doc(resp).text_content())))
+                except Exception as exc:
+                    log.info("Katalog %s: %s", url, exc)
+            log.info("Katalog %s: %d stron", template, len(pages))
+            if pages:
+                try:
+                    with open(cache_file, "w", encoding="utf-8") as fh:
+                        json.dump(pages, fh, ensure_ascii=False)
+                except OSError:
+                    pass
+        _page_indexes[template] = pages
+        return pages
+
+
+def page_index_match(cfg: dict, code: str) -> list[str]:
+    """Strony katalogu, na których jest kod (najwyżej 3; krótkie kody < 5 znaków pomijamy — za dużo przypadków)."""
+    key = _squash(code)
+    if len(key.replace(" ", "")) < 5:
+        return []
+    return [u for u, text in _page_index(cfg) if key in text][:3]
 
 
 _woo_catalogs: dict[str, list[tuple[re.Pattern, int, str]]] = {}
@@ -1138,6 +1205,9 @@ def test_direct_search(code: str, producer: str | None = None) -> None:
             url, exact = woo_catalog_match(cfg["woo_catalog"], code)
             print(f"\n{domain}: katalog WooCommerce — karta: {url or 'brak'}"
                   + ("" if not url else " (SKU = kod)" if exact else " (wzorzec SKU — produkt do akceptacji)"))
+            continue
+        if "page_index" in cfg:
+            print(f"\n{domain}: e-katalog — strony z kodem: {page_index_match(cfg, code) or 'brak'}")
             continue
         if "api" in cfg:
             print(f"\n{domain}: API JSON {cfg['api']['url']} — karty: "
