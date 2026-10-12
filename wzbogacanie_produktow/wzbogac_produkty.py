@@ -1726,15 +1726,22 @@ def pick_image(candidates: list[tuple[str, bool, str]], images_dir: str | None,
     Zwraca (url, czy_potwierdzone, ścieżka_pliku, powód_ostatniego_odrzucenia).
     """
     last_reason = ""
+    # Limit liczy tylko adresy, które naprawdę pobieramy: odrzucone po samym adresie (np. 40 miniatur kategorii
+    # z menu alcadrain.*) nic nie kosztują, a wcześniej zużywały cały limit, zanim doszło do zdjęć produktu.
+    fetched = sum(1 for u in tried if not image_url_looks_bad(u))
     for url, verified, referer in candidates:
-        if url in tried or len(tried) >= MAX_IMAGE_TRIES:
+        if url in tried:
             continue
-        tried.add(url)
         if image_url_looks_bad(url):
+            tried.add(url)
             last_reason = "logo/baner w adresie"
             if log_rejections is not None:
                 log_rejections.append(f"{last_reason}: {url}")
             continue
+        if fetched >= MAX_IMAGE_TRIES:
+            continue
+        tried.add(url)
+        fetched += 1
         data, ext, reason = fetch_image(url, referer)
         if not reason:
             reason = check_image(data)
