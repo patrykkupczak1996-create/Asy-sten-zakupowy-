@@ -406,7 +406,7 @@ def name_match(name: str, title: str) -> tuple[float, float]:
     return name_cov, title_cov
 
 
-SERIES_GENERIC = {"de", "dietrich", "produkty", "kw", "dla", "domu"}
+SERIES_GENERIC = {"de", "dietrich", "produkty", "kw", "dla", "domu", "td", "tk", "pl"}  # TD/TK = technika domowa/komercyjna
 
 
 def series_tokens(title: str) -> list[str]:
