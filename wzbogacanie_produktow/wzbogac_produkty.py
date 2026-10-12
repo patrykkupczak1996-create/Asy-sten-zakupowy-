@@ -3223,6 +3223,68 @@ def rewrite_bad_descriptions(args) -> None:
         sys.exit(exit_code)
 
 
+SHEET_REASON_PREFIX = "opis zredagowany w arkuszu Google (kolumna „Opis nowy”)"
+INFO_REASON_PREFIXES = INFO_REASON_PREFIXES + (SHEET_REASON_PREFIX,)
+SHEET_COL_ID, SHEET_COL_DESC, SHEET_COL_STATUS = "@id", "Opis nowy", "Status"
+
+
+def import_sheet_descriptions(args) -> None:
+    """--z-arkusza PLIK: opisy zredagowane w arkuszu Google (pobranym jako CSV) wpisuje do --output.
+
+    Bierze tylko wiersze ze statusem NOWY i niepustym „Opis nowy”; OK = stary opis był dobry (bez zmian),
+    RĘCZNIE = do uzupełnienia ręcznie (bez zmian). Każdy nowy opis przechodzi kontrolę jakości."""
+    for path in (args.output, args.z_arkusza):
+        if not os.path.exists(path):
+            sys.exit(f"Nie ma pliku {path}.")
+    df = read_csv(args.output)
+    sheet = read_csv(args.z_arkusza)
+    missing = [c for c in (SHEET_COL_ID, SHEET_COL_DESC, SHEET_COL_STATUS) if c not in sheet.columns]
+    if missing:
+        sys.exit(f"W pliku {args.z_arkusza} brak kolumn: {', '.join(missing)}. Pobierz arkusz jako CSV "
+                 "(Plik > Pobierz > CSV) z kolumnami @id, Opis nowy i Status.")
+    by_id = {str(v).strip(): i for i, v in df[COL_ID].items()}
+    backup = f"{os.path.splitext(args.output)[0]}_kopia_przed_arkuszem_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    shutil.copy2(args.output, backup)
+    counts = {"wpisane": 0, "bez zmian (OK)": 0, "do ręcznego uzupełnienia": 0, "odrzucone przez kontrolę": 0,
+              "brak @id w pliku": 0}
+    rejected = []
+    for _, rec in sheet.iterrows():
+        status = str(rec[SHEET_COL_STATUS]).strip().upper()
+        text = re.sub(r"\s+", " ", str(rec[SHEET_COL_DESC])).strip()
+        if status == "OK":
+            counts["bez zmian (OK)"] += 1
+            continue
+        if status != "NOWY" or not text:
+            counts["do ręcznego uzupełnienia"] += status in ("RĘCZNIE", "RECZNIE")
+            continue
+        i = by_id.get(str(rec[SHEET_COL_ID]).strip())
+        if i is None:
+            counts["brak @id w pliku"] += 1
+            continue
+        desc = f"<p>{html.escape(text, quote=False)}</p>"
+        problems = description_quality_problems(desc, df.at[i, COL_NAME])
+        if problems:
+            counts["odrzucone przez kontrolę"] += 1
+            rejected.append(f"{rec[SHEET_COL_ID]}: {', '.join(problems)}")
+            continue
+        df.at[i, COL_DESC] = desc
+        reasons = [r for r in str(df.at[i, COL_REASON]).split("; ")
+                   if r and not r.startswith((QUALITY_REASON_PREFIX, HEADING_REASON_PREFIX, REWRITE_REASON_PREFIX,
+                                              FOREIGN_REASON_PREFIX, TYPO_REASON_PREFIX, SHEET_REASON_PREFIX))]
+        reasons.append(SHEET_REASON_PREFIX)
+        df.at[i, COL_REASON] = "; ".join(dict.fromkeys(reasons))
+        if df.at[i, COL_STATUS] in (STATUS_OK, STATUS_REVIEW):
+            df.at[i, COL_STATUS] = status_for(reasons)
+        counts["wpisane"] += 1
+    save_dataframe(df, args.output)
+    split_results(args.output)
+    for label, n in counts.items():
+        log.info("ARKUSZ: %s: %d", label, n)
+    for line in rejected[:30]:
+        log.warning("ARKUSZ: odrzucony opis id=%s", line)
+    log.info("ARKUSZ: kopia pliku sprzed zmian: %s", backup)
+
+
 def reprocess_missing_sources(args) -> None:
     """Ponownie przetwarza tylko wiersze z powodem „nie znaleziono strony” albo „AI: strona nie pasuje”,
     resztę pliku zostawia bez zmian."""
@@ -3319,6 +3381,9 @@ def main() -> None:
     parser.add_argument("--popraw-opisy", action="store_true",
                         help="Opisy z cenami, listami parametrów, obcym językiem lub linkami napisz od nowa "
                              "(krótko, po polsku, z nazwy). Kopia pliku przed zmianą.")
+    parser.add_argument("--z-arkusza", metavar="PLIK",
+                        help="Wpisz do --output opisy zredagowane w arkuszu Google (CSV z kolumnami @id, "
+                             "Opis nowy, Status). Kopia pliku przed zmianą.")
     parser.add_argument("--ponow-brak-strony", action="store_true",
                         help="Przetwórz ponownie tylko produkty z --output z powodem „nie znaleziono strony” albo „AI: strona nie pasuje”; "
                              "pozostałe wiersze zostają bez zmian")
@@ -3346,7 +3411,7 @@ def main() -> None:
         approve(args.output, args.zatwierdz)
         return
     if not args.input and not args.sprawdz_zdjecia and not args.ponow_brak_strony and not args.przelicz_statusy \
-            and not args.popraw_opisy:
+            and not args.popraw_opisy and not args.z_arkusza:
         parser.error("podaj --input (plik CSV z produktami), --sprawdz-zdjecia, --ponow-brak-strony albo --zatwierdz")
 
     logging.basicConfig(
@@ -3370,6 +3435,10 @@ def main() -> None:
     if args.ponow_brak_strony:
         configure_ai(args.ai)
         reprocess_missing_sources(args)
+        return
+
+    if args.z_arkusza:
+        import_sheet_descriptions(args)
         return
 
     if args.popraw_opisy:
