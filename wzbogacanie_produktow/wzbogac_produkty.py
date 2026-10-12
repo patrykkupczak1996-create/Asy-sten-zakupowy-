@@ -1362,12 +1362,16 @@ CATALOG_MAX_PAGES = 400        # limit stron przy przechodzeniu katalogu produce
 CATALOG_CACHE_DAYS = 7         # katalog zapisany na dysku (katalog_<strona>.json) jest używany przez tyle dni
 
 
-def sitemap_urls(site: str, limit: int = 5000) -> list[str]:
-    """Adresy z mapy strony (sitemap_index.xml / wp-sitemap.xml / sitemap.xml, z podmapami)."""
+def sitemap_urls(site: str, limit: int = 50000) -> list[str]:
+    """Adresy z mapy strony (sitemap_index.xml / wp-sitemap.xml / sitemap.xml, z podmapami).
+
+    Podmapy załączników, tagów, kategorii i autorów pomijamy — na dedietrich.pl mapa załączników ma tysiące
+    adresów /attachment/ i wcześniej zajmowała cały limit, zanim doszło do mapy stron z kartami produktów."""
+    skip = re.compile(r"attachment|post_tag|tag-sitemap|category|author|users", re.I)
     found: list[str] = []
     for start in ("sitemap_index.xml", "wp-sitemap.xml", "sitemap.xml"):
         queue, seen = [urljoin(site, start)], set()
-        while queue and len(found) < limit and len(seen) < 200:
+        while queue and len(found) < limit and len(seen) < 300:
             url = queue.pop(0)
             if url in seen:
                 continue
@@ -1378,9 +1382,16 @@ def sitemap_urls(site: str, limit: int = 5000) -> list[str]:
                     continue
             except Exception:
                 continue
+            before = len(found)
             for loc in re.findall(r"<loc>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", resp.text):
                 loc = html.unescape(loc)
-                (queue if re.search(r"\.xml(\.gz)?$", loc) or "sitemap" in loc.rsplit("/", 1)[-1] else found).append(loc)
+                if re.search(r"\.xml(\.gz)?$", loc) or "sitemap" in loc.rsplit("/", 1)[-1]:
+                    if not skip.search(loc.rsplit("/", 1)[-1]):
+                        queue.append(loc)
+                elif "/attachment/" not in loc:
+                    found.append(loc)
+            if len(found) > before:
+                log.info("Mapa strony %s: %d adresów", url, len(found) - before)
         if found:
             break
     return list(dict.fromkeys(found))
