@@ -143,11 +143,12 @@ def main() -> None:
     args = ap.parse_args()
 
     df = wp.read_csv(args.plik)
-    for col in (COL_NAME, COL_DESC, COL_STATUS):
-        if col not in df.columns:
-            if col == COL_NAME:
-                sys.exit(f"W pliku brak kolumny „{col}”.")
-            df[col] = ""
+    print(f"Plik {args.plik}: {len(df)} wierszy, kolumny: {', '.join(df.columns)}")
+    missing = [c for c in (COL_NAME, COL_DESC, COL_STATUS) if c not in df.columns]
+    if missing:
+        sys.exit(f"W pliku brak kolumn: {', '.join(missing)}. To nie jest aktualny arkusz z kolumnami "
+                 "„Opis nowy” i „Status”. Usuń arkusz_opisy.csv i pobierz arkusz jeszcze raz "
+                 "(Plik > Pobierz > CSV).")
     if COL_PRODUCER not in df.columns:
         df[COL_PRODUCER] = ""
 
