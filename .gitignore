@@ -12,3 +12,7 @@ wynik_pomiaru.png
 wymiary.json
 rektyfikacja*.png
 marker_*.png
+
+# Ceny: cennik hurtowni i Twoje ustawienia marży
+*.xml
+wzbogacanie_produktow/ceny_ustawienia.ini
