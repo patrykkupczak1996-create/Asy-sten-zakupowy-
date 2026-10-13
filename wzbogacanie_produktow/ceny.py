@@ -208,50 +208,85 @@ def write_csv(path: str, rows: list[dict], columns: list[str]) -> None:
 
 
 # ----------------------------------------------------------------------------- główne
-def show(path: str, cfg) -> None:
+class CenyError(Exception):
+    """Błąd, przy którym nie wolno zrobić pliku importu (komunikat dla użytkownika)."""
+
+
+def show(path: str, cfg, log=print) -> dict[str, str]:
     data = read_source(path)
     tag = find_record_tag(data)
     sample = [r for _, r in zip(range(200), iter_records(data, tag))]
     fields = pick_fields(sample, cfg)
-    print(f"Produkt w XML: <{tag.split('}')[-1]}>. Pola w pierwszym produkcie:")
+    log(f"Produkt w XML: <{tag.split('}')[-1]}>. Pola w pierwszym produkcie:")
     for k, v in sample[0].items():
-        print(f"   {k} = {v[:60]}")
-    print("Rozpoznane:", ", ".join(f"{r} -> {k}" for r, k in fields.items()) or "nic")
+        log(f"   {k} = {v[:60]}")
+    log("Rozpoznane: " + (", ".join(f"{r} -> {k}" for r, k in fields.items()) or "nic"))
     for r in sample[:5]:
-        print("   ", {role: r.get(k, "") for role, k in fields.items()})
+        log("    " + str({role: r.get(k, "") for role, k in fields.items()}))
     if "cena" not in fields:
-        print("Nie rozpoznałem ceny — wpisz nazwę pola w ceny_ustawienia.ini, sekcja [xml], cena = ...")
+        log("Nie rozpoznałem ceny — wpisz nazwę pola w ustawieniach (XML: pole ceny).")
+    return fields
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Ceny sprzedaży z cennika Onninen (XML) z marżą.")
-    ap.add_argument("--pokaz", metavar="XML", help="pokaż, co skrypt rozpoznał w pliku XML, i zakończ")
-    ap.add_argument("--wymus", action="store_true", help="zrób plik importu mimo zadziałania bezpiecznika")
-    args = ap.parse_args()
-    os.chdir(HERE)
-    cfg = load_settings()
-    if args.pokaz:
-        show(args.pokaz, cfg)
+def settings_from(cfg) -> dict:
+    return {"tiers": parse_tiers(cfg.get("marza", "progi", fallback="")),
+            "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
+            "vat": to_float(cfg.get("marza", "vat", fallback="23")),
+            "rounding": cfg.get("marza", "zaokraglenie", fallback="0.01").strip(),
+            "producers": {k.upper(): to_float(v) for k, v in cfg.items("producenci")}
+            if cfg.has_section("producenci") else {}}
+
+
+def upload(path: str, cfg, log=print) -> None:
+    """Wysyła plik na FTP (sekcja [ftp]) — stamtąd IdoSell może go pobierać sam."""
+    host = cfg.get("ftp", "host", fallback="").strip()
+    if not host:
         return
+    import ftplib
+    ftp_cls = ftplib.FTP_TLS if cfg.getboolean("ftp", "tls", fallback=True) else ftplib.FTP
+    with ftp_cls(host, timeout=120) as ftp:
+        ftp.login(cfg.get("ftp", "uzytkownik", fallback=""), cfg.get("ftp", "haslo", fallback=""))
+        if isinstance(ftp, ftplib.FTP_TLS):
+            ftp.prot_p()
+        folder = cfg.get("ftp", "folder", fallback="").strip()
+        if folder:
+            ftp.cwd(folder)
+        name = os.path.basename(path)
+        with open(path, "rb") as fh:
+            ftp.storbinary(f"STOR {name}.tmp", fh)
+        try:
+            ftp.delete(name)
+        except ftplib.error_perm:
+            pass
+        ftp.rename(f"{name}.tmp", name)
+    log(f"Wysłano {os.path.basename(path)} na FTP {host}.")
 
-    s = {"tiers": parse_tiers(cfg.get("marza", "progi", fallback="")),
-         "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
-         "vat": to_float(cfg.get("marza", "vat", fallback="23")),
-         "rounding": cfg.get("marza", "zaokraglenie", fallback="0.01").strip(),
-         "producers": {k.upper(): to_float(v) for k, v in cfg.items("producenci")}
-         if cfg.has_section("producenci") else {}}
-    xml_path = cfg.get("pliki", "xml", fallback="onninen.xml")
-    shop_path = cfg.get("pliki", "produkty", fallback="produkty.csv")
+
+def przelicz(cfg, wymus: bool = False, log=print) -> dict:
+    """Pobiera XML, liczy ceny, zapisuje pliki. Zwraca podsumowanie; CenyError = bezpiecznik/zły plik."""
+    s = settings_from(cfg)
+    xml_path = cfg.get("pliki", "xml", fallback="onninen.xml").strip()
+    shop_path = cfg.get("pliki", "produkty", fallback="produkty.csv").strip()
+    out_dir = cfg.get("pliki", "folder_wynikow", fallback="").strip() or HERE
+    os.makedirs(out_dir, exist_ok=True)
     max_jump = to_float(cfg.get("bezpiecznik", "max_zmiana_proc", fallback="40"))
     min_match = to_float(cfg.get("bezpiecznik", "min_dopasowanych_proc", fallback="80"))
+    state_path = os.path.join(out_dir, STATE)
 
     started = time.time()
-    data = read_source(xml_path)
-    tag = find_record_tag(data)
-    records = list(iter_records(data, tag))
+    log(f"Pobieram cennik: {xml_path}")
+    try:
+        data = read_source(xml_path)
+    except Exception as exc:
+        raise CenyError(f"Nie udało się pobrać cennika: {exc}") from exc
+    try:
+        tag = find_record_tag(data)
+        records = list(iter_records(data, tag))
+    except ET.ParseError as exc:
+        raise CenyError(f"Cennik XML jest uszkodzony albo niepełny: {exc}") from exc
     fields = pick_fields(records[:200], cfg)
     if "cena" not in fields:
-        sys.exit("Nie rozpoznałem ceny w XML. Uruchom: py ceny.py --pokaz " + xml_path)
+        raise CenyError("Nie rozpoznałem ceny w XML — użyj „Sprawdź XML” i wpisz pole ceny w ustawieniach.")
     by_ean, by_code = {}, {}
     bad_price = 0
     for r in records:
@@ -268,19 +303,24 @@ def main() -> None:
         for role in ("kod", "indeks"):
             if fields.get(role) and norm_code(r.get(fields[role])):
                 by_code.setdefault(norm_code(r[fields[role]]), []).append(r)
-    print(f"XML: {len(records)} pozycji, z ceną: {len(records) - bad_price}. Pola: "
-          + ", ".join(f"{k}={v}" for k, v in fields.items()))
+    log(f"XML: {len(records)} pozycji, z ceną: {len(records) - bad_price}. Pola: "
+        + ", ".join(f"{k}={v}" for k, v in fields.items()))
 
     previous = {}
-    if os.path.exists(STATE):
-        with open(STATE, encoding="utf-8-sig", newline="") as fh:
+    if os.path.exists(state_path):
+        with open(state_path, encoding="utf-8-sig", newline="") as fh:
             previous = {r["id"]: r for r in csv.DictReader(fh, delimiter=";")}
 
+    if not os.path.exists(shop_path):
+        raise CenyError(f"Brak pliku produktów sklepu: {shop_path}")
     shop = read_shop(shop_path, cfg)
     report, changed, matched, warnings = [], [], 0, Counter()
     for p in shop:
         hits = by_ean.get(norm_ean(p["ean"])) or by_code.get(norm_code(p["kod"])) or []
-        row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", uwagi="")
+        row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="")
+        old = previous.get(p["id"])
+        if old:
+            row["poprzednia_brutto"] = old.get("cena_brutto", "")
         if not hits:
             row["uwagi"] = "brak w cenniku Onninen"
             warnings["brak w cenniku"] += 1
@@ -293,7 +333,6 @@ def main() -> None:
             net, gross, pct = sale_price(buy, p["producent"], s)
             row.update(zakup_netto=f"{buy:.2f}", marza_proc=f"{pct:g}", cena_netto=f"{net:.2f}",
                        cena_brutto=f"{gross:.2f}")
-            old = previous.get(p["id"])
             if old and old.get("cena_brutto"):
                 jump = abs(gross / to_float(old["cena_brutto"]) - 1) * 100
                 if jump > max_jump:
@@ -304,32 +343,62 @@ def main() -> None:
         report.append(row)
 
     cols = ["id", "kod", "ean", "producent", "nazwa", "zakup_netto", "marza_proc", "cena_netto", "cena_brutto",
-            "uwagi"]
-    write_csv("ceny_raport.csv", report, cols)
+            "poprzednia_brutto", "uwagi"]
+    report_path = os.path.join(out_dir, "ceny_raport.csv")
+    write_csv(report_path, report, cols)
     share = matched / len(shop) * 100 if shop else 0
     prev_matched = sum(1 for r in previous.values() if r.get("cena_brutto"))
-    print(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "
-          f"zmienione od ostatniego razu: {len(changed)}. "
-          + ", ".join(f"{k}: {v}" for k, v in warnings.items()))
+    log(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "
+        f"zmienione od ostatniego razu: {len(changed)}. " + ", ".join(f"{k}: {v}" for k, v in warnings.items()))
+    summary = {"produkty": len(shop), "dopasowane": matched, "zmiany": len(changed), "uwagi": dict(warnings),
+               "raport": report_path, "import": "", "zmienione": changed, "czas": time.strftime("%Y-%m-%d %H:%M")}
 
     fuse = []
     if bad_price > len(records) * 0.2:
         fuse.append(f"{bad_price} pozycji XML bez poprawnej ceny")
     if prev_matched and matched < prev_matched * min_match / 100:
         fuse.append(f"dopasowanych {matched}, a ostatnio {prev_matched}")
-    if fuse and not args.wymus:
-        print("BEZPIECZNIK: " + "; ".join(fuse) + ". Nie robię pliku importu (sprawdź XML). "
-              "Raport: ceny_raport.csv. Jeśli wszystko jest dobrze: py ceny.py --wymus")
-        sys.exit(2)
+    if fuse and not wymus:
+        raise CenyError("BEZPIECZNIK: " + "; ".join(fuse) + ". Nie zrobiłem pliku importu (sprawdź cennik). "
+                        "Raport: ceny_raport.csv.")
 
     out_cols = [c.strip() for c in cfg.get("wyjscie", "kolumny",
-                                           fallback="@id;cena_netto;cena_brutto").split(";")]
+                                           fallback="@id;cena_netto;cena_brutto").split(";") if c.strip()]
     rename = {"@id": "id"}
-    write_csv("ceny_do_importu.csv", [{c: r[rename.get(c, c)] for c in out_cols} for r in changed], out_cols)
-    write_csv(STATE, [r for r in report if r["cena_brutto"]] +
-              [previous[i] for i in previous if i not in {r["id"] for r in report if r["cena_brutto"]}], cols)
-    print(f"Gotowe w {time.time() - started:.0f} s: ceny_do_importu.csv ({len(changed)} zmian), "
-          "ceny_raport.csv (wszystkie, z uwagami).")
+    import_path = os.path.join(out_dir, "ceny_do_importu.csv")
+    write_csv(import_path, [{c: r[rename.get(c, c)] for c in out_cols} for r in changed], out_cols)
+    # Pełny cennik sklepu (wszystkie produkty z ceną) — do stałego pobierania przez IdoSell z URL/FTP.
+    full_path = os.path.join(out_dir, "ceny_wszystkie.csv")
+    write_csv(full_path, [{c: r[rename.get(c, c)] for c in out_cols} for r in report if r["cena_brutto"]], out_cols)
+    priced = {r["id"] for r in report if r["cena_brutto"]}
+    write_csv(state_path, [r for r in report if r["cena_brutto"]] +
+              [previous[i] for i in previous if i not in priced], cols)
+    summary["import"] = import_path
+    try:
+        upload(full_path, cfg, log)
+    except Exception as exc:  # błąd FTP nie unieważnia przeliczenia
+        log(f"UWAGA: nie udało się wysłać na FTP: {exc}")
+        summary["ftp_blad"] = str(exc)
+    log(f"Gotowe w {time.time() - started:.0f} s: ceny_do_importu.csv ({len(changed)} zmian), "
+        "ceny_wszystkie.csv, ceny_raport.csv.")
+    return summary
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Ceny sprzedaży z cennika Onninen (XML) z marżą.")
+    ap.add_argument("--pokaz", metavar="XML", help="pokaż, co skrypt rozpoznał w pliku XML, i zakończ")
+    ap.add_argument("--wymus", action="store_true", help="zrób plik importu mimo zadziałania bezpiecznika")
+    args = ap.parse_args()
+    os.chdir(HERE)
+    cfg = load_settings()
+    if args.pokaz:
+        show(args.pokaz, cfg)
+        return
+    try:
+        przelicz(cfg, args.wymus)
+    except CenyError as exc:
+        print(exc)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
