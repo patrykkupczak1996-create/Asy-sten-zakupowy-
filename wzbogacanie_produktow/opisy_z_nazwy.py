@@ -10,7 +10,9 @@ Opis, który 3 razy nie przejdzie kontroli, dostaje status RĘCZNIE.
 Postęp zapisuje się co kilka wierszy — przerwany przebieg wznawia się od miejsca, w którym stanął.
 
 Uruchomienie:
-  py opisy_z_nazwy.py arkusz_opisy.csv            # uzupełnij brakujące
+  py opisy_z_nazwy.py arkusz_opisy.csv            # uzupełnij brakujące (najpierw znane i duże marki)
+  py opisy_z_nazwy.py opisy_baza.csv --baza produkty.csv --wzory arkusz_opisy.csv
+                                                  # cała baza sklepu, wzory stylu z arkusza
   py opisy_z_nazwy.py arkusz_opisy.csv --sprawdz  # tylko sprawdź gotowe opisy (bez AI)
 Potem:
   py wzbogac_produkty.py --output opisy_wszystkie.csv --z-arkusza arkusz_opisy.csv
@@ -127,6 +129,52 @@ def write_description(name: str, producer: str, examples: list[tuple[str, str]])
     return "", last
 
 
+# Najbardziej znane marki instalacyjne — idą pierwsze (w tej kolejności), potem reszta wg liczby produktów.
+TOP_BRANDS = ["GEBERIT", "GROHE", "HANSGROHE", "VIESSMANN", "VAILLANT", "BOSCH", "BUDERUS", "JUNKERS",
+              "DE DIETRICH", "DANFOSS", "GRUNDFOS", "WILO", "UPONOR", "REHAU", "KAN", "WAVIN", "TECE", "KOŁO",
+              "CERSANIT", "RADAWAY", "OVENTROP", "HERZ", "CALEFFI", "HONEYWELL", "RESIDEO", "IMMERGAS",
+              "TERMET", "ARISTON", "KOSPEL", "GALMET", "PURMO", "ZEHNDER", "REFLEX", "FLAMCO", "MEIBES",
+              "AFRISO", "ARMACELL", "FERRO", "OMNIRES", "DEANTE", "ROCA", "VILLEROY", "LAUFEN", "IDEAL STANDARD"]
+
+
+def brand_rank(producer: str) -> int:
+    p = str(producer).upper()
+    for n, b in enumerate(TOP_BRANDS):
+        if p == b or p.startswith(b + " ") or p.startswith(b + "-"):
+            return n
+    return len(TOP_BRANDS)
+
+
+def order_by_brand(df, todo: list[int]) -> list[int]:
+    """Najpierw znane marki, potem producenci z największą liczbą produktów; w obrębie marki kolejność pliku."""
+    counts = df.loc[todo, COL_PRODUCER].str.upper().value_counts()
+    ordered = sorted(todo, key=lambda i: (brand_rank(df.at[i, COL_PRODUCER]),
+                                          -counts.get(str(df.at[i, COL_PRODUCER]).upper(), 0),
+                                          str(df.at[i, COL_PRODUCER]).upper(), i))
+    seen = []
+    for i in ordered:
+        b = str(df.at[i, COL_PRODUCER]).upper() or "(bez producenta)"
+        if b not in seen:
+            seen.append(b)
+    print("Kolejność marek: " + ", ".join(f"{b} ({counts.get(b, 0)})" for b in seen[:15])
+          + (" …" if len(seen) > 15 else ""))
+    return ordered
+
+
+def build_from_base(base: str, out: str, skip_ids: set[str]) -> None:
+    """Plik roboczy z eksportu IdoSell (produkty.csv): @id, Nazwa, Producent, Opis nowy, Status."""
+    src = wp.read_csv(base)
+    for col in (wp.COL_ID, wp.COL_NAME, wp.COL_PRODUCER):
+        if col not in src.columns:
+            sys.exit(f"W {base} brak kolumny {col}.")
+    df = src[[wp.COL_ID, wp.COL_NAME, wp.COL_PRODUCER]].rename(
+        columns={wp.COL_NAME: COL_NAME, wp.COL_PRODUCER: COL_PRODUCER})
+    df = df[~df[wp.COL_ID].astype(str).isin(skip_ids)].drop_duplicates(wp.COL_ID)
+    df[COL_DESC], df[COL_STATUS] = "", ""
+    save(df, out)
+    print(f"Utworzyłem {out}: {len(df)} produktów z {base} (pominięte już opisane w arkuszu: {len(skip_ids)}).")
+
+
 def save(df, path: str) -> None:
     tmp = path + ".tmp"
     df.to_csv(tmp, index=False, encoding="utf-8-sig")
@@ -140,7 +188,20 @@ def main() -> None:
     ap.add_argument("--popraw-zle", action="store_true",
                     help="opisy, które nie przechodzą kontroli, napisz od nowa")
     ap.add_argument("--limit", type=int, default=0, help="najwyżej tyle wierszy (do testów)")
+    ap.add_argument("--kolejnosc", choices=["marki", "plik"], default="marki",
+                    help="marki = najpierw znane i największe marki (domyślnie), plik = po kolei")
+    ap.add_argument("--baza", metavar="CSV",
+                    help="cała baza z IdoSell (produkty.csv): gdy pliku roboczego nie ma, utwórz go z bazy")
+    ap.add_argument("--wzory", metavar="CSV",
+                    help="arkusz z gotowymi opisami (arkusz_opisy.csv) — wzory stylu; jego produkty są pomijane")
     args = ap.parse_args()
+
+    extra = wp.read_csv(args.wzory) if args.wzory else None
+    if args.baza and not os.path.exists(args.plik):
+        skip = set()
+        if extra is not None and wp.COL_ID in extra.columns and COL_STATUS in extra.columns:
+            skip = set(extra.loc[extra[COL_STATUS].str.strip() != "", wp.COL_ID].astype(str))
+        build_from_base(args.baza, args.plik, skip)
 
     df = wp.read_csv(args.plik)
     print(f"Plik {args.plik}: {len(df)} wierszy, kolumny: {', '.join(df.columns)}")
@@ -162,12 +223,18 @@ def main() -> None:
         return
 
     todo = [i for i in df.index if not str(df.at[i, COL_STATUS]).strip() and str(df.at[i, COL_NAME]).strip()]
+    if args.kolejnosc == "marki" and todo:
+        todo = order_by_brand(df, todo)
     if args.popraw_zle:
         todo = list(bad) + todo
     if args.limit:
         todo = todo[:args.limit]
     pool = [(words(df.at[i, COL_NAME]), df.at[i, COL_NAME], df.at[i, COL_DESC])
             for i in df.index[done] if i not in bad]
+    if extra is not None and {COL_NAME, COL_DESC, COL_STATUS} <= set(extra.columns):
+        ok = extra[extra[COL_STATUS].str.strip().str.upper().isin(["NOWY", "OK"]) & (extra[COL_DESC].str.strip() != "")]
+        pool += [(words(n), n, d) for n, d in zip(ok[COL_NAME], ok[COL_DESC]) if not problems(d, n)]
+        print(f"Wzory stylu z {args.wzory}: {len(ok)} opisów.")
     if not pool:
         sys.exit("W arkuszu nie ma jeszcze gotowych opisów, z których model mógłby brać wzór.")
 
