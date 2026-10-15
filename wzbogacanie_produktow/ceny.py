@@ -195,7 +195,7 @@ def read_shop(path: str, cfg) -> list[dict]:
     if rows and col_id not in rows[0]:
         sys.exit(f"W {path} brak kolumny {col_id}. Kolumny: {', '.join(rows[0])[:300]}")
     return [{"id": r.get(col_id, ""), "kod": r.get(col_code, ""), "ean": r.get(col_ean, ""),
-             "producent": r.get(col_prod, ""), "nazwa": r.get(col_name, "")} for r in rows]
+             "producent": r.get(col_prod, ""), "nazwa": r.get(col_name, ""), "_raw": r} for r in rows]
 
 
 def write_csv(path: str, rows: list[dict], columns: list[str]) -> None:
@@ -208,41 +208,58 @@ def write_csv(path: str, rows: list[dict], columns: list[str]) -> None:
 
 
 # ----------------------------------------------------------------------------- główne
-def match_keys(records: list[dict], shop: list[dict], fields: dict, cfg, log=print) -> dict[str, list[str]]:
-    """Którymi polami XML łączyć z produktami sklepu — wybrane po faktycznych trafieniach, nie po nazwie pola.
+def nkey(value) -> str:
+    """Klucz do łączenia: kod bez spacji/kresek, wielkie litery; same cyfry (EAN) bez zer na początku."""
+    c = norm_code(value)
+    if c.isdigit():
+        c = c.lstrip("0")
+    return c if len(c) >= 3 else ""
 
-    Dla każdego pola XML liczy, ile wartości pokrywa się z EAN-ami i kodami producenta ze sklepu.
-    Pola ustawione ręcznie w [xml] (ean / kod / indeks) mają pierwszeństwo."""
-    shop_eans = {norm_ean(p["ean"]) for p in shop} - {""}
-    shop_codes = {norm_code(p["kod"]) for p in shop} - {""}
-    manual_ean = cfg.get("xml", "ean", fallback="").strip().lower()
-    manual_code = [cfg.get("xml", k, fallback="").strip().lower() for k in ("kod", "indeks")]
-    manual_code = [k for k in manual_code if k]
-    if manual_ean or manual_code:
-        return {"ean": [manual_ean] if manual_ean else [], "kod": manual_code}
-    hits_ean, hits_code = Counter(), Counter()
-    for r in records:
-        for k, v in r.items():
-            if k.startswith("_"):
-                continue
-            if norm_ean(v) in shop_eans:
-                hits_ean[k] += 1
-            if norm_code(v) in shop_codes:
-                hits_code[k] += 1
-    need = 1 if len(shop) < 300 else max(3, len(shop) // 500)  # ignoruj przypadkowe pojedyncze zbieżności
-    keys = {"ean": [k for k, n in hits_ean.most_common(2) if n >= need],
-            "kod": [k for k, n in hits_code.most_common(2) if n >= need]}
-    log("Łączenie ze sklepem — EAN: " + (", ".join(f"{k} ({hits_ean[k]} trafień)" for k in keys["ean"]) or "brak")
-        + "; kod producenta: " + (", ".join(f"{k} ({hits_code[k]} trafień)" for k in keys["kod"]) or "brak"))
-    if not keys["ean"] and not keys["kod"]:
+
+def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[tuple[str, str, int]]:
+    """Pary (pole XML, kolumna sklepu), po których produkty faktycznie się łączą — od najlepszej.
+
+    Sprawdza wszystkie pola XML i wszystkie kolumny eksportu sklepu (EAN, kod producenta, kod zewnętrzny,
+    symbol hurtowni…), bo nie wiadomo z góry, gdzie sklep trzyma kod z Onninen."""
+    manual = cfg.get("xml", "laczenie", fallback="").strip()
+    if manual:  # np. laczenie = ident@katalog=@code_producer, ident@gtin=/sizes/size@code_producer
+        pairs = [tuple(x.strip() for x in part.split("=", 1)) for part in manual.split(",") if "=" in part]
+        return [(x.lower(), col, 0) for x, col in pairs]
+    def unique_sets(rows) -> dict[str, set]:
+        """Wartości pól, które identyfikują produkt (prawie każda inna) — bez nazw producentów, kategorii itp."""
+        vals: dict[str, set] = {}
+        filled = Counter()
+        for row in rows:
+            for k, v in row.items():
+                if k and not k.startswith("_") and v and len(str(v)) <= 40:
+                    key = nkey(v)
+                    if key:
+                        vals.setdefault(k, set()).add(key)
+                        filled[k] += 1
+        return {k: v for k, v in vals.items() if len(v) >= 0.8 * filled[k]}
+
+    xml_vals = unique_sets(records)
+    shop_vals = unique_sets(p["_raw"] for p in shop)
+    scored = sorted(((len(xv & sv), xk, sc) for xk, xv in xml_vals.items() for sc, sv in shop_vals.items()),
+                    reverse=True)
+    need = 1 if len(shop) < 300 else max(3, len(shop) // 500)  # pomijamy przypadkowe zbieżności
+    pairs, used = [], set()
+    for n, xk, sc in scored:
+        if n < need or len(pairs) >= 4:
+            break
+        if (xk, sc) not in used and sc != cfg.get("sklep", "kolumna_id", fallback="@id"):
+            pairs.append((xk, sc, n))
+            used.add((xk, sc))
+    log("Łączenie ze sklepem: " + ("; ".join(f"XML „{xk}” = sklep „{sc}” ({n} wspólnych)" for xk, sc, n in pairs)
+                                    or "nic nie pasuje"))
+    if not pairs:
         sample_xml = {k: v for k, v in (records[0].items() if records else []) if not k.startswith("_")}
-        sample_shop = [(p["kod"], p["ean"]) for p in shop[:5]]
+        sample_shop = {k: v for k, v in (shop[0]["_raw"].items() if shop else []) if v and len(v) <= 40}
         raise CenyError(
-            "Żadne pole w XML nie pasuje do kodów ani EAN produktów sklepu — nie da się połączyć cen.\n"
+            "Żadne pole w XML nie pasuje do żadnej kolumny produktów sklepu — nie da się połączyć cen.\n"
             f"Przykład produktu z XML: {str(sample_xml)[:600]}\n"
-            f"Przykład ze sklepu (kod producenta, EAN): {sample_shop}\n"
-            "Sprawdź, czy produkty.csv to eksport z kolumnami kodu producenta i EAN, a XML to cennik Onninen.")
-    return keys
+            f"Przykład produktu ze sklepu: {str(sample_shop)[:600]}")
+    return pairs
 
 
 class CenyError(Exception):
@@ -327,8 +344,8 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
     if not os.path.exists(shop_path):
         raise CenyError(f"Brak pliku produktów sklepu: {shop_path}")
     shop = read_shop(shop_path, cfg)
-    keys = match_keys(records, shop, fields, cfg, log)
-    by_ean, by_code = {}, {}
+    pairs = match_pairs(records, shop, cfg, log)
+    index: dict[str, dict[str, list]] = {xk: {} for xk, _, _ in pairs}
     bad_price = 0
     for r in records:
         try:
@@ -339,12 +356,10 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
         if r["_cena"] <= 0:
             bad_price += 1
             continue
-        for k in keys["ean"]:
-            if norm_ean(r.get(k)):
-                by_ean.setdefault(norm_ean(r[k]), []).append(r)
-        for k in keys["kod"]:
-            if norm_code(r.get(k)):
-                by_code.setdefault(norm_code(r[k]), []).append(r)
+        for xk in index:
+            key = nkey(r.get(xk, ""))
+            if key:
+                index[xk].setdefault(key, []).append(r)
     log(f"XML: {len(records)} pozycji, z ceną: {len(records) - bad_price}. Cena z pola: {fields['cena']}")
 
     previous = {}
@@ -354,7 +369,12 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
 
     report, changed, matched, warnings = [], [], 0, Counter()
     for p in shop:
-        hits = by_ean.get(norm_ean(p["ean"])) or by_code.get(norm_code(p["kod"])) or []
+        hits = []
+        for xk, sc, _ in pairs:
+            key = nkey(p["_raw"].get(sc, ""))
+            hits = index[xk].get(key, []) if key else []
+            if hits:
+                break
         row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="")
         old = previous.get(p["id"])
         if old:
