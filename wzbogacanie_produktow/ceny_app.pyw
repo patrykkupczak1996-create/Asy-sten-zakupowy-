@@ -306,6 +306,16 @@ class App(tk.Tk):
         ttk.Button(top, text="Otwórz raport", command=lambda: self.open_file("ceny_raport.csv")).pack(side="right",
                                                                                                     padx=6)
         ttk.Button(top, text="Przelicz ceny teraz", command=self.run_now).pack(side="right")
+        ttk.Button(top, text="Zacznij od początku", command=self.start_over).pack(side="right", padx=6)
+        show = ttk.Frame(f)
+        show.pack(fill="x", pady=(6, 0))
+        self.v_show = tk.StringVar(value="zmiany")
+        ttk.Label(show, text="Pokaż:").pack(side="left")
+        for value, text in (("zmiany", "tylko zmienione ceny"), ("wszystkie", "wszystkie produkty z ceną"),
+                            ("uwagi", "tylko z uwagami (brak w cenniku, duża zmiana)")):
+            ttk.Radiobutton(show, text=text, value=value, variable=self.v_show,
+                            command=self.refresh_table).pack(side="left", padx=6)
+        self.last_summary: dict | None = None
         cols = ("nazwa", "zakup", "stara", "nowa", "uwagi")
         self.result = ttk.Treeview(f, columns=cols, show="headings", height=14)
         for col, text, w in zip(cols, ("Produkt", "Zakup netto", "Było brutto", "Teraz brutto", "Uwagi"),
@@ -369,11 +379,39 @@ class App(tk.Tk):
 
         self.background(job)
 
-    def show_summary(self, summary: dict) -> None:
+    def start_over(self) -> None:
+        if not messagebox.askyesno(
+                "Zacznij od początku",
+                "Program zapomni ceny z poprzednich przeliczeń i policzy wszystko od nowa.\n"
+                "Plik do importu będzie zawierał wszystkie produkty z ceną, a nie tylko zmiany.\n\n"
+                "Kontynuować?"):
+            return
+        if not self.save(quiet=True):
+            return
+        backup = ceny.zacznij_od_nowa(self.cfg)
+        self.write_log("Zaczynam od początku." + (f" Poprzednie ceny odłożone do: {os.path.basename(backup)}"
+                                                 if backup else ""))
+        self.v_show.set("wszystkie")
+        self.run_now()
+
+    def refresh_table(self) -> None:
         self.result.delete(*self.result.get_children())
-        for r in summary["zmienione"][:2000]:
+        s = self.last_summary
+        if not s:
+            return
+        mode = self.v_show.get()
+        rows = (s["zmienione"] if mode == "zmiany" else
+                [r for r in s["wszystkie"] if r["cena_brutto"]] if mode == "wszystkie" else
+                [r for r in s["wszystkie"] if r["uwagi"]])
+        for r in rows[:5000]:
             self.result.insert("", "end", values=(r["nazwa"], r["zakup_netto"], r["poprzednia_brutto"],
                                                   r["cena_brutto"], r["uwagi"]))
+        if len(rows) > 5000:
+            self.write_log(f"Tabela pokazuje 5000 z {len(rows)} — całość w raporcie (Otwórz raport).")
+
+    def show_summary(self, summary: dict) -> None:
+        self.last_summary = summary
+        self.refresh_table()
         uw = ", ".join(f"{k}: {v}" for k, v in summary["uwagi"].items())
         self.v_status.set(f"{summary['czas']}: zmian cen {summary['zmiany']} • z ceną {summary['dopasowane']} z "
                           f"{summary['produkty']}" + (f" • {uw}" if uw else ""))

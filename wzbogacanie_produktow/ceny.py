@@ -307,6 +307,17 @@ def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[t
     return pairs
 
 
+def zacznij_od_nowa(cfg) -> str:
+    """Kasuje pamięć poprzedniego przeliczenia (ceny_ostatnie.csv) — kopia zostaje obok. Zwraca ścieżkę kopii."""
+    out_dir = cfg.get("pliki", "folder_wynikow", fallback="").strip() or HERE
+    path = os.path.join(out_dir, STATE)
+    if not os.path.exists(path):
+        return ""
+    backup = os.path.join(out_dir, f"ceny_ostatnie_kopia_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.replace(path, backup)
+    return backup
+
+
 class CenyError(Exception):
     """Błąd, przy którym nie wolno zrobić pliku importu (komunikat dla użytkownika)."""
 
@@ -461,7 +472,7 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
     log(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "
         f"zmienione od ostatniego razu: {len(changed)}. " + ", ".join(f"{k}: {v}" for k, v in warnings.items()))
     summary = {"produkty": len(shop), "dopasowane": matched, "zmiany": len(changed), "uwagi": dict(warnings),
-               "raport": report_path, "import": "", "zmienione": changed, "czas": time.strftime("%Y-%m-%d %H:%M")}
+               "raport": report_path, "import": "", "zmienione": changed, "wszystkie": report, "czas": time.strftime("%Y-%m-%d %H:%M")}
 
     fuse = []
     if bad_price > len(records) * 0.2:
