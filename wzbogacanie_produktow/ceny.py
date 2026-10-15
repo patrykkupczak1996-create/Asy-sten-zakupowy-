@@ -243,8 +243,11 @@ def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[t
                         filled[k] += 1
         return {k: v for k, v in vals.items() if len(v) >= 0.8 * filled[k]}
 
-    xml_vals = unique_sets(records)
-    shop_vals = unique_sets(p["_raw"] for p in shop)
+    # Nazwy i kategorie nie nadają się do łączenia — ten sam opis bywa u różnych producentów.
+    text_like = ("name", "nazwa", "desc", "opis", "cat", "kategori", "marka")
+    xml_vals = {k: v for k, v in unique_sets(records).items() if not any(t in k for t in text_like)}
+    shop_vals = {k: v for k, v in unique_sets(p["_raw"] for p in shop).items()
+                 if not any(t in k.lower() for t in text_like)}
     scored = sorted(((len(xv & sv), xk, sc) for xk, xv in xml_vals.items() for sc, sv in shop_vals.items()),
                     reverse=True)
     need = 1 if len(shop) < 300 else max(3, len(shop) // 500)  # pomijamy przypadkowe zbieżności
@@ -288,6 +291,14 @@ def show(path: str, cfg, log=print) -> dict[str, str]:
 
 
 def settings_from(cfg) -> dict:
+    if cfg.get("marza", "tryb", fallback="progi").strip() == "jedna":
+        # Jedna marża dla wszystkich — bez progów i bez wyjątków dla producentów.
+        flat = to_float(cfg.get("marza", "jedna_marza", fallback="25"))
+        return {"tiers": [(0.0, flat)],
+                "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
+                "vat": to_float(cfg.get("marza", "vat", fallback="23")),
+                "rounding": cfg.get("marza", "zaokraglenie", fallback="0.01").strip(),
+                "producers": {}}
     return {"tiers": parse_tiers(cfg.get("marza", "progi", fallback="")),
             "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
             "vat": to_float(cfg.get("marza", "vat", fallback="23")),

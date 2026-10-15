@@ -63,18 +63,30 @@ class App(tk.Tk):
             ttk.Entry(src, textvariable=var).grid(row=r, column=1, sticky="ew", padx=4)
             ttk.Button(src, text="…", width=3, command=lambda v=var, b=browse: self.browse(v, b)).grid(row=r, column=2)
 
+        mode = ttk.LabelFrame(f, text="Sposób liczenia marży", padding=8)
+        mode.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.v_mode, self.v_flat = tk.StringVar(value="progi"), tk.StringVar(value="25")
+        ttk.Radiobutton(mode, text="Jedna marża dla wszystkich produktów:", value="jedna",
+                        variable=self.v_mode).pack(side="left")
+        ttk.Entry(mode, textvariable=self.v_flat, width=6).pack(side="left", padx=4)
+        ttk.Label(mode, text="%").pack(side="left")
+        ttk.Radiobutton(mode, text="Marża wg progów ceny i wyjątków producentów (tabele niżej)", value="progi",
+                        variable=self.v_mode).pack(side="left", padx=(30, 0))
+        for v in (self.v_mode, self.v_flat):
+            v.trace_add("write", lambda *_: self.update_example())
+
         tiers = ttk.LabelFrame(f, text="Marża wg ceny zakupu netto", padding=8)
-        tiers.grid(row=1, column=0, sticky="nsew", pady=8, padx=(0, 4))
+        tiers.grid(row=2, column=0, sticky="nsew", pady=8, padx=(0, 4))
         self.tiers = self.editable_table(tiers, ("Cena zakupu od (zł)", "Marża %"))
         ttk.Label(tiers, text="Każdy próg obowiązuje od swojej kwoty w górę.\n"
                               "Jedna stała marża = jeden wiersz od 0 zł.", foreground="#555").pack(anchor="w")
 
         prod = ttk.LabelFrame(f, text="Wyjątki dla producentów (zamiast progów)", padding=8)
-        prod.grid(row=1, column=1, sticky="nsew", pady=8, padx=(4, 0))
+        prod.grid(row=2, column=1, sticky="nsew", pady=8, padx=(4, 0))
         self.producers = self.editable_table(prod, ("Producent (jak w sklepie)", "Marża %"))
 
         other = ttk.LabelFrame(f, text="Zasady ceny", padding=8)
-        other.grid(row=2, column=0, columnspan=2, sticky="ew")
+        other.grid(row=3, column=0, columnspan=2, sticky="ew")
         self.v_min, self.v_vat, self.v_round = tk.StringVar(), tk.StringVar(), tk.StringVar()
         ttk.Label(other, text="Minimalny zysk netto na sztuce (zł):").grid(row=0, column=0, sticky="w")
         ttk.Entry(other, textvariable=self.v_min, width=8).grid(row=0, column=1, sticky="w", padx=4)
@@ -90,7 +102,7 @@ class App(tk.Tk):
             v.trace_add("write", lambda *_: self.update_example())
 
         auto = ttk.LabelFrame(f, text="Automat i wysyłka do IdoSell", padding=8)
-        auto.grid(row=3, column=0, columnspan=2, sticky="ew", pady=8)
+        auto.grid(row=4, column=0, columnspan=2, sticky="ew", pady=8)
         self.v_hours = tk.StringVar()
         ttk.Label(auto, text="Przeliczaj automatycznie o godzinach:").grid(row=0, column=0, sticky="w")
         ttk.Entry(auto, textvariable=self.v_hours, width=20).grid(row=0, column=1, sticky="w", padx=4)
@@ -110,11 +122,11 @@ class App(tk.Tk):
             row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         bar = ttk.Frame(f)
-        bar.grid(row=4, column=0, columnspan=2, sticky="ew")
+        bar.grid(row=5, column=0, columnspan=2, sticky="ew")
         ttk.Button(bar, text="Zapisz ustawienia", command=self.save).pack(side="left")
         ttk.Button(bar, text="Sprawdź XML", command=self.check_xml).pack(side="left", padx=6)
         ttk.Button(bar, text="Przelicz ceny teraz", command=self.run_now).pack(side="right")
-        f.rowconfigure(1, weight=1)
+        f.rowconfigure(2, weight=1)
 
     def editable_table(self, parent, headings) -> ttk.Treeview:
         tree = ttk.Treeview(parent, columns=("a", "b"), show="headings", height=6)
@@ -171,6 +183,8 @@ class App(tk.Tk):
         if c.has_section("producenci"):
             for k, v in c.items("producenci"):
                 self.producers.insert("", "end", values=(k, v))
+        self.v_mode.set(c.get("marza", "tryb", fallback="progi"))
+        self.v_flat.set(c.get("marza", "jedna_marza", fallback="25"))
         self.v_min.set(c.get("marza", "minimalny_zysk_zl", fallback="2"))
         self.v_vat.set(c.get("marza", "vat", fallback="23"))
         code = c.get("marza", "zaokraglenie", fallback="0.99").strip()
@@ -197,6 +211,8 @@ class App(tk.Tk):
         if not tiers:
             raise ValueError("Dodaj co najmniej jeden próg marży (np. od 0 zł).")
         c.set("marza", "progi", ", ".join(f"{a:g}:{b:g}" for a, b in tiers))
+        c.set("marza", "tryb", self.v_mode.get())
+        c.set("marza", "jedna_marza", f"{ceny.to_float(self.v_flat.get() or 0):g}")
         c.set("marza", "minimalny_zysk_zl", f"{ceny.to_float(self.v_min.get() or 0):g}")
         c.set("marza", "vat", f"{ceny.to_float(self.v_vat.get() or 23):g}")
         c.set("marza", "zaokraglenie", ROUNDING.get(self.v_round.get(), "0.01"))
