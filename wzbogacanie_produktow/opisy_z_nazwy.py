@@ -202,6 +202,30 @@ def preview(df, path: str, limit: int = 300) -> str:
     return out
 
 
+BIELIK = "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"
+
+
+def pick_model() -> None:
+    """Bielik, jeśli jest pobrany; inaczej model z OLLAMA_MODEL albo pierwszy z listy preferowanych."""
+    settings = wp.AI_PROVIDERS["ollama"]
+    installed = wp.ollama_installed(settings)
+    names = installed | {n.removesuffix(":latest") for n in installed}
+    if not installed:
+        sys.exit("Ollama działa, ale nie widzi ŻADNEGO pobranego modelu. Najczęściej to znaczy, że modele leżą "
+                 "w innym folderze (np. na dysku D:), a Ollama została uruchomiona bez ustawienia OLLAMA_MODELS.\n"
+                 "Sprawdź w PowerShell:  [Environment]::GetEnvironmentVariable('OLLAMA_MODELS','User')\n"
+                 "Potem zamknij Ollamę (ikona w zasobniku → Quit Ollama) i uruchom ją ponownie z menu Start; "
+                 "„ollama list” powinno pokazać bielika. Jeśli modelu naprawdę nie ma:  ollama pull " + BIELIK)
+    wanted = [m.strip() for m in os.getenv("OLLAMA_MODEL", "").split(",") if m.strip()]
+    for m in [BIELIK] + wanted + wp.OLLAMA_PREFERRED:
+        if m in names:
+            os.environ["OLLAMA_MODEL"] = m
+            settings["models"] = [m]
+            return
+    sys.exit(f"Brak modelu {BIELIK}. Pobierz go:  ollama pull {BIELIK}\n"
+             f"Pobrane modele: {', '.join(sorted(installed))}")
+
+
 def save(df, path: str) -> None:
     tmp = path + ".tmp"
     df.to_csv(tmp, index=False, encoding="utf-8-sig")
@@ -272,8 +296,7 @@ def main() -> None:
     if not pool:
         sys.exit("W arkuszu nie ma jeszcze gotowych opisów, z których model mógłby brać wzór.")
 
-    os.environ.setdefault("OLLAMA_MODEL", "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M")
-    wp.AI_PROVIDERS["ollama"]["models"] = os.environ["OLLAMA_MODEL"].split(",")
+    pick_model()
     wp.configure_ai("ollama")
     print(f"Do napisania: {len(todo)} opisów. Model: {wp.AI['models'][0]}. Ctrl+C przerywa (postęp zostaje).")
 

@@ -205,7 +205,7 @@ class Asystent(tk.Tk):
             return
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         if ollama:
-            env.setdefault("OLLAMA_MODEL", BIELIK)
+            env["OLLAMA_MODEL"] = BIELIK  # zawsze Bielik — stara zmienna systemowa nie może podmienić modelu
             env["AI_PROVIDER"] = "ollama"
         self.write(f"\n▶ {label}")
         self.v_status.set(f"Pracuje: {label}")
