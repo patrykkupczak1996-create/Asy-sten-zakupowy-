@@ -162,18 +162,57 @@ def order_by_brand(df, todo: list[int]) -> list[int]:
     return ordered
 
 
+BASE_COLUMNS = {  # rola -> możliwe nagłówki (eksport IdoSell albo arkusz Google)
+    "id": ["@id", "id", "id towaru", "id produktu"],
+    "nazwa": ["/description/name[pol]", "nazwa", "nazwa produktu", "name"],
+    "producent": ["/producer@name", "producent", "marka"],
+}
+
+
+def read_base(base: str):
+    """Baza produktów z pliku CSV albo linku do arkusza Google; kolumny rozpoznawane po nagłówkach."""
+    import io
+    import pandas as pd
+    if re.match(r"https?://", base):
+        import ceny
+        resp = requests.get(ceny.google_sheet_csv_url(base), timeout=300)
+        resp.raise_for_status()
+        text = resp.content.decode("utf-8-sig", errors="replace")
+        if text.lstrip().lower().startswith(("<!doctype", "<html")):
+            sys.exit("Arkusz Google nie jest udostępniony do odczytu. Udostępnij → „Każda osoba mająca link” "
+                     "(Przeglądający) — albo pobierz go jako CSV i wskaż plik.")
+        src = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False, sep=None, engine="python")
+    else:
+        if not os.path.exists(base):
+            sys.exit(f"Nie ma pliku z produktami: {base}")
+        src = pd.read_csv(base, dtype=str, keep_default_na=False, sep=None, engine="python", encoding="utf-8-sig")
+    headers = {str(h).strip().lower(): h for h in src.columns}
+    cols = {role: next((headers[n] for n in names if n in headers), None) for role, names in BASE_COLUMNS.items()}
+    if not cols["id"] or not cols["nazwa"]:
+        sys.exit(f"W pliku z produktami nie znalazłem kolumn z ID i nazwą. Kolumny: {', '.join(src.columns)[:300]}")
+    df = pd.DataFrame({wp.COL_ID: src[cols["id"]].astype(str).str.strip(), COL_NAME: src[cols["nazwa"]],
+                       COL_PRODUCER: src[cols["producent"]] if cols["producent"] else ""})
+    return df[(df[wp.COL_ID] != "") & (df[COL_NAME].str.strip() != "")].drop_duplicates(wp.COL_ID)
+
+
 def build_from_base(base: str, out: str, skip_ids: set[str]) -> None:
-    """Plik roboczy z eksportu IdoSell (produkty.csv): @id, Nazwa, Producent, Opis nowy, Status."""
-    src = wp.read_csv(base)
-    for col in (wp.COL_ID, wp.COL_NAME, wp.COL_PRODUCER):
-        if col not in src.columns:
-            sys.exit(f"W {base} brak kolumny {col}.")
-    df = src[[wp.COL_ID, wp.COL_NAME, wp.COL_PRODUCER]].rename(
-        columns={wp.COL_NAME: COL_NAME, wp.COL_PRODUCER: COL_PRODUCER})
-    df = df[~df[wp.COL_ID].astype(str).isin(skip_ids)].drop_duplicates(wp.COL_ID)
-    df[COL_DESC], df[COL_STATUS] = "", ""
-    save(df, out)
-    print(f"Utworzyłem {out}: {len(df)} produktów z {base} (pominięte już opisane w arkuszu: {len(skip_ids)}).")
+    """Plik roboczy (@id, Nazwa, Producent, Opis nowy, Status): tworzy go z bazy albo dopisuje nowe produkty."""
+    import pandas as pd
+    new = read_base(base)
+    new = new[~new[wp.COL_ID].isin(skip_ids)]
+    if os.path.exists(out):
+        cur = wp.read_csv(out)
+        new = new[~new[wp.COL_ID].isin(set(cur[wp.COL_ID].astype(str)))]
+        if new.empty:
+            print(f"{out}: bez nowych produktów z {base} ({len(cur)} w pliku roboczym).")
+            return
+        new = new.assign(**{COL_DESC: "", COL_STATUS: ""})
+        save(pd.concat([cur, new], ignore_index=True).fillna(""), out)
+        print(f"Dopisałem do {out} {len(new)} nowych produktów z {base}.")
+        return
+    new = new.assign(**{COL_DESC: "", COL_STATUS: ""})
+    save(new, out)
+    print(f"Utworzyłem {out}: {len(new)} produktów z {base} (pominięte już opisane w arkuszu: {len(skip_ids)}).")
 
 
 def preview(df, path: str, limit: int = 300) -> str:
@@ -250,7 +289,7 @@ def main() -> None:
     args = ap.parse_args()
 
     extra = wp.read_csv(args.wzory) if args.wzory else None
-    if args.baza and not os.path.exists(args.plik):
+    if args.baza:
         skip = set()
         if extra is not None and wp.COL_ID in extra.columns and COL_STATUS in extra.columns:
             skip = set(extra.loc[extra[COL_STATUS].str.strip() != "", wp.COL_ID].astype(str))

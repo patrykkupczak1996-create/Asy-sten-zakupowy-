@@ -7,6 +7,7 @@ i można go zatrzymać przyciskiem „Zatrzymaj”.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import queue
 import shutil
@@ -19,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIELIK = "SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M"
 SHEET_PATTERN = "opisy_wszystkie_gotowe_arkusz*.csv"
+SETTINGS_FILE = os.path.join(HERE, "asystent_ustawienia.json")
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW — bez czarnego okna konsoli
 
 
@@ -40,6 +42,7 @@ class Asystent(tk.Tk):
         self.geometry("1080x760")
         self.minsize(900, 620)
         self.proc: subprocess.Popen | None = None
+        self.settings = self.load_settings()
         self.out: queue.Queue = queue.Queue()
 
         top = ttk.Frame(self, padding=(10, 8))
@@ -83,6 +86,13 @@ class Asystent(tk.Tk):
 
     # ------------------------------------------------------------------ zakładki
     def build_opisy(self, f) -> None:
+        self.v_base = tk.StringVar(value=self.settings.get("baza", "produkty.csv"))
+        base = ttk.Frame(f)
+        base.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(base, text="Produkty do opisania (plik CSV albo link do arkusza Google):").pack(side="left")
+        ttk.Entry(base, textvariable=self.v_base, width=60).pack(side="left", padx=4, fill="x", expand=True)
+        ttk.Button(base, text="…", width=3, command=self.pick_base).pack(side="left")
+        self.v_base.trace_add("write", lambda *_: self.save_settings())
         self.v_limit = tk.StringVar(value="20")
         lim = ttk.Frame(f)
         lim.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
@@ -92,8 +102,8 @@ class Asystent(tk.Tk):
                   foreground="#555").pack(side="left", padx=10)
         self.row(f, "Weź arkusz z Pobranych", "Kopiuje najnowszy pobrany arkusz Google (Plik → Pobierz → CSV) "
                  "jako arkusz_opisy.csv — wzory stylu i opisy z arkusza.", self.take_sheet, 1)
-        self.row(f, "Próba: opisy dla całej bazy", "Pisze opisy dla podanej liczby produktów z produkty.csv "
-                 "i otwiera podgląd.", lambda: self.opisy_baza(limit=True), 2)
+        self.row(f, "Próba: opisy dla całej bazy", "Pisze opisy dla podanej liczby produktów z wybranej bazy "
+                 "(pole na dole) i otwiera podgląd.", lambda: self.opisy_baza(limit=True), 2)
         self.row(f, "Opisy całej bazy (na noc)", "Wszystkie produkty bez opisu; wznawia od miejsca przerwania.",
                  lambda: self.opisy_baza(limit=False), 3)
         self.row(f, "Dokończ brakujące w arkuszu", "Uzupełnia wiersze arkusza_opisy.csv bez statusu.",
@@ -152,10 +162,32 @@ class Asystent(tk.Tk):
         shutil.copy2(path, "arkusz_opisy.csv")
         self.write(f"Skopiowano {path} → arkusz_opisy.csv")
 
+    def pick_base(self) -> None:
+        path = filedialog.askopenfilename(title="Plik z produktami do opisania", filetypes=[("CSV", "*.csv")])
+        if path:
+            self.v_base.set(path)
+
+    def load_settings(self) -> dict:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def save_settings(self) -> None:
+        self.settings["baza"] = self.v_base.get().strip()
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self.settings, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
     def opisy_baza(self, limit: bool) -> None:
-        if not self.need("produkty.csv", "arkusz_opisy.csv"):
+        base = self.v_base.get().strip() or "produkty.csv"
+        is_link = base.lower().startswith(("http://", "https://"))
+        if not self.need("arkusz_opisy.csv") or (not is_link and not self.need(base)):
             return
-        cmd = ["opisy_z_nazwy.py", "opisy_baza.csv", "--baza", "produkty.csv", "--wzory", "arkusz_opisy.csv"]
+        cmd = ["opisy_z_nazwy.py", "opisy_baza.csv", "--baza", base, "--wzory", "arkusz_opisy.csv"]
         if limit:
             cmd += ["--limit", self.v_limit.get().strip() or "20"]
         self.run_py(cmd, ollama=True)

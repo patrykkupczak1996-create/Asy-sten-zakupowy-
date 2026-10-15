@@ -16,3 +16,4 @@ marker_*.png
 # Ceny: cennik hurtowni i Twoje ustawienia marży
 *.xml
 wzbogacanie_produktow/ceny_ustawienia.ini
+wzbogacanie_produktow/asystent_ustawienia.json
