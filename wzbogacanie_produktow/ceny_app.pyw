@@ -57,7 +57,7 @@ class App(tk.Tk):
         self.v_xml, self.v_shop, self.v_out = tk.StringVar(), tk.StringVar(), tk.StringVar()
         for r, (label, var, browse) in enumerate([
                 ("Link do XML Onninen (albo plik):", self.v_xml, "xml"),
-                ("Produkty sklepu (eksport IdoSell, CSV):", self.v_shop, "csv"),
+                ("Produkty sklepu (CSV albo link do arkusza Google):", self.v_shop, "csv"),
                 ("Folder wyników (puste = folder programu):", self.v_out, "dir")]):
             ttk.Label(src, text=label).grid(row=r, column=0, sticky="w", pady=2)
             ttk.Entry(src, textvariable=var).grid(row=r, column=1, sticky="ew", padx=4)

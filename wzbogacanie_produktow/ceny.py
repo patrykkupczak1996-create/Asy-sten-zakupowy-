@@ -186,21 +186,58 @@ def sale_price(buy: float, producer: str, s: dict) -> tuple[float, float, float]
 
 
 # ----------------------------------------------------------------------------- sklep
+SHOP_COLUMNS = {  # rola -> możliwe nagłówki (eksport IdoSell, arkusz Google, własne pliki)
+    "id": ["@id", "id", "id towaru", "id produktu", "identyfikator"],
+    "kod": ["@code_producer", "kod", "kod producenta", "kod_producenta", "symbol producenta", "nr katalogowy"],
+    "ean": ["/sizes/size@code_producer", "ean", "kod ean", "gtin", "kod kreskowy"],
+    "producent": ["/producer@name", "producent", "marka"],
+    "nazwa": ["/description/name[pol]", "nazwa", "nazwa produktu", "name"],
+}
+
+
+def google_sheet_csv_url(url: str) -> str:
+    """Link do arkusza Google (…/edit#gid=…) -> link pobrania CSV tej karty."""
+    m = re.search(r"docs\.google\.com/spreadsheets/d/([\w-]+)", url)
+    if not m or "export?" in url:
+        return url
+    gid = re.search(r"[#&?]gid=(\d+)", url)
+    return f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv" + (f"&gid={gid.group(1)}" if gid else "")
+
+
 def read_shop(path: str, cfg) -> list[dict]:
-    col_id = cfg.get("sklep", "kolumna_id", fallback="@id")
-    col_code = cfg.get("sklep", "kolumna_kod", fallback="@code_producer")
-    col_ean = cfg.get("sklep", "kolumna_ean", fallback="/sizes/size@code_producer")
-    col_prod = cfg.get("sklep", "kolumna_producent", fallback="/producer@name")
-    col_name = cfg.get("sklep", "kolumna_nazwa", fallback="/description/name[pol]")
-    with open(path, encoding="utf-8-sig", newline="") as fh:
-        sample = fh.read(4096)
-        fh.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        rows = list(csv.DictReader(fh, dialect=dialect))
-    if rows and col_id not in rows[0]:
-        sys.exit(f"W {path} brak kolumny {col_id}. Kolumny: {', '.join(rows[0])[:300]}")
-    return [{"id": r.get(col_id, ""), "kod": r.get(col_code, ""), "ean": r.get(col_ean, ""),
-             "producent": r.get(col_prod, ""), "nazwa": r.get(col_name, ""), "_raw": r} for r in rows]
+    """Produkty sklepu z pliku CSV albo linku do arkusza Google; kolumny rozpoznawane po nagłówkach."""
+    if re.match(r"https?://", path):
+        try:
+            data = read_source(google_sheet_csv_url(path))
+        except Exception as exc:
+            raise CenyError(f"Nie udało się pobrać arkusza z produktami: {exc}") from exc
+        text = data.decode("utf-8-sig", errors="replace")
+        if text.lstrip().lower().startswith(("<!doctype", "<html")):
+            raise CenyError("Arkusz Google nie jest udostępniony do odczytu. W arkuszu: Udostępnij → "
+                            "„Każda osoba mająca link” (Przeglądający) — albo pobierz go jako CSV i wskaż plik.")
+    else:
+        if not os.path.exists(path):
+            raise CenyError(f"Brak pliku produktów sklepu: {path}")
+        with open(path, encoding="utf-8-sig", errors="replace", newline="") as fh:
+            text = fh.read()
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.DictReader(io.StringIO(text), dialect=dialect))
+    if not rows:
+        raise CenyError(f"Plik produktów jest pusty: {path}")
+    headers = {h.strip().lower(): h for h in rows[0] if h}
+    cols = {}
+    for role, names in SHOP_COLUMNS.items():
+        manual = cfg.get("sklep", f"kolumna_{role}", fallback="").strip()
+        cols[role] = manual or next((headers[n] for n in names if n in headers), "")
+    if not cols["id"]:
+        raise CenyError(f"W produktach brak kolumny z ID towaru (np. @id). Kolumny: {', '.join(rows[0])[:300]}")
+    return [{"id": r.get(cols["id"], ""), "kod": r.get(cols["kod"], ""), "ean": r.get(cols["ean"], ""),
+             "producent": r.get(cols["producent"], ""), "nazwa": r.get(cols["nazwa"], ""), "_raw": r,
+             "_idcol": cols["id"]}
+            for r in rows if r.get(cols["id"], "").strip()]
 
 
 def write_csv(path: str, rows: list[dict], columns: list[str]) -> None:
@@ -255,7 +292,7 @@ def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[t
     for n, xk, sc in scored:
         if n < need or len(pairs) >= 4:
             break
-        if (xk, sc) not in used and sc != cfg.get("sklep", "kolumna_id", fallback="@id"):
+        if (xk, sc) not in used and sc != (shop[0].get("_idcol") if shop else "@id"):
             pairs.append((xk, sc, n))
             used.add((xk, sc))
     log("Łączenie ze sklepem: " + ("; ".join(f"XML „{xk}” = sklep „{sc}” ({n} wspólnych)" for xk, sc, n in pairs)
@@ -357,9 +394,8 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
     fields = pick_fields(records[:200], cfg)
     if "cena" not in fields:
         raise CenyError("Nie rozpoznałem ceny w XML — użyj „Sprawdź XML” i wpisz pole ceny w ustawieniach.")
-    if not os.path.exists(shop_path):
-        raise CenyError(f"Brak pliku produktów sklepu: {shop_path}")
     shop = read_shop(shop_path, cfg)
+    log(f"Produkty sklepu: {len(shop)} z {shop_path if len(shop_path) < 80 else shop_path[:77] + '…'}")
     pairs = match_pairs(records, shop, cfg, log)
     index: dict[str, dict[str, list]] = {xk: {} for xk, _, _ in pairs}
     bad_price = 0
