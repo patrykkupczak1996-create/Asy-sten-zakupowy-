@@ -129,6 +129,11 @@ def iter_records(data: bytes, record_tag: str):
             if child is el:
                 continue
             key = plain_key(child.tag)
+            # <a name="EAN">590…</a> — pola opisane atrybutem name/key (np. feed Onninen) bierzemy po tej nazwie
+            label = child.attrib.get("name") or child.attrib.get("key")
+            if label and child.text and child.text.strip():
+                rec.setdefault(plain_key(label).replace(" ", "_"), child.text.strip())
+                continue
             if child.text and child.text.strip() and key not in rec:
                 rec[key] = child.text.strip()
             for ak, av in child.attrib.items():
