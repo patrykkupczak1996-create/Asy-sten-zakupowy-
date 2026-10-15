@@ -30,6 +30,7 @@ import requests
 import wzbogac_produkty as wp
 
 COL_NAME, COL_PRODUCER, COL_DESC, COL_STATUS = "Nazwa", "Producent", "Opis nowy", "Status"
+COL_ADDED = "Dodano"
 SAVE_EVERY = 10
 MAX_TRIES = 3
 EXAMPLES = 4
@@ -175,6 +176,32 @@ def build_from_base(base: str, out: str, skip_ids: set[str]) -> None:
     print(f"Utworzyłem {out}: {len(df)} produktów z {base} (pominięte już opisane w arkuszu: {len(skip_ids)}).")
 
 
+def preview(df, path: str, limit: int = 300) -> str:
+    """Strona HTML z ostatnio dopisanymi opisami (najnowsze na górze) — do szybkiego przejrzenia."""
+    import html
+    import webbrowser
+    rows = df[df.get(COL_ADDED, "").astype(str).str.strip() != ""] if COL_ADDED in df.columns else df.iloc[0:0]
+    rows = rows.sort_values(COL_ADDED, ascending=False).head(limit)
+    trs = "".join(
+        f"<tr class='{'r' if r[COL_STATUS] == 'RĘCZNIE' else ''}'><td>{html.escape(str(r[COL_ADDED]))}</td>"
+        f"<td>{html.escape(str(r[COL_PRODUCER]))}</td><td><b>{html.escape(str(r[COL_NAME]))}</b></td>"
+        f"<td>{html.escape(str(r[COL_DESC])) or '<i>do uzupełnienia ręcznie</i>'}</td></tr>"
+        for _, r in rows.iterrows())
+    out = os.path.splitext(path)[0] + "_podglad.html"
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write("<!doctype html><meta charset='utf-8'><title>Nowe opisy</title><style>"
+                 "body{font-family:Segoe UI,Arial;margin:20px}table{border-collapse:collapse;width:100%}"
+                 "td,th{border:1px solid #ccc;padding:6px;vertical-align:top;font-size:14px}"
+                 "th{background:#eee}tr.r{background:#fde}td:nth-child(4){max-width:600px}</style>"
+                 f"<h2>Ostatnio dopisane opisy ({len(rows)})</h2><table><tr><th>Kiedy</th><th>Producent</th>"
+                 f"<th>Nazwa</th><th>Opis</th></tr>{trs}</table>")
+    try:
+        webbrowser.open("file:///" + os.path.abspath(out).replace(os.sep, "/"))
+    except Exception:
+        pass
+    return out
+
+
 def save(df, path: str) -> None:
     tmp = path + ".tmp"
     df.to_csv(tmp, index=False, encoding="utf-8-sig")
@@ -188,6 +215,8 @@ def main() -> None:
     ap.add_argument("--popraw-zle", action="store_true",
                     help="opisy, które nie przechodzą kontroli, napisz od nowa")
     ap.add_argument("--limit", type=int, default=0, help="najwyżej tyle wierszy (do testów)")
+    ap.add_argument("--podglad", action="store_true",
+                    help="otwórz w przeglądarce ostatnio dopisane opisy (bez AI) i zakończ")
     ap.add_argument("--kolejnosc", choices=["marki", "plik"], default="marki",
                     help="marki = najpierw znane i największe marki (domyślnie), plik = po kolei")
     ap.add_argument("--baza", metavar="CSV",
@@ -212,6 +241,11 @@ def main() -> None:
                  "(Plik > Pobierz > CSV).")
     if COL_PRODUCER not in df.columns:
         df[COL_PRODUCER] = ""
+    if COL_ADDED not in df.columns:
+        df[COL_ADDED] = ""
+    if args.podglad:
+        print("Podgląd: " + preview(df, args.plik))
+        return
 
     done = df[COL_STATUS].str.strip().str.upper().isin(["NOWY", "OK"]) & (df[COL_DESC].str.strip() != "")
     bad = {i: problems(df.at[i, COL_DESC], df.at[i, COL_NAME]) for i in df.index[done]}
@@ -254,10 +288,12 @@ def main() -> None:
                 continue
             if desc:
                 df.at[i, COL_DESC], df.at[i, COL_STATUS] = desc, "NOWY"
+                df.at[i, COL_ADDED] = time.strftime("%Y-%m-%d %H:%M")
                 pool.append((words(name), name, desc))
                 written += 1
             else:
                 df.at[i, COL_DESC], df.at[i, COL_STATUS] = "", "RĘCZNIE"
+                df.at[i, COL_ADDED] = time.strftime("%Y-%m-%d %H:%M")
                 manual += 1
                 print(f"  wiersz {i + 2} RĘCZNIE ({name[:50]}): {'; '.join(why)}")
             if n % SAVE_EVERY == 0:
@@ -267,6 +303,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Przerwano — zapisuję postęp. Ta sama komenda dokończy resztę.")
     save(df, args.plik)
+    if written or manual:
+        print("Podgląd: " + preview(df, args.plik))
     print(f"Koniec. Nowe opisy: {written}, do ręcznego uzupełnienia: {manual}. Plik: {args.plik}")
 
 
