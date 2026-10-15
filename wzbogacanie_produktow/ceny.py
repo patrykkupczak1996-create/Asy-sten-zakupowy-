@@ -407,6 +407,14 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
         raise CenyError("Nie rozpoznałem ceny w XML — użyj „Sprawdź XML” i wpisz pole ceny w ustawieniach.")
     shop = read_shop(shop_path, cfg)
     log(f"Produkty sklepu: {len(shop)} z {shop_path if len(shop_path) < 80 else shop_path[:77] + '…'}")
+    no_code = sum(1 for p in shop if not p["kod"].strip())
+    no_ean = sum(1 for p in shop if not p["ean"].strip())
+    no_both = sum(1 for p in shop if not p["kod"].strip() and not p["ean"].strip())
+    log(f"W bazie sklepu: bez kodu producenta {no_code}, bez EAN {no_ean}, bez obu {no_both}"
+        + (" — tych produktów nie da się połączyć z cennikiem po kodzie/EAN." if no_both else "."))
+    if shop and no_code == len(shop) and no_ean == len(shop):
+        log("UWAGA: nie znalazłem kolumn z kodem i EAN w pliku produktów. Kolumny w pliku: "
+            + ", ".join(k for k in shop[0]["_raw"] if k)[:400])
     pairs = match_pairs(records, shop, cfg, log)
     index: dict[str, dict[str, list]] = {xk: {} for xk, _, _ in pairs}
     bad_price = 0

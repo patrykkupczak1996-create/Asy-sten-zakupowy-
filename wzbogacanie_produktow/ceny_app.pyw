@@ -25,7 +25,7 @@ class App(tk.Tk):
         super().__init__()
         os.chdir(ceny.HERE)
         self.title("Ceny Onninen — marże i aktualizacja cen sklepu")
-        self.geometry("1060x780")
+        self.geometry("1220x800")
         self.minsize(860, 600)
         self.cfg = ceny.load_settings()
         self.log_queue: queue.Queue = queue.Queue()
@@ -316,13 +316,22 @@ class App(tk.Tk):
             ttk.Radiobutton(show, text=text, value=value, variable=self.v_show,
                             command=self.refresh_table).pack(side="left", padx=6)
         self.last_summary: dict | None = None
-        cols = ("nazwa", "zakup", "stara", "nowa", "uwagi")
-        self.result = ttk.Treeview(f, columns=cols, show="headings", height=14)
-        for col, text, w in zip(cols, ("Produkt", "Zakup netto", "Było brutto", "Teraz brutto", "Uwagi"),
-                                (380, 90, 90, 90, 300)):
-            self.result.heading(col, text=text)
-            self.result.column(col, width=w, anchor="w" if col in ("nazwa", "uwagi") else "e")
-        self.result.pack(fill="both", expand=True, pady=6)
+        cols = ("nazwa", "producent", "kod", "ean", "zakup", "stara", "nowa", "uwagi")
+        table = ttk.Frame(f)
+        table.pack(fill="both", expand=True, pady=6)
+        self.result = ttk.Treeview(table, columns=cols, show="headings", height=14)
+        self.sort_state = ("nazwa", False)
+        for col, text, w in zip(cols, ("Produkt", "Producent", "Kod producenta", "EAN", "Zakup netto",
+                                       "Było brutto", "Teraz brutto", "Uwagi"),
+                                (300, 100, 110, 115, 80, 80, 80, 220)):
+            self.result.heading(col, text=text, command=lambda c=col: self.sort_by(c))
+            self.result.column(col, width=w, anchor="e" if col in ("zakup", "stara", "nowa") else "w")
+        ys = ttk.Scrollbar(table, orient="vertical", command=self.result.yview)
+        self.result.configure(yscrollcommand=ys.set)
+        ys.pack(side="right", fill="y")
+        self.result.pack(fill="both", expand=True)
+        ttk.Label(f, text="Kliknij nagłówek kolumny, żeby posortować (drugi klik — odwrotnie).",
+                  foreground="#555").pack(anchor="w")
         self.log = tk.Text(f, height=9, wrap="word", state="disabled", background="#f7f7f7")
         self.log.pack(fill="x")
 
@@ -403,11 +412,30 @@ class App(tk.Tk):
         rows = (s["zmienione"] if mode == "zmiany" else
                 [r for r in s["wszystkie"] if r["cena_brutto"]] if mode == "wszystkie" else
                 [r for r in s["wszystkie"] if r["uwagi"]])
+        col, desc = self.sort_state
+        key = {"nazwa": "nazwa", "producent": "producent", "kod": "kod", "ean": "ean", "zakup": "zakup_netto",
+               "stara": "poprzednia_brutto", "nowa": "cena_brutto", "uwagi": "uwagi"}[col]
+
+        def sort_key(r):
+            v = str(r.get(key, ""))
+            if col in ("zakup", "stara", "nowa"):
+                try:
+                    return (0, float(v), "")
+                except ValueError:
+                    return (1, 0.0, "")
+            return (0 if v else 1, 0.0, v.lower())
+
+        rows = sorted(rows, key=sort_key, reverse=desc)
         for r in rows[:5000]:
-            self.result.insert("", "end", values=(r["nazwa"], r["zakup_netto"], r["poprzednia_brutto"],
-                                                  r["cena_brutto"], r["uwagi"]))
+            self.result.insert("", "end", values=(r["nazwa"], r["producent"], r["kod"], r["ean"], r["zakup_netto"],
+                                                  r["poprzednia_brutto"], r["cena_brutto"], r["uwagi"]))
         if len(rows) > 5000:
             self.write_log(f"Tabela pokazuje 5000 z {len(rows)} — całość w raporcie (Otwórz raport).")
+
+    def sort_by(self, col: str) -> None:
+        current, desc = self.sort_state
+        self.sort_state = (col, not desc if col == current else False)
+        self.refresh_table()
 
     def show_summary(self, summary: dict) -> None:
         self.last_summary = summary
