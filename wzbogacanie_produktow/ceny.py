@@ -610,7 +610,9 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
         log("Kontrola marży pominięta: w pliku produktów nie ma kolumny z obecną ceną sklepu "
             "(np. „/price@gross” albo „Cena detaliczna brutto”).")
     share = matched / len(shop) * 100 if shop else 0
-    prev_matched = sum(1 for r in previous.values() if r.get("cena_brutto"))
+    # porównanie tylko z produktami z obecnego pliku — inny plik produktów (np. demo) nie odpala bezpiecznika
+    shop_ids = {p["id"] for p in shop}
+    prev_matched = sum(1 for i, r in previous.items() if r.get("cena_brutto") and i in shop_ids)
     log(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "
         f"zmienione od ostatniego razu: {len(changed)}. " + ", ".join(f"{k}: {v}" for k, v in warnings.items()))
     summary = {"produkty": len(shop), "dopasowane": matched, "zmiany": len(changed), "uwagi": dict(warnings),
