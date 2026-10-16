@@ -255,8 +255,11 @@ def read_shop(path: str, cfg) -> list[dict]:
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
     except csv.Error:
-        dialect = csv.excel
-    rows = list(csv.DictReader(io.StringIO(text), dialect=dialect))
+        first = text.split("\n", 1)[0]
+        dialect = type("d", (csv.excel,), {"delimiter": max(",;\t", key=first.count)})
+    # krótsze/dłuższe wiersze (puste komórki na końcu, przecinki w opisach) — zawsze tekst, nigdy None
+    rows = [{k: (v if isinstance(v, str) else "") for k, v in r.items() if k is not None}
+            for r in csv.DictReader(io.StringIO(text), dialect=dialect, restval="")]
     if not rows:
         raise CenyError(f"Plik produktów jest pusty: {path}")
     headers = {h.strip().lower(): h for h in rows[0] if h}
@@ -475,7 +478,7 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
     state_path = os.path.join(out_dir, STATE)
 
     started = time.time()
-    log(f"Pobieram cennik: {xml_path}")
+    log(f"Pobieram cennik: {re.sub(r'(token|key|klucz)=[^&]+', r'\1=***', xml_path)}")
     try:
         data = read_source(xml_path)
     except Exception as exc:
