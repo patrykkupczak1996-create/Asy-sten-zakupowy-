@@ -37,9 +37,12 @@ class App(tk.Tk):
         self.tab_result = ttk.Frame(tabs, padding=10)
         tabs.add(self.tab_settings, text="Ustawienia i marże")
         tabs.add(self.tab_result, text="Przeliczenie i wynik")
+        self.tab_api = ttk.Frame(tabs, padding=10)
+        tabs.add(self.tab_api, text="IdoSell API (ceny do sklepu)")
         self.tabs = tabs
         self.build_settings()
         self.build_result()
+        self.build_api()
         self.loading = True
         self.load_into_form()
         self.loading = False
@@ -201,13 +204,17 @@ class App(tk.Tk):
         self.v_ftp_user.set(c.get("ftp", "uzytkownik", fallback=""))
         self.v_ftp_pass.set(c.get("ftp", "haslo", fallback=""))
         self.v_ftp_dir.set(c.get("ftp", "folder", fallback=""))
+        self.v_api_domain.set(c.get("idosell", "domena", fallback="iht.com.pl"))
+        self.v_api_key.set(c.get("idosell", "klucz", fallback=""))
+        self.v_api_auto.set(c.getboolean("idosell", "wysylaj_automatycznie", fallback=False))
+        self.refresh_api_state()
 
     def form_to_cfg(self) -> configparser.ConfigParser:
         # Kopia — podgląd przykładu nie może zmieniać ustawień, zanim formularz się wczyta.
         c = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
         c.optionxform = str
         c.read_dict(self.cfg)
-        for sec in ("pliki", "marza", "producenci", "automat", "ftp"):
+        for sec in ("pliki", "marza", "producenci", "automat", "ftp", "idosell"):
             if not c.has_section(sec):
                 c.add_section(sec)
         c.set("pliki", "xml", self.v_xml.get().strip())
@@ -235,6 +242,11 @@ class App(tk.Tk):
         c.set("ftp", "uzytkownik", self.v_ftp_user.get().strip())
         c.set("ftp", "haslo", self.v_ftp_pass.get())
         c.set("ftp", "folder", self.v_ftp_dir.get().strip())
+        c.set("idosell", "domena", self.v_api_domain.get().strip())
+        c.set("idosell", "klucz", self.v_api_key.get().strip())
+        c.set("idosell", "wysylaj_automatycznie", "true" if self.v_api_auto.get() else "false")
+        if not c.has_option("idosell", "potwierdzone"):
+            c.set("idosell", "potwierdzone", "false")
         return c
 
     def save(self, quiet: bool = False) -> bool:
@@ -303,6 +315,111 @@ class App(tk.Tk):
             subprocess.run(["schtasks", "/Delete", "/F", "/TN", name], capture_output=True)
         if not quiet:
             messagebox.showinfo("Automat", f"Automat wyłączony (usunięte zadania: {len(names)}).")
+
+    # ------------------------------------------------------------------ zakładka: IdoSell API
+    def build_api(self) -> None:
+        f = self.tab_api
+        f.columnconfigure(1, weight=1)
+        self.v_api_domain, self.v_api_key = tk.StringVar(), tk.StringVar()
+        self.v_api_test_id, self.v_api_auto = tk.StringVar(), tk.BooleanVar(value=False)
+        self.v_api_state = tk.StringVar()
+        ttk.Label(f, text="Ceny trafiają do sklepu bez wgrywania plików. Klucz utworzysz w IdoSell: Klucze dostępowe "
+                          "do Admin API → Dodaj nowy klucz (uprawnienia: produkty). Klucz zostaje tylko na tym "
+                          "komputerze — nie wysyłaj go nikomu.", wraplength=950, foreground="#555").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        ttk.Label(f, text="Domena sklepu:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(f, textvariable=self.v_api_domain, width=40).grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Label(f, text="Klucz API:").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(f, textvariable=self.v_api_key, width=70, show="•").grid(row=2, column=1, sticky="w", padx=4)
+        ttk.Label(f, text="ID produktu do testu (z panelu):").grid(row=3, column=0, sticky="w")
+        ttk.Entry(f, textvariable=self.v_api_test_id, width=12).grid(row=3, column=1, sticky="w", padx=4)
+        steps = ttk.LabelFrame(f, text="Bezpieczny start — po kolei", padding=8)
+        steps.grid(row=4, column=0, columnspan=3, sticky="ew", pady=10)
+        for r, (text, hint, cmd) in enumerate([
+                ("1. Test połączenia", "Tylko odczyt: pokaże nazwę i obecną cenę produktu o podanym ID.",
+                 self.api_test),
+                ("2. Próba: wyślij 3 ceny", "Wyśle nowe ceny 3 produktów z ostatniego przeliczenia — sprawdź je "
+                 "w sklepie.", self.api_try3),
+                ("3. Wyślij wszystkie zmiany", "Wyśle ceny z ceny_do_importu.csv (tylko zmienione od ostatniego razu).",
+                 self.api_send_all)]):
+            ttk.Button(steps, text=text, width=28, command=cmd).grid(row=r, column=0, sticky="w", pady=3)
+            ttk.Label(steps, text=hint, foreground="#555").grid(row=r, column=1, sticky="w", padx=10)
+        self.chk_auto = ttk.Checkbutton(f, text="Automat (godziny z ustawień) sam wysyła zmienione ceny do sklepu",
+                                        variable=self.v_api_auto)
+        self.chk_auto.grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, textvariable=self.v_api_state, foreground="#a60").grid(row=6, column=0, columnspan=3,
+                                                                           sticky="w", pady=6)
+
+    def refresh_api_state(self) -> None:
+        ok = self.cfg.getboolean("idosell", "potwierdzone", fallback=False)
+        self.chk_auto.configure(state="normal" if ok else "disabled")
+        self.v_api_state.set("Próba potwierdzona — można wysyłać wszystko i włączyć automat." if ok else
+                             "Najpierw zrób kroki 1 i 2 i potwierdź, że ceny w sklepie są dobre. Do tego czasu "
+                             "automat nie wysyła cen.")
+
+    def api_test(self) -> None:
+        if not self.save(quiet=True):
+            return
+        pid = self.v_api_test_id.get().strip()
+        if not pid:
+            messagebox.showinfo("Test", "Wpisz ID produktu z panelu IdoSell (liczba z karty towaru).")
+            return
+        import idosell_api
+        self.tabs.select(self.tab_result)
+        self.background(lambda: self._api_call(lambda: idosell_api.test_read(self.cfg, pid, self.write_log)))
+
+    def _api_call(self, func):
+        import idosell_api
+        try:
+            return func()
+        except idosell_api.ApiError as exc:
+            self.write_log(f"IdoSell API: {exc}")
+            return None
+
+    def _last_changed(self) -> list[dict]:
+        if self.last_summary:
+            return self.last_summary["zmienione"]
+        messagebox.showinfo("Najpierw przelicz", "Najpierw kliknij „Przelicz ceny teraz”.")
+        return []
+
+    def api_try3(self) -> None:
+        if not self.save(quiet=True):
+            return
+        rows = [r for r in self._last_changed() if r.get("cena_brutto")][:3]
+        if not rows:
+            return
+        import idosell_api
+        self.tabs.select(self.tab_result)
+        names = "\n".join(f"• ID {r['id']}: {r['nazwa'][:50]} → {r['cena_brutto']} zł" for r in rows)
+
+        def job():
+            res = self._api_call(lambda: idosell_api.push_prices(self.cfg, rows, self.write_log, self.out_dir()))
+            if res is not None:
+                self.log_queue.put(lambda: self.confirm_try3(names))
+
+        self.background(job)
+
+    def confirm_try3(self, names: str) -> None:
+        if messagebox.askyesno("Sprawdź w sklepie", "Wysłano ceny:\n" + names +
+                               "\n\nSprawdź je w panelu IdoSell albo w sklepie. Czy są poprawne?"):
+            self.cfg.set("idosell", "potwierdzone", "true")
+            self.save(quiet=True)
+            self.write_log("Próba potwierdzona — można wysyłać wszystkie ceny i włączyć automat.")
+        else:
+            self.write_log("Próba NIEpotwierdzona — nic więcej nie zostanie wysłane. Napisz, co się nie zgadza.")
+        self.refresh_api_state()
+
+    def api_send_all(self) -> None:
+        if not self.cfg.getboolean("idosell", "potwierdzone", fallback=False):
+            messagebox.showinfo("Najpierw próba", "Najpierw zrób krok 2 (próba na 3 produktach) i potwierdź.")
+            return
+        rows = [r for r in self._last_changed() if r.get("cena_brutto")]
+        if not rows or not messagebox.askyesno("Wyślij", f"Wysłać {len(rows)} cen do sklepu?"):
+            return
+        import idosell_api
+        self.tabs.select(self.tab_result)
+        self.background(lambda: self._api_call(
+            lambda: idosell_api.push_prices(self.cfg, rows, self.write_log, self.out_dir())))
 
     # ------------------------------------------------------------------ zakładka: wynik
     def build_result(self) -> None:
@@ -393,7 +510,7 @@ class App(tk.Tk):
 
         def job():
             try:
-                summary = ceny.przelicz(self.cfg, False, self.write_log)
+                summary = ceny.przelicz(self.cfg, False, self.write_log, wyslij=False)
             except ceny.CenyError as exc:
                 self.write_log(str(exc))
                 self.log_queue.put(lambda: self.v_status.set("Zatrzymane przez bezpiecznik — zobacz komunikat niżej."))

@@ -463,7 +463,7 @@ def upload(path: str, cfg, log=print) -> None:
     log(f"Wysłano {os.path.basename(path)} na FTP {host}.")
 
 
-def przelicz(cfg, wymus: bool = False, log=print) -> dict:
+def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) -> dict:
     """Pobiera XML, liczy ceny, zapisuje pliki. Zwraca podsumowanie; CenyError = bezpiecznik/zły plik."""
     s = settings_from(cfg)
     xml_path = cfg.get("pliki", "xml", fallback="onninen.xml").strip()
@@ -639,6 +639,16 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
     except Exception as exc:  # błąd FTP nie unieważnia przeliczenia
         log(f"UWAGA: nie udało się wysłać na FTP: {exc}")
         summary["ftp_blad"] = str(exc)
+    if wyslij is None:  # automat: wysyła sam tylko po potwierdzonej próbie i z włączoną opcją
+        wyslij = (cfg.getboolean("idosell", "wysylaj_automatycznie", fallback=False)
+                  and cfg.getboolean("idosell", "potwierdzone", fallback=False))
+    if wyslij and changed:
+        import idosell_api
+        try:
+            summary["api"] = idosell_api.push_prices(cfg, changed, log, out_dir)
+        except idosell_api.ApiError as exc:
+            log(f"UWAGA: nie udało się wysłać cen do IdoSell: {exc}")
+            summary["api_blad"] = str(exc)
     log(f"Gotowe w {time.time() - started:.0f} s: ceny_do_importu.csv ({len(changed)} zmian), "
         "ceny_wszystkie.csv, ceny_raport.csv.")
     return summary
