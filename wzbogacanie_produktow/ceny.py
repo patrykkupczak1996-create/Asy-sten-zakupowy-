@@ -192,6 +192,11 @@ SHOP_COLUMNS = {  # rola -> możliwe nagłówki (eksport IdoSell, arkusz Google,
     "ean": ["/sizes/size@code_producer", "ean", "kod ean", "gtin", "kod kreskowy"],
     "producent": ["/producer@name", "producent", "marka"],
     "nazwa": ["/description/name[pol]", "nazwa", "nazwa produktu", "name"],
+    # Obecna cena w sklepie (opcjonalnie) — do kontroli, czy nie sprzedajemy poniżej zakupu
+    "sklep_brutto": ["/price@gross", "/sizes/size/price@gross", "cena detaliczna brutto", "cena brutto",
+                     "detaliczna brutto", "cena sprzedaży brutto", "cena"],
+    "sklep_netto": ["/price@net", "/sizes/size/price@net", "cena detaliczna netto", "cena netto",
+                    "detaliczna netto", "cena sprzedaży netto"],
 }
 
 
@@ -236,7 +241,8 @@ def read_shop(path: str, cfg) -> list[dict]:
         raise CenyError(f"W produktach brak kolumny z ID towaru (np. @id). Kolumny: {', '.join(rows[0])[:300]}")
     return [{"id": r.get(cols["id"], ""), "kod": r.get(cols["kod"], ""), "ean": r.get(cols["ean"], ""),
              "producent": r.get(cols["producent"], ""), "nazwa": r.get(cols["nazwa"], ""), "_raw": r,
-             "_idcol": cols["id"]}
+             "_idcol": cols["id"], "_sklep_brutto": r.get(cols["sklep_brutto"], "") if cols["sklep_brutto"] else "",
+             "_sklep_netto": r.get(cols["sklep_netto"], "") if cols["sklep_netto"] else ""}
             for r in rows if r.get(cols["id"], "").strip()]
 
 
@@ -305,6 +311,18 @@ def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[t
             f"Przykład produktu z XML: {str(sample_xml)[:600]}\n"
             f"Przykład produktu ze sklepu: {str(sample_shop)[:600]}")
     return pairs
+
+
+def shop_net_price(p: dict, vat: float) -> float:
+    """Obecna cena netto produktu w sklepie (z kolumny netto albo brutto / VAT); 0 = brak danych."""
+    for key, divide in (("_sklep_netto", 1.0), ("_sklep_brutto", 1 + vat / 100)):
+        try:
+            value = to_float(p.get(key, "") or "")
+        except ValueError:
+            continue
+        if value > 0:
+            return value / divide
+    return 0.0
 
 
 def zacznij_od_nowa(cfg) -> str:
@@ -446,7 +464,8 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
             hits = index[xk].get(key, []) if key else []
             if hits:
                 break
-        row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="")
+        row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="",
+                   sklep_brutto="", marza_teraz_proc="")
         old = previous.get(p["id"])
         if old:
             row["poprzednia_brutto"] = old.get("cena_brutto", "")
@@ -467,14 +486,39 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
                 if jump > max_jump:
                     row["uwagi"] = f"duża zmiana ceny: {old['cena_brutto']} -> {gross:.2f} ({jump:.0f}%)"
                     warnings["duża zmiana"] += 1
+            shop_net = shop_net_price(p, s["vat"])
+            if shop_net:
+                row["sklep_brutto"] = f"{shop_net * (1 + s['vat'] / 100):.2f}"
+                now = (shop_net / buy - 1) * 100
+                row["marza_teraz_proc"] = f"{now:.1f}"
+                if shop_net < buy:
+                    row["uwagi"] = (row["uwagi"] + "; " if row["uwagi"] else "") + \
+                        f"PONIŻEJ ZAKUPU: sklep {shop_net:.2f} netto < zakup {buy:.2f}"
+                    warnings["poniżej zakupu"] += 1
+                elif shop_net - buy < s["min_profit"] or now < s["tiers"][0][1] / 3:
+                    row["uwagi"] = (row["uwagi"] + "; " if row["uwagi"] else "") + f"niska marża w sklepie ({now:.0f}%)"
+                    warnings["niska marża"] += 1
             if not old or old.get("cena_brutto") != row["cena_brutto"]:
                 changed.append(row)
         report.append(row)
 
-    cols = ["id", "kod", "ean", "producent", "nazwa", "zakup_netto", "marza_proc", "cena_netto", "cena_brutto",
-            "poprzednia_brutto", "uwagi"]
+    cols = ["id", "kod", "ean", "producent", "nazwa", "zakup_netto", "sklep_brutto", "marza_teraz_proc",
+            "marza_proc", "cena_netto", "cena_brutto", "poprzednia_brutto", "uwagi"]
     report_path = os.path.join(out_dir, "ceny_raport.csv")
     write_csv(report_path, report, cols)
+    with_shop = [r for r in report if r["marza_teraz_proc"]]
+    if with_shop:
+        risky = sorted((r for r in with_shop if "PONIŻEJ" in r["uwagi"] or "niska marża" in r["uwagi"]),
+                       key=lambda r: float(r["marza_teraz_proc"]))
+        write_csv(os.path.join(out_dir, "kontrola_marzy.csv"), risky, cols)
+        loss = sum((to_float(r["zakup_netto"]) - to_float(r["sklep_brutto"]) / (1 + s["vat"] / 100))
+                   for r in risky if "PONIŻEJ" in r["uwagi"])
+        log(f"KONTROLA MARŻY (ceny obecnie w sklepie vs zakup z feedu): sprawdzono {len(with_shop)}, "
+            f"poniżej zakupu {warnings['poniżej zakupu']} (strata ok. {loss:.2f} zł netto na 1 szt. każdego), "
+            f"niska marża {warnings['niska marża']}. Lista od najgorszych: kontrola_marzy.csv")
+    else:
+        log("Kontrola marży pominięta: w pliku produktów nie ma kolumny z obecną ceną sklepu "
+            "(np. „/price@gross” albo „Cena detaliczna brutto”).")
     share = matched / len(shop) * 100 if shop else 0
     prev_matched = sum(1 for r in previous.values() if r.get("cena_brutto"))
     log(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "

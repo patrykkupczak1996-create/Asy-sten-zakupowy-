@@ -312,20 +312,22 @@ class App(tk.Tk):
         self.v_show = tk.StringVar(value="zmiany")
         ttk.Label(show, text="Pokaż:").pack(side="left")
         for value, text in (("zmiany", "tylko zmienione ceny"), ("wszystkie", "wszystkie produkty z ceną"),
-                            ("uwagi", "tylko z uwagami (brak w cenniku, duża zmiana)")):
+                            ("uwagi", "tylko z uwagami"),
+                            ("strata", "PONIŻEJ ZAKUPU / niska marża w sklepie")):
             ttk.Radiobutton(show, text=text, value=value, variable=self.v_show,
                             command=self.refresh_table).pack(side="left", padx=6)
         self.last_summary: dict | None = None
-        cols = ("nazwa", "producent", "kod", "ean", "zakup", "stara", "nowa", "uwagi")
+        cols = ("nazwa", "producent", "kod", "ean", "zakup", "sklep", "marza", "stara", "nowa", "uwagi")
         table = ttk.Frame(f)
         table.pack(fill="both", expand=True, pady=6)
         self.result = ttk.Treeview(table, columns=cols, show="headings", height=14)
         self.sort_state = ("nazwa", False)
         for col, text, w in zip(cols, ("Produkt", "Producent", "Kod producenta", "EAN", "Zakup netto",
-                                       "Było brutto", "Teraz brutto", "Uwagi"),
-                                (300, 100, 110, 115, 80, 80, 80, 220)):
+                                       "W sklepie brutto", "Marża teraz %", "Było brutto", "Nowa brutto", "Uwagi"),
+                                (260, 90, 105, 110, 75, 85, 80, 75, 80, 260)):
             self.result.heading(col, text=text, command=lambda c=col: self.sort_by(c))
-            self.result.column(col, width=w, anchor="e" if col in ("zakup", "stara", "nowa") else "w")
+            self.result.column(col, width=w, anchor="e" if col in ("zakup", "sklep", "marza", "stara", "nowa") else "w")
+        self.result.tag_configure("strata", background="#ffd6d6")
         ys = ttk.Scrollbar(table, orient="vertical", command=self.result.yview)
         self.result.configure(yscrollcommand=ys.set)
         ys.pack(side="right", fill="y")
@@ -411,14 +413,16 @@ class App(tk.Tk):
         mode = self.v_show.get()
         rows = (s["zmienione"] if mode == "zmiany" else
                 [r for r in s["wszystkie"] if r["cena_brutto"]] if mode == "wszystkie" else
-                [r for r in s["wszystkie"] if r["uwagi"]])
+                [r for r in s["wszystkie"] if "PONIŻEJ" in r["uwagi"] or "niska marża" in r["uwagi"]]
+                if mode == "strata" else [r for r in s["wszystkie"] if r["uwagi"]])
         col, desc = self.sort_state
         key = {"nazwa": "nazwa", "producent": "producent", "kod": "kod", "ean": "ean", "zakup": "zakup_netto",
+               "sklep": "sklep_brutto", "marza": "marza_teraz_proc",
                "stara": "poprzednia_brutto", "nowa": "cena_brutto", "uwagi": "uwagi"}[col]
 
         def sort_key(r):
             v = str(r.get(key, ""))
-            if col in ("zakup", "stara", "nowa"):
+            if col in ("zakup", "sklep", "marza", "stara", "nowa"):
                 try:
                     return (0, float(v), "")
                 except ValueError:
@@ -427,8 +431,10 @@ class App(tk.Tk):
 
         rows = sorted(rows, key=sort_key, reverse=desc)
         for r in rows[:5000]:
-            self.result.insert("", "end", values=(r["nazwa"], r["producent"], r["kod"], r["ean"], r["zakup_netto"],
-                                                  r["poprzednia_brutto"], r["cena_brutto"], r["uwagi"]))
+            tag = ("strata",) if "PONIŻEJ" in r["uwagi"] else ()
+            self.result.insert("", "end", tags=tag, values=(
+                r["nazwa"], r["producent"], r["kod"], r["ean"], r["zakup_netto"], r.get("sklep_brutto", ""),
+                r.get("marza_teraz_proc", ""), r["poprzednia_brutto"], r["cena_brutto"], r["uwagi"]))
         if len(rows) > 5000:
             self.write_log(f"Tabela pokazuje 5000 z {len(rows)} — całość w raporcie (Otwórz raport).")
 
