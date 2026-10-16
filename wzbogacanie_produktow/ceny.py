@@ -186,11 +186,30 @@ def round_price(gross: float, mode: str) -> float:
     return round(math.ceil(round(gross / step, 6)) * step, 2)
 
 
-def sale_price(buy: float, producer: str, s: dict) -> tuple[float, float, float]:
+PIECE_UNITS = {"", "szt", "szt.", "sztuka", "pcs", "kpl", "kpl.", "komplet", "op", "op.", "opak", "para", "zestaw"}
+CATALOG_KEYS = ("price_catalog", "cena_katalogowa", "katalogowa", "price_list", "srp")
+
+
+def sale_price(buy: float, producer: str, s: dict, unit: str = "", catalog: float = 0.0
+               ) -> tuple[float, float, float, str]:
+    """Cena sprzedaży: zakup + marża (progi / producent), minimalny zysk, VAT, zaokrąglenie w górę.
+
+    Minimalny zysk w zł liczony tylko dla sztuk (nie dla metrów, kg…), gdy tak ustawiono.
+    Opcjonalnie cena brutto nie wyższa niż katalogowa Onninen — ale nigdy poniżej zakupu + minimalny zysk."""
     pct = margin_for(buy, producer, s["tiers"], s["producers"])
-    net = max(buy * (1 + pct / 100), buy + s["min_profit"])
-    gross = round_price(net * (1 + s["vat"] / 100), s["rounding"])
-    return round(gross / (1 + s["vat"] / 100), 2), gross, pct
+    per_piece = str(unit).strip().lower() in PIECE_UNITS
+    min_profit = s["min_profit"] if (per_piece or not s.get("min_profit_pieces_only", True)) else 0.0
+    vat = 1 + s["vat"] / 100
+    net = max(buy * (1 + pct / 100), buy + min_profit)
+    gross = round_price(net * vat, s["rounding"])
+    note = ""
+    if s.get("cap_catalog") and catalog > 0:
+        cap = math.floor(catalog * vat * 100 + 1e-6) / 100
+        floor = round_price((buy + min_profit) * vat, "0.01")
+        if gross > cap:
+            gross = max(cap, floor)
+            note = "obcięte do katalogowej Onninen" if gross == cap else "katalogowa poniżej min. zysku"
+    return round(gross / vat, 2), gross, pct, note
 
 
 # ----------------------------------------------------------------------------- sklep
@@ -405,13 +424,18 @@ def settings_from(cfg) -> dict:
                 "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
                 "vat": to_float(cfg.get("marza", "vat", fallback="23")),
                 "rounding": cfg.get("marza", "zaokraglenie", fallback="0.01").strip(),
-                "producers": {}}
+                "producers": {}, **extra_rules(cfg)}
     return {"tiers": parse_tiers(cfg.get("marza", "progi", fallback="")),
             "min_profit": to_float(cfg.get("marza", "minimalny_zysk_zl", fallback="1")),
             "vat": to_float(cfg.get("marza", "vat", fallback="23")),
             "rounding": cfg.get("marza", "zaokraglenie", fallback="0.01").strip(),
             "producers": {k.upper(): to_float(v) for k, v in cfg.items("producenci")}
-            if cfg.has_section("producenci") else {}}
+            if cfg.has_section("producenci") else {}, **extra_rules(cfg)}
+
+
+def extra_rules(cfg) -> dict:
+    return {"min_profit_pieces_only": cfg.getboolean("marza", "minimalny_zysk_tylko_sztuki", fallback=True),
+            "cap_catalog": cfg.getboolean("marza", "nie_drozej_niz_katalogowa", fallback=False)}
 
 
 def upload(path: str, cfg, log=print) -> None:
@@ -511,7 +535,7 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
             if hits:
                 break
         row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="",
-                   sklep_brutto="", marza_teraz_proc="")
+                   sklep_brutto="", marza_teraz_proc="", jednostka="", katalog_brutto="")
         old = previous.get(p["id"])
         if old:
             row["poprzednia_brutto"] = old.get("cena_brutto", "")
@@ -524,9 +548,23 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
         else:
             matched += 1
             buy = hits[0]["_cena"]
-            net, gross, pct = sale_price(buy, p["producent"], s)
+            unit = hits[0].get("unit", "") or hits[0].get("jednostka", "")
+            catalog = 0.0
+            for key in CATALOG_KEYS:
+                try:
+                    catalog = to_float(hits[0].get(key, "") or "0")
+                except ValueError:
+                    catalog = 0.0
+                if catalog:
+                    break
+            producer = p["producent"] or hits[0].get("marka", "")
+            net, gross, pct, note = sale_price(buy, producer, s, unit, catalog)
             row.update(zakup_netto=f"{buy:.2f}", marza_proc=f"{pct:g}", cena_netto=f"{net:.2f}",
-                       cena_brutto=f"{gross:.2f}")
+                       cena_brutto=f"{gross:.2f}", jednostka=unit,
+                       katalog_brutto=f"{catalog * (1 + s['vat'] / 100):.2f}" if catalog else "")
+            if note:
+                row["uwagi"] = note
+                warnings["obcięte do katalogowej"] += 1
             if old and old.get("cena_brutto"):
                 jump = abs(gross / to_float(old["cena_brutto"]) - 1) * 100
                 if jump > max_jump:
@@ -537,18 +575,21 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
                 row["sklep_brutto"] = f"{shop_net * (1 + s['vat'] / 100):.2f}"
                 now = (shop_net / buy - 1) * 100
                 row["marza_teraz_proc"] = f"{now:.1f}"
+                min_profit = s["min_profit"] if (str(unit).strip().lower() in PIECE_UNITS
+                                                 or not s.get("min_profit_pieces_only", True)) else 0.0
                 if shop_net < buy:
                     row["uwagi"] = (row["uwagi"] + "; " if row["uwagi"] else "") + \
                         f"PONIŻEJ ZAKUPU: sklep {shop_net:.2f} netto < zakup {buy:.2f}"
                     warnings["poniżej zakupu"] += 1
-                elif shop_net - buy < s["min_profit"] or now < s["tiers"][0][1] / 3:
+                elif shop_net - buy < min_profit or now < s["tiers"][0][1] / 3:
                     row["uwagi"] = (row["uwagi"] + "; " if row["uwagi"] else "") + f"niska marża w sklepie ({now:.0f}%)"
                     warnings["niska marża"] += 1
             if not old or old.get("cena_brutto") != row["cena_brutto"]:
                 changed.append(row)
         report.append(row)
 
-    cols = ["id", "kod", "ean", "producent", "nazwa", "zakup_netto", "sklep_brutto", "marza_teraz_proc",
+    cols = ["id", "kod", "ean", "producent", "nazwa", "jednostka", "zakup_netto", "katalog_brutto", "sklep_brutto",
+            "marza_teraz_proc",
             "marza_proc", "cena_netto", "cena_brutto", "poprzednia_brutto", "uwagi"]
     report_path = os.path.join(out_dir, "ceny_raport.csv")
     write_csv(report_path, report, cols)

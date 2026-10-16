@@ -95,10 +95,15 @@ class App(tk.Tk):
         ttk.Label(other, text="Zaokrąglenie w górę:").grid(row=0, column=4, sticky="w", padx=(16, 0))
         ttk.Combobox(other, textvariable=self.v_round, values=list(ROUNDING), state="readonly",
                      width=16).grid(row=0, column=5, sticky="w", padx=4)
+        self.v_pieces, self.v_cap = tk.BooleanVar(value=True), tk.BooleanVar(value=False)
+        ttk.Checkbutton(other, text="Minimalny zysk tylko dla sztuk (nie dla metrów, kg, litrów…)",
+                        variable=self.v_pieces).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(other, text="Nie drożej niż cena katalogowa Onninen (brutto)",
+                        variable=self.v_cap).grid(row=1, column=3, columnspan=3, sticky="w", pady=(6, 0))
         self.v_example = tk.StringVar()
         ttk.Label(other, textvariable=self.v_example, foreground="#0a5", wraplength=900).grid(
-            row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
-        for v in (self.v_min, self.v_vat, self.v_round):
+            row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        for v in (self.v_min, self.v_vat, self.v_round, self.v_pieces, self.v_cap):
             v.trace_add("write", lambda *_: self.update_example())
 
         auto = ttk.LabelFrame(f, text="Automat i wysyłka do IdoSell", padding=8)
@@ -189,6 +194,8 @@ class App(tk.Tk):
         self.v_vat.set(c.get("marza", "vat", fallback="23"))
         code = c.get("marza", "zaokraglenie", fallback="0.99").strip()
         self.v_round.set(next((k for k, v in ROUNDING.items() if v == code), "końcówka ,99"))
+        self.v_pieces.set(c.getboolean("marza", "minimalny_zysk_tylko_sztuki", fallback=True))
+        self.v_cap.set(c.getboolean("marza", "nie_drozej_niz_katalogowa", fallback=False))
         self.v_hours.set(c.get("automat", "godziny", fallback="07:30, 14:30"))
         self.v_ftp_host.set(c.get("ftp", "host", fallback=""))
         self.v_ftp_user.set(c.get("ftp", "uzytkownik", fallback=""))
@@ -216,6 +223,8 @@ class App(tk.Tk):
         c.set("marza", "minimalny_zysk_zl", f"{ceny.to_float(self.v_min.get() or 0):g}")
         c.set("marza", "vat", f"{ceny.to_float(self.v_vat.get() or 23):g}")
         c.set("marza", "zaokraglenie", ROUNDING.get(self.v_round.get(), "0.01"))
+        c.set("marza", "minimalny_zysk_tylko_sztuki", "true" if self.v_pieces.get() else "false")
+        c.set("marza", "nie_drozej_niz_katalogowa", "true" if self.v_cap.get() else "false")
         c.remove_section("producenci")
         c.add_section("producenci")
         for i in self.producers.get_children():
@@ -253,7 +262,7 @@ class App(tk.Tk):
             return
         parts = []
         for buy in (10, 100, 1000):
-            net, gross, pct = ceny.sale_price(buy, "", s)
+            net, gross, pct, _ = ceny.sale_price(buy, "", s)
             parts.append(f"zakup {buy} zł netto → {gross:.2f} zł brutto (+{pct:g}%)")
         self.v_example.set("Przykład:  " + "   |   ".join(parts))
 
@@ -317,16 +326,19 @@ class App(tk.Tk):
             ttk.Radiobutton(show, text=text, value=value, variable=self.v_show,
                             command=self.refresh_table).pack(side="left", padx=6)
         self.last_summary: dict | None = None
-        cols = ("nazwa", "producent", "kod", "ean", "zakup", "sklep", "marza", "stara", "nowa", "uwagi")
+        cols = ("nazwa", "producent", "kod", "ean", "jedn", "zakup", "katalog", "sklep", "marza", "stara", "nowa",
+                "uwagi")
         table = ttk.Frame(f)
         table.pack(fill="both", expand=True, pady=6)
         self.result = ttk.Treeview(table, columns=cols, show="headings", height=14)
         self.sort_state = ("nazwa", False)
-        for col, text, w in zip(cols, ("Produkt", "Producent", "Kod producenta", "EAN", "Zakup netto",
-                                       "W sklepie brutto", "Marża teraz %", "Było brutto", "Nowa brutto", "Uwagi"),
-                                (260, 90, 105, 110, 75, 85, 80, 75, 80, 260)):
+        for col, text, w in zip(cols, ("Produkt", "Producent", "Kod producenta", "EAN", "Jedn.", "Zakup netto",
+                                       "Katalog brutto", "W sklepie brutto", "Marża teraz %", "Było brutto",
+                                       "Nowa brutto", "Uwagi"),
+                                (240, 85, 100, 105, 40, 75, 80, 85, 75, 70, 75, 230)):
             self.result.heading(col, text=text, command=lambda c=col: self.sort_by(c))
-            self.result.column(col, width=w, anchor="e" if col in ("zakup", "sklep", "marza", "stara", "nowa") else "w")
+            self.result.column(col, width=w, anchor="e" if col in ("zakup", "katalog", "sklep", "marza", "stara",
+                                                                     "nowa") else "w")
         self.result.tag_configure("strata", background="#ffd6d6")
         ys = ttk.Scrollbar(table, orient="vertical", command=self.result.yview)
         self.result.configure(yscrollcommand=ys.set)
@@ -417,12 +429,13 @@ class App(tk.Tk):
                 if mode == "strata" else [r for r in s["wszystkie"] if r["uwagi"]])
         col, desc = self.sort_state
         key = {"nazwa": "nazwa", "producent": "producent", "kod": "kod", "ean": "ean", "zakup": "zakup_netto",
-               "sklep": "sklep_brutto", "marza": "marza_teraz_proc",
+               "sklep": "sklep_brutto", "marza": "marza_teraz_proc", "jedn": "jednostka",
+               "katalog": "katalog_brutto",
                "stara": "poprzednia_brutto", "nowa": "cena_brutto", "uwagi": "uwagi"}[col]
 
         def sort_key(r):
             v = str(r.get(key, ""))
-            if col in ("zakup", "sklep", "marza", "stara", "nowa"):
+            if col in ("zakup", "katalog", "sklep", "marza", "stara", "nowa"):
                 try:
                     return (0, float(v), "")
                 except ValueError:
@@ -433,7 +446,8 @@ class App(tk.Tk):
         for r in rows[:5000]:
             tag = ("strata",) if "PONIŻEJ" in r["uwagi"] else ()
             self.result.insert("", "end", tags=tag, values=(
-                r["nazwa"], r["producent"], r["kod"], r["ean"], r["zakup_netto"], r.get("sklep_brutto", ""),
+                r["nazwa"], r["producent"], r["kod"], r["ean"], r.get("jednostka", ""), r["zakup_netto"],
+                r.get("katalog_brutto", ""), r.get("sklep_brutto", ""),
                 r.get("marza_teraz_proc", ""), r["poprzednia_brutto"], r["cena_brutto"], r["uwagi"]))
         if len(rows) > 5000:
             self.write_log(f"Tabela pokazuje 5000 z {len(rows)} — całość w raporcie (Otwórz raport).")
