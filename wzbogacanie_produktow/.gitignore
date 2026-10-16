@@ -1,0 +1,12 @@
+# Dane produktow i wyniki - nie trzymamy ich w repozytorium
+*.csv
+wzbogacanie.log
+zdjecia/
+*.lock
+*.tmp
+# Logi i strony podglądu/akceptacji generowane przez skrypty (zawierają dane produktów)
+*.log
+*_podglad.html
+*_akceptacja.html
+*_zaakceptowane*.txt
+__pycache__/
