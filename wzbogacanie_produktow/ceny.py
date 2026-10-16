@@ -438,7 +438,19 @@ def settings_from(cfg) -> dict:
 
 def extra_rules(cfg) -> dict:
     return {"min_profit_pieces_only": cfg.getboolean("marza", "minimalny_zysk_tylko_sztuki", fallback=True),
-            "cap_catalog": cfg.getboolean("marza", "nie_drozej_niz_katalogowa", fallback=False)}
+            "cap_catalog": cfg.getboolean("marza", "nie_drozej_niz_katalogowa", fallback=False),
+            "min_margin": to_float(cfg.get("marza", "marza_minimalna", fallback="5"))}
+
+
+def min_price(buy: float, unit: str, s: dict) -> tuple[float, float]:
+    """Dolna granica ceny (netto, brutto): nie mniej niż zakup + marża minimalna % i zakup + minimalny zysk.
+
+    To podłoga dla Szpiegomatu / dynamicznych cen — poniżej niej sklep nie powinien nigdy sprzedawać."""
+    per_piece = str(unit).strip().lower() in PIECE_UNITS
+    min_profit = s["min_profit"] if (per_piece or not s.get("min_profit_pieces_only", True)) else 0.0
+    net = max(buy * (1 + s.get("min_margin", 0) / 100), buy + min_profit)
+    gross = round_price(net * (1 + s["vat"] / 100), "0.01")
+    return round(gross / (1 + s["vat"] / 100), 2), gross
 
 
 def upload(path: str, cfg, log=print) -> None:
@@ -529,6 +541,7 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
         with open(state_path, encoding="utf-8-sig", newline="") as fh:
             previous = {r["id"]: r for r in csv.DictReader(fh, delimiter=";")}
 
+    floor_mode = cfg.get("idosell", "tryb_wysylki", fallback="ceny").strip() == "zakup_minimum"
     report, changed, matched, warnings = [], [], 0, Counter()
     for p in shop:
         hits = []
@@ -538,7 +551,8 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
             if hits:
                 break
         row = dict(p, zakup_netto="", marza_proc="", cena_netto="", cena_brutto="", poprzednia_brutto="", uwagi="",
-                   sklep_brutto="", marza_teraz_proc="", jednostka="", katalog_brutto="")
+                   sklep_brutto="", marza_teraz_proc="", jednostka="", katalog_brutto="",
+                   cena_min_netto="", cena_min_brutto="")
         old = previous.get(p["id"])
         if old:
             row["poprzednia_brutto"] = old.get("cena_brutto", "")
@@ -562,8 +576,10 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
                     break
             producer = p["producent"] or hits[0].get("marka", "")
             net, gross, pct, note = sale_price(buy, producer, s, unit, catalog)
+            min_net, min_gross = min_price(buy, unit, s)
             row.update(zakup_netto=f"{buy:.2f}", marza_proc=f"{pct:g}", cena_netto=f"{net:.2f}",
                        cena_brutto=f"{gross:.2f}", jednostka=unit,
+                       cena_min_netto=f"{min_net:.2f}", cena_min_brutto=f"{min_gross:.2f}",
                        katalog_brutto=f"{catalog * (1 + s['vat'] / 100):.2f}" if catalog else "")
             if note:
                 row["uwagi"] = note
@@ -587,13 +603,19 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
                 elif shop_net - buy < min_profit or now < s["tiers"][0][1] / 3:
                     row["uwagi"] = (row["uwagi"] + "; " if row["uwagi"] else "") + f"niska marża w sklepie ({now:.0f}%)"
                     warnings["niska marża"] += 1
-            if not old or old.get("cena_brutto") != row["cena_brutto"]:
+            if floor_mode:  # Szpiegomat ustawia ceny sprzedaży — zmiana = nowy zakup albo nowe minimum
+                differs = (not old or old.get("zakup_netto") != row["zakup_netto"]
+                           or old.get("cena_min_brutto") != row["cena_min_brutto"])
+            else:
+                differs = not old or old.get("cena_brutto") != row["cena_brutto"]
+            if differs:
                 changed.append(row)
         report.append(row)
 
     cols = ["id", "kod", "ean", "producent", "nazwa", "jednostka", "zakup_netto", "katalog_brutto", "sklep_brutto",
             "marza_teraz_proc",
-            "marza_proc", "cena_netto", "cena_brutto", "poprzednia_brutto", "uwagi"]
+            "marza_proc", "cena_netto", "cena_brutto", "cena_min_netto", "cena_min_brutto", "poprzednia_brutto",
+            "uwagi"]
     report_path = os.path.join(out_dir, "ceny_raport.csv")
     write_csv(report_path, report, cols)
     with_shop = [r for r in report if r["marza_teraz_proc"]]

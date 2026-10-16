@@ -6,6 +6,10 @@ Ustawienia w ceny_ustawienia.ini, sekcja [idosell]:
   wersja = v6
   pole_id = productId             (nazwy pól API — do zmiany, gdyby dokumentacja Twojej wersji mówiła inaczej)
   pole_ceny = productRetailPrice  (cena detaliczna brutto)
+  tryb_wysylki = ceny             (ceny = ceny sprzedaży; zakup_minimum = tylko cena zakupu i minimalna —
+                                   dla sklepu, w którym ceny sprzedaży ustawia Szpiegomat / dynamic pricing)
+  pole_zakup = productPurchasePriceNet   (nazwy pól do sprawdzenia testem na demo)
+  pole_minimum = productMinimalPrice     (cena minimalna brutto)
   potwierdzone = false            (true dopiero po udanej próbie na 3 produktach)
   wysylaj_automatycznie = false   (automat sam wysyła zmiany po przeliczeniu)
 
@@ -34,7 +38,12 @@ def settings(cfg) -> dict:
     version = cfg.get(sec, "wersja", fallback="v6").strip() or "v6"
     return {"base": f"https://{domain}/api/admin/{version}", "key": key,
             "id_field": cfg.get(sec, "pole_id", fallback="productId").strip() or "productId",
-            "price_field": cfg.get(sec, "pole_ceny", fallback="productRetailPrice").strip() or "productRetailPrice"}
+            "price_field": cfg.get(sec, "pole_ceny", fallback="productRetailPrice").strip() or "productRetailPrice",
+            "mode": cfg.get(sec, "tryb_wysylki", fallback="ceny").strip(),
+            "buy_field": cfg.get(sec, "pole_zakup", fallback="productPurchasePriceNet").strip()
+            or "productPurchasePriceNet",
+            "min_field": cfg.get(sec, "pole_minimum", fallback="productMinimalPrice").strip()
+            or "productMinimalPrice"}
 
 
 def _request(method: str, url: str, key: str, body: dict | None = None) -> dict:
@@ -97,6 +106,10 @@ def test_read(cfg, product_id: str, log=print) -> dict:
         raise ApiError("API odpowiedziało błędem: " + "; ".join(faults[:3]))
     log(f"Połączenie z IdoSell działa. Produkt {product_id}: {name or '(nazwa nieznana)'}, "
         f"cena detaliczna w sklepie: {price if price is not None else 'nie znaleziona w odpowiedzi'}")
+    buy = _find(data, (s["buy_field"],))
+    low = _find(data, (s["min_field"],))
+    log(f"Cena zakupu ({s['buy_field']}): {buy if buy is not None else 'nie znaleziona'}; "
+        f"cena minimalna ({s['min_field']}): {low if low is not None else 'nie znaleziona'}")
     if price is None:
         log("Odpowiedź (początek): " + json.dumps(data, ensure_ascii=False)[:800])
     return {"name": name, "price": price}
@@ -106,11 +119,20 @@ def push_prices(cfg, rows: list[dict], log=print, out_dir: str = "") -> dict:
     """Wysyła ceny brutto (rows: id, cena_brutto) partiami. Zwraca liczby wysłanych i błędów."""
     s = settings(cfg)
     items = []
+    floor_mode = s["mode"] == "zakup_minimum"  # ceny sprzedaży zostają w gestii Szpiegomatu
     for r in rows:
         if not str(r.get("id", "")).strip() or not str(r.get("cena_brutto", "")).strip():
             continue
         pid = str(r["id"]).strip()
-        items.append({s["id_field"]: int(pid) if pid.isdigit() else pid, s["price_field"]: float(r["cena_brutto"])})
+        item = {s["id_field"]: int(pid) if pid.isdigit() else pid}
+        if floor_mode:
+            if not str(r.get("zakup_netto", "")).strip() or not str(r.get("cena_min_brutto", "")).strip():
+                continue
+            item[s["buy_field"]] = float(r["zakup_netto"])
+            item[s["min_field"]] = float(r["cena_min_brutto"])
+        else:
+            item[s["price_field"]] = float(r["cena_brutto"])
+        items.append(item)
     sent, errors, log_lines = 0, [], []
     for start in range(0, len(items), BATCH):
         batch = items[start:start + BATCH]
@@ -120,7 +142,7 @@ def push_prices(cfg, rows: list[dict], log=print, out_dir: str = "") -> dict:
         sent += len(batch) - len(faults)
         log_lines.append(json.dumps({"czas": time.strftime("%Y-%m-%d %H:%M:%S"), "wyslane": batch,
                                      "bledy": faults}, ensure_ascii=False))
-        log(f"IdoSell: wysłano {min(start + BATCH, len(items))}/{len(items)} cen"
+        log(f"IdoSell: wysłano {min(start + BATCH, len(items))}/{len(items)} " + ("pozycji (zakup+minimum)" if floor_mode else "cen")
             + (f", błędy: {len(faults)}" if faults else ""))
     if out_dir:
         with open(os.path.join(out_dir, "idosell_wysylka.log"), "a", encoding="utf-8") as fh:

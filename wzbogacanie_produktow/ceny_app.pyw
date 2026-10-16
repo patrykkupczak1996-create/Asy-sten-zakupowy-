@@ -103,9 +103,13 @@ class App(tk.Tk):
                         variable=self.v_pieces).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Checkbutton(other, text="Nie drożej niż cena katalogowa Onninen (brutto)",
                         variable=self.v_cap).grid(row=1, column=3, columnspan=3, sticky="w", pady=(6, 0))
+        self.v_minmargin = tk.StringVar(value="5")
+        ttk.Label(other, text="Cena minimalna (dla Szpiegomatu): zakup + marża %:").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Entry(other, textvariable=self.v_minmargin, width=5).grid(row=2, column=3, sticky="w", padx=4, pady=(6, 0))
         self.v_example = tk.StringVar()
         ttk.Label(other, textvariable=self.v_example, foreground="#0a5", wraplength=900).grid(
-            row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+            row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
         for v in (self.v_min, self.v_vat, self.v_round, self.v_pieces, self.v_cap):
             v.trace_add("write", lambda *_: self.update_example())
 
@@ -194,6 +198,7 @@ class App(tk.Tk):
         self.v_mode.set(c.get("marza", "tryb", fallback="progi"))
         self.v_flat.set(c.get("marza", "jedna_marza", fallback="25"))
         self.v_min.set(c.get("marza", "minimalny_zysk_zl", fallback="2"))
+        self.v_minmargin.set(c.get("marza", "marza_minimalna", fallback="5"))
         self.v_vat.set(c.get("marza", "vat", fallback="23"))
         code = c.get("marza", "zaokraglenie", fallback="0.99").strip()
         self.v_round.set(next((k for k, v in ROUNDING.items() if v == code), "końcówka ,99"))
@@ -207,6 +212,7 @@ class App(tk.Tk):
         self.v_api_domain.set(c.get("idosell", "domena", fallback="iht.com.pl"))
         self.v_api_key.set(c.get("idosell", "klucz", fallback=""))
         self.v_api_auto.set(c.getboolean("idosell", "wysylaj_automatycznie", fallback=False))
+        self.v_api_floor.set(c.get("idosell", "tryb_wysylki", fallback="ceny").strip() == "zakup_minimum")
         self.refresh_api_state()
 
     def form_to_cfg(self) -> configparser.ConfigParser:
@@ -229,6 +235,7 @@ class App(tk.Tk):
         c.set("marza", "jedna_marza", f"{ceny.to_float(self.v_flat.get() or 0):g}")
         c.set("marza", "minimalny_zysk_zl", f"{ceny.to_float(self.v_min.get() or 0):g}")
         c.set("marza", "vat", f"{ceny.to_float(self.v_vat.get() or 23):g}")
+        c.set("marza", "marza_minimalna", f"{ceny.to_float(self.v_minmargin.get() or 0):g}")
         c.set("marza", "zaokraglenie", ROUNDING.get(self.v_round.get(), "0.01"))
         c.set("marza", "minimalny_zysk_tylko_sztuki", "true" if self.v_pieces.get() else "false")
         c.set("marza", "nie_drozej_niz_katalogowa", "true" if self.v_cap.get() else "false")
@@ -245,6 +252,7 @@ class App(tk.Tk):
         c.set("idosell", "domena", self.v_api_domain.get().strip())
         c.set("idosell", "klucz", self.v_api_key.get().strip())
         c.set("idosell", "wysylaj_automatycznie", "true" if self.v_api_auto.get() else "false")
+        c.set("idosell", "tryb_wysylki", "zakup_minimum" if self.v_api_floor.get() else "ceny")
         if not c.has_option("idosell", "potwierdzone"):
             c.set("idosell", "potwierdzone", "false")
         return c
@@ -322,6 +330,7 @@ class App(tk.Tk):
         f.columnconfigure(1, weight=1)
         self.v_api_domain, self.v_api_key = tk.StringVar(), tk.StringVar()
         self.v_api_test_id, self.v_api_auto = tk.StringVar(), tk.BooleanVar(value=False)
+        self.v_api_floor = tk.BooleanVar(value=False)
         self.v_api_state = tk.StringVar()
         ttk.Label(f, text="Ceny trafiają do sklepu bez wgrywania plików. Klucz utworzysz w IdoSell: Klucze dostępowe "
                           "do Admin API → Dodaj nowy klucz (uprawnienia: produkty). Klucz zostaje tylko na tym "
@@ -333,6 +342,9 @@ class App(tk.Tk):
         ttk.Entry(f, textvariable=self.v_api_key, width=70, show="•").grid(row=2, column=1, sticky="w", padx=4)
         ttk.Label(f, text="ID produktu do testu (z panelu):").grid(row=3, column=0, sticky="w")
         ttk.Entry(f, textvariable=self.v_api_test_id, width=12).grid(row=3, column=1, sticky="w", padx=4)
+        ttk.Checkbutton(f, text="Ceny sprzedaży ustawia Szpiegomat (dynamic pricing) — wysyłaj do sklepu TYLKO cenę "
+                                "zakupu i cenę minimalną, nie ruszaj cen sprzedaży",
+                        variable=self.v_api_floor).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 4))
         steps = ttk.LabelFrame(f, text="Bezpieczny start — po kolei", padding=8)
         steps.grid(row=4, column=0, columnspan=3, sticky="ew", pady=10)
         for r, (text, hint, cmd) in enumerate([
