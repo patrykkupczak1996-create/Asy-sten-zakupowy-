@@ -321,6 +321,39 @@ def match_pairs(records: list[dict], shop: list[dict], cfg, log=print) -> list[t
     return pairs
 
 
+FEED_STALE_HOURS = 36  # feed odświeżany 2× dziennie — dłużej bez zmian = coś jest nie tak
+
+
+def check_feed_freshness(data: bytes, out_dir: str, log=print) -> None:
+    """Ostrzega, gdy pod tym samym linkiem od dawna leży ten sam plik (Onninen przestał go odświeżać)."""
+    import hashlib
+    import json
+    digest = hashlib.sha1(data).hexdigest()
+    path = os.path.join(out_dir, "ceny_feed_stan.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    now = time.time()
+    if state.get("sha1") != digest:
+        if state.get("sha1"):
+            log("Cennik zmienił się od poprzedniego pobrania — Onninen go odświeżył.")
+        state = {"sha1": digest, "od": now}
+    else:
+        hours = (now - state.get("od", now)) / 3600
+        if hours > FEED_STALE_HOURS:
+            log(f"UWAGA: cennik Onninen jest identyczny od {hours:.0f} godzin — mógł przestać się odświeżać "
+                "(np. wygasł token w linku). Sprawdź link albo zapytaj opiekuna w Onninen.")
+        else:
+            log(f"Cennik bez zmian od {hours:.0f} h (to normalne między odświeżeniami Onninen).")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass
+
+
 def shop_net_price(p: dict, vat: float) -> float:
     """Obecna cena netto produktu w sklepie (z kolumny netto albo brutto / VAT); 0 = brak danych."""
     for key, divide in (("_sklep_netto", 1.0), ("_sklep_brutto", 1 + vat / 100)):
@@ -458,6 +491,7 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
             if key:
                 index[xk].setdefault(key, []).append(r)
     log(f"XML: {len(records)} pozycji, z ceną: {len(records) - bad_price}. Cena z pola: {fields['cena']}")
+    check_feed_freshness(data, out_dir, log)
     stamp = SOURCE_INFO.get("pobrano", "")
     log(f"Ceny z cennika z dnia: {stamp}" + (f" (wg serwera Onninen: {SOURCE_INFO['serwer']})"
                                              if SOURCE_INFO.get("serwer") else
