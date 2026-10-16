@@ -3,9 +3,11 @@
 Z arkusza bierze: Nazwa, Producent, Kod, EAN, Opis nowy (albo Opis), Link do zdjęcia.
 Z feedu Onninen (opcjonalnie): jednostkę, kategorię i cenę katalogową brutto.
 
-Przykłady:
-  py idosell_import.py arkusz.csv --feed "https://onninen.pl/feed/ceneo?token=..." --limit 50
-  py idosell_import.py arkusz.csv --feed onninen.xml --tylko-z-feedem --widoczne
+Najprościej (arkusz = najnowszy „opisy_wszystkie_gotowe_arkusz*.csv” z Pobranych,
+feed = link z programu Ceny):
+  py idosell_import.py --tylko-z-feedem --limit 50
+  py idosell_import.py
+Albo wprost:  py idosell_import.py arkusz.csv --feed onninen.xml --widoczne
 
 Wynik: idosell_import_towarow.csv — w panelu: Towary → Dodawanie nowych towarów → Dodaj źródło danych.
 Towary są domyślnie UKRYTE przed klientami (/visibility/site@visible = n); --widoczne je pokazuje.
@@ -16,6 +18,7 @@ import argparse
 import csv
 import io
 import os
+import re
 import sys
 
 import ceny
@@ -27,6 +30,20 @@ COLUMNS = ["@type", "@vat", "@currency", "@code_producer", "/producer@name", "/c
            "/description/name[pol]", "/description/long_desc[pol]", "/sizes@group_id",
            "/sizes/size@code_producer", "@producer_code_standard", "/unit@id", "/price_retail_base@gross",
            "/visibility/site@visible", "/images/large/image@url"]
+
+
+def default_sheet() -> str:
+    """Najnowszy arkusz pobrany z Google do folderu Pobrane (albo arkusz_opisy.csv obok programu)."""
+    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+    found = [os.path.join(downloads, f) for f in (os.listdir(downloads) if os.path.isdir(downloads) else [])
+             if f.lower().startswith("opisy_wszystkie_gotowe_arkusz") and f.lower().endswith(".csv")]
+    if found:
+        return max(found, key=os.path.getmtime)
+    local = os.path.join(HERE, "arkusz_opisy.csv")
+    if os.path.exists(local):
+        return local
+    sys.exit("Nie znalazłem arkusza. W Google: Plik → Pobierz → CSV (trafi do Pobranych) "
+             "albo podaj ścieżkę: py idosell_import.py \"C:\\…\\plik.csv\"")
 
 
 def read_sheet(path: str) -> list[dict]:
@@ -96,8 +113,8 @@ def build_rows(sheet: list[dict], feed: dict[str, dict], only_feed: bool, visibl
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Arkusz produktów -> CSV importu towarów IdoSell.")
-    ap.add_argument("arkusz", help="CSV arkusza (Nazwa, Producent, Kod, EAN, Opis nowy, Link do zdjęcia)")
-    ap.add_argument("--feed", default="", help="feed Onninen (plik lub link) — jednostka, kategoria, cena")
+    ap.add_argument("arkusz", nargs="?", default="", help="CSV arkusza (Nazwa, Producent, Kod, EAN, Opis nowy, Link do zdjęcia)")
+    ap.add_argument("--feed", default=None, help="feed Onninen (plik lub link); domyślnie z programu Ceny")
     ap.add_argument("--tylko-z-feedem", action="store_true", help="tylko produkty, które są w feedzie")
     ap.add_argument("--limit", type=int, default=0, help="najwyżej tyle produktów (0 = wszystkie)")
     ap.add_argument("--widoczne", action="store_true", help="towary widoczne dla klientów (domyślnie ukryte)")
@@ -105,8 +122,15 @@ def main() -> None:
     ap.add_argument("-o", "--wynik", default=os.path.join(HERE, "idosell_import_towarow.csv"))
     a = ap.parse_args()
 
-    sheet = read_sheet(a.arkusz)
-    feed = read_feed(a.feed) if a.feed else {}
+    path = a.arkusz or default_sheet()
+    print(f"Arkusz: {path}")
+    sheet = read_sheet(path)
+    feed_src = a.feed
+    if feed_src is None and os.path.exists(ceny.SETTINGS):
+        feed_src = ceny.load_settings().get("pliki", "xml", fallback="").strip()
+    if feed_src:
+        print("Feed: " + re.sub(r"(token|key|klucz)=[^&]+", r"\1=***", feed_src))
+    feed = read_feed(feed_src) if feed_src else {}
     if a.tylko_z_feedem and not feed:
         sys.exit("--tylko-z-feedem wymaga --feed")
     rows = build_rows(sheet, feed, a.tylko_z_feedem, a.widoczne, not a.bez_zdjec, a.limit)
