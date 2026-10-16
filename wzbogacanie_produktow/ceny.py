@@ -276,6 +276,29 @@ def read_shop(path: str, cfg) -> list[dict]:
             for r in rows if r.get(cols["id"], "").strip()]
 
 
+def write_szpiegomat(path: str, report: list[dict]) -> int:
+    """Plik do importu w Szpiegomacie (Dashboard → Import → CSV).
+
+    Import Szpiegomatu dzieli wiersze po przecinku bez obsługi cudzysłowów, więc pola nie mogą zawierać
+    przecinków, średników ani nowych linii. „Kod” trafia tam do pola EAN (gdy brak EAN — kod producenta).
+    W oknie mapowania kolumn: Floor Price (Min Price Guard) = „Cena minimalna”, Current Price = „Cena Brutto”."""
+    def clean(value) -> str:
+        return " ".join(str(value).replace(",", " ").replace(";", " ").replace('"', " ").split())
+    columns = ["Kod", "Nazwa", "Producent", "Cena minimalna", "Cena Brutto", "Cena zakupu netto", "Jednostka"]
+    lines, seen = [",".join(columns)], set()
+    for r in report:
+        code = clean(r.get("ean") or r.get("kod") or "")
+        if not r.get("cena_brutto") or not code or code in seen:
+            continue
+        seen.add(code)
+        lines.append(",".join(clean(v) for v in (code, r.get("nazwa", ""), r.get("producent", ""),
+                                                 r.get("cena_min_brutto", ""), r["cena_brutto"],
+                                                 r.get("zakup_netto", ""), r.get("jednostka", ""))))
+    with open(path, "w", encoding="utf-8", newline="") as fh:  # bez BOM — inaczej pierwsza kolumna się nie rozpozna
+        fh.write("\n".join(lines) + "\n")
+    return len(lines) - 1
+
+
 def write_csv(path: str, rows: list[dict], columns: list[str]) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8-sig", newline="") as fh:
@@ -657,6 +680,8 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
     # Pełny cennik sklepu (wszystkie produkty z ceną) — do stałego pobierania przez IdoSell z URL/FTP.
     full_path = os.path.join(out_dir, "ceny_wszystkie.csv")
     write_csv(full_path, [{c: r[rename.get(c, c)] for c in out_cols} for r in report if r["cena_brutto"]], out_cols)
+    summary["szpiegomat"] = os.path.join(out_dir, "szpiegomat_import.csv")
+    log(f"Plik dla Szpiegomatu: {summary['szpiegomat']} ({write_szpiegomat(summary['szpiegomat'], report)} produktów)")
     priced = {r["id"] for r in report if r["cena_brutto"]}
     write_csv(state_path, [r for r in report if r["cena_brutto"]] +
               [previous[i] for i in previous if i not in priced], cols)
