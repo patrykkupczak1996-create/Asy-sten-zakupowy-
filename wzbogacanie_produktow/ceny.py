@@ -478,7 +478,7 @@ def przelicz(cfg, wymus: bool = False, log=print, wyslij: bool | None = None) ->
     state_path = os.path.join(out_dir, STATE)
 
     started = time.time()
-    log(f"Pobieram cennik: {re.sub(r'(token|key|klucz)=[^&]+', r'\1=***', xml_path)}")
+    log("Pobieram cennik: " + re.sub(r"(token|key|klucz)=[^&]+", r"\1=***", xml_path))
     try:
         data = read_source(xml_path)
     except Exception as exc:
