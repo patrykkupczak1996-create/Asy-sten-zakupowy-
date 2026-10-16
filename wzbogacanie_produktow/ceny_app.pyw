@@ -447,7 +447,7 @@ class App(tk.Tk):
         self.last_summary = summary
         self.refresh_table()
         uw = ", ".join(f"{k}: {v}" for k, v in summary["uwagi"].items())
-        self.v_status.set(f"{summary['czas']}: zmian cen {summary['zmiany']} • z ceną {summary['dopasowane']} z "
+        self.v_status.set(f"{summary['czas']} (cennik z {summary.get('cennik_z', '?')}): zmian cen {summary['zmiany']} • z ceną {summary['dopasowane']} z "
                           f"{summary['produkty']}" + (f" • {uw}" if uw else ""))
 
     def background(self, func) -> None:

@@ -95,14 +95,22 @@ def plain_key(tag: str) -> str:
 
 
 # ----------------------------------------------------------------------------- XML
+SOURCE_INFO: dict[str, str] = {}  # skąd i kiedy pobrano ostatni cennik (feed nie zawiera własnej daty)
+
+
 def read_source(path_or_url: str) -> bytes:
     if re.match(r"https?://", path_or_url):
         import requests
         resp = requests.get(path_or_url, timeout=300)
         resp.raise_for_status()
+        SOURCE_INFO["pobrano"] = time.strftime("%Y-%m-%d %H:%M")
+        SOURCE_INFO["serwer"] = resp.headers.get("Last-Modified", "")
         return resp.content
     with open(path_or_url, "rb") as fh:
-        return fh.read()
+        data = fh.read()
+    SOURCE_INFO["pobrano"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path_or_url)))
+    SOURCE_INFO["serwer"] = ""
+    return data
 
 
 def find_record_tag(data: bytes) -> str:
@@ -450,6 +458,10 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
             if key:
                 index[xk].setdefault(key, []).append(r)
     log(f"XML: {len(records)} pozycji, z ceną: {len(records) - bad_price}. Cena z pola: {fields['cena']}")
+    stamp = SOURCE_INFO.get("pobrano", "")
+    log(f"Ceny z cennika z dnia: {stamp}" + (f" (wg serwera Onninen: {SOURCE_INFO['serwer']})"
+                                             if SOURCE_INFO.get("serwer") else
+                                             " — feed nie podaje własnej daty, to chwila pobrania/zapisu pliku"))
 
     previous = {}
     if os.path.exists(state_path):
@@ -524,7 +536,7 @@ def przelicz(cfg, wymus: bool = False, log=print) -> dict:
     log(f"Sklep: {len(shop)} produktów, z ceną z Onninen: {matched} ({share:.0f}%), "
         f"zmienione od ostatniego razu: {len(changed)}. " + ", ".join(f"{k}: {v}" for k, v in warnings.items()))
     summary = {"produkty": len(shop), "dopasowane": matched, "zmiany": len(changed), "uwagi": dict(warnings),
-               "raport": report_path, "import": "", "zmienione": changed, "wszystkie": report, "czas": time.strftime("%Y-%m-%d %H:%M")}
+               "raport": report_path, "import": "", "zmienione": changed, "wszystkie": report, "cennik_z": SOURCE_INFO.get("pobrano", ""), "czas": time.strftime("%Y-%m-%d %H:%M")}
 
     fuse = []
     if bad_price > len(records) * 0.2:
