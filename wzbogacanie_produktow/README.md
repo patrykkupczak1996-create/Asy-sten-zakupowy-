@@ -1,0 +1,329 @@
+# Wzbogacanie produktów B2B pod IdoSell
+
+Skrypt `wzbogac_produkty.py` czyta CSV z Google Sheets i dla każdego produktu:
+
+1. **szuka w internecie strony produktu** kaskadowo: `AEON AG0510 590…` (producent + kod + EAN) →
+   `AEON "AG0510"` → `"AG0510" zasuwa` (kod + rodzaj produktu z nazwy, gdy kod ma min. 5 znaków) → sam EAN → `site:`,
+   pobiera ją i **sprawdza, czy ten kod lub EAN faktycznie na niej występuje**. Wystarczy EAN, kod + nazwa producenta
+   na stronie albo sam kod w kluczowym miejscu karty (tytuł, H1, SKU/MPN, pole „Kod/Symbol/Indeks” tabeli parametrów,
+   adres) — wtedy strona musi wyglądać na kartę sklepu (koszyk/cena/Product w JSON-LD) i mieć nazwę producenta albo
+   (dla kodu z literami i cyframi lub min. 6 znaków) rodzaj produktu z nazwy. Szukanie idzie przez DuckDuckGo
+   (`SEARCH_ENGINE`; Google wymaga klucza `SERPAPI_API_KEY` albo `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`),
+2. **pisze opis HTML** (~1000 znaków, `<h2>`, `<p>`, `<ul>`) przez Gemini `gemini-3.8-flash` (domyślnie) albo OpenAI `gpt-4o-mini`
+   **wyłącznie na podstawie nazwy i tekstu potwierdzonej strony** — model dodatkowo ocenia,
+   czy strona opisuje dokładnie ten produkt (kod, DN, PN …),
+3. **bierze zdjęcie** z potwierdzonej strony, a gdy go tam nie ma — z wyszukiwarki obrazów,
+   ale za potwierdzone uznaje je tylko, jeśli kod/EAN jest w nazwie pliku, tytule albo na stronie, z której pochodzi,
+4. **pobiera zdjęcie na dysk** do folderu `zdjecia/` (np. `zdjecia/28846_AG0828.jpg`) i sprawdza, czy to
+   naprawdę plik obrazu — jeśli link nie działa albo zamiast zdjęcia przychodzi strona błędu, produkt idzie do akceptacji,
+5. **nadaje status**:
+
+| Status | Kiedy | Gdzie trafia |
+|---|---|---|
+| `PEWNY` | strona potwierdzona kodem/EAN **i** AI potwierdza zgodność **i** zdjęcie potwierdzone | `produkty_wzbogacone_pewne.csv` |
+| `DO_AKCEPTACJI` | cokolwiek z powyższych niespełnione — powód w kolumnie `Powod` | `produkty_wzbogacone_do_akceptacji.csv` |
+
+Przykładowe powody: *nie znaleziono strony z tym kodem/EAN — opis tylko z nazwy*,
+*AI: strona nie pasuje do produktu (DN150 zamiast DN200)*, *zdjęcie niepotwierdzone kodem/EAN*, *brak zdjęcia*.
+Kolumna `Zrodlo_URL` pokazuje stronę, z której wzięto dane — każdy opis sprawdzisz jednym kliknięciem.
+
+## 1. Instalacja (jednorazowo)
+
+```powershell
+cd wzbogacanie_produktow
+py -m pip install -r requirements.txt
+```
+
+(Na Windows używaj `py` zamiast `python`/`pip`, jeśli te polecenia nie są rozpoznawane.)
+
+### Aktualizacja skryptu
+
+```powershell
+py wzbogac_produkty.py --aktualizuj
+```
+
+Pobiera najnowszą wersję skryptu, `requirements.txt` i README z GitHuba i podmienia je w folderze
+(Twoje pliki CSV, zdjęcia i postęp zostają). Jeśli zmieniły się biblioteki, skrypt napisze, żeby uruchomić
+`py -m pip install -r requirements.txt`. Przy każdym starcie skrypt sam sprawdza, czy jest nowsza wersja,
+i wypisuje ostrzeżenie.
+
+## 2. Klucze API
+
+**Gemini (domyślnie)** — klucz z https://aistudio.google.com/apikey (zaczyna się od `AIza`):
+
+```powershell
+# Windows (PowerShell) — tylko dla bieżącego okna
+$env:GEMINI_API_KEY="AIza...cały klucz..."
+# albo na stałe (zadziała w NOWYCH oknach)
+setx GEMINI_API_KEY "AIza...cały klucz..."
+```
+
+Darmowy limit Gemini ma ograniczoną liczbę zapytań na minutę i dzień — przy pełnej bazie włącz płatności
+w Google AI Studio, inaczej skrypt będzie często czekał na limit (to nie błąd, tylko wolniejsza praca).
+Inny model Gemini ustawisz zmienną `GEMINI_MODEL`, np. `$env:GEMINI_MODEL="gemini-3.7-flash"`.
+
+**Ollama (darmowo, lokalnie, bez klucza)** — model działa na Twoim komputerze; potrzebna karta graficzna
+(np. RTX 3060 12 GB). Opisy pisze **Bielik** (polski model SpeakLeash) — lepsza polszczyzna niż qwen; skrypt bierze
+go automatycznie, gdy jest pobrany (kolejność w `OLLAMA_PREFERRED`), tak samo `uruchom_cala_baze.ps1`
+i `ponow_brak_strony.ps1`:
+
+1. Zainstaluj Ollamę z https://ollama.com/download i uruchom ją.
+2. Pobierz model (jednorazowo, 6,7 GB): `ollama pull SpeakLeash/bielik-11b-v3.0-instruct:Q4_K_M`
+3. Uruchamiaj skrypt z `--ai ollama`, np. `py wzbogac_produkty.py --input produkty.csv --ai ollama --limit 10`
+
+Inny model: `$env:OLLAMA_MODEL="nazwa:tag"` (najpierw `ollama pull nazwa:tag`). Przy 6–8 GB VRAM wybierz mniejszy model.
+Lokalny model jest darmowy, ale wolniejszy i zwykle słabszy po polsku — porównaj opisy w podglądzie.
+
+**OpenAI (opcjonalnie, zamiast Gemini)** — klucz z https://platform.openai.com/api-keys, ustawiany jako
+`OPENAI_API_KEY`; uruchamiasz wtedy skrypt z `--ai openai`.
+
+Alternatywnie wpisz klucz na górze skryptu w sekcji `KONFIGURACJA`. Wtedy nie udostępniaj tego pliku.
+
+**Wyszukiwarka** — parametr `--search`:
+
+| Wartość | Klucz | Uwagi |
+|---|---|---|
+| `ddg` (domyślnie) | brak | darmowe; przy tysiącach zapytań DuckDuckGo potrafi czasowo blokować — skrypt odczekuje i ponawia |
+| `serpapi` | `SERPAPI_API_KEY` | wyniki Google, najlepsza trafność i stabilność przy pełnym przebiegu, płatne (https://serpapi.com) |
+| `google` | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | Google Custom Search JSON API; 100 zapytań/dzień gratis, może być niedostępne dla nowych kont |
+
+## 3. Uruchomienie
+
+1. W Google Sheets otwórz zakładkę z produktami → **Plik → Pobierz → Wartości rozdzielone przecinkami (.csv)**.
+   Skopiuj plik do folderu `wzbogacanie_produktow` i nazwij go `produkty.csv` (sprawdź `dir *.csv` —
+   Windows lubi tworzyć `produkty.csv.csv`).
+2. Test na kilku produktach:
+   ```powershell
+   py wzbogac_produkty.py --input produkty.csv --limit 10
+   ```
+3. Pełny przebieg (ta sama komenda bez `--limit` — skrypt dopisze resztę):
+   ```powershell
+   py wzbogac_produkty.py --input produkty.csv
+   ```
+
+Powstają pliki:
+
+* `produkty_wzbogacone.csv` — plik roboczy z postępem (nie edytuj go),
+* **`zdjecia/`** — pobrane zdjęcia, nazwane `ID_KOD.jpg`; przejrzysz je w Eksploratorze Windows (widok „Duże ikony”).
+  Kolumna `Zdjecie_plik` w CSV wskazuje plik danego produktu, a `Zdjecie_URL` — link, z którego go pobrano,
+* `produkty_wzbogacone_pewne.csv` — produkty potwierdzone, gotowe do importu,
+* `produkty_wzbogacone_do_akceptacji.csv` — produkty do przejrzenia (pierwsza kolumna `Akceptacja` jest pusta).
+* **`produkty_wzbogacone_podglad.html`** — podgląd w przeglądarce (dwuklik w pliku): każdy produkt jako karta
+  z wyrenderowanym opisem, miniaturą zdjęcia, linkiem do źródła i powodem, jeśli jest do akceptacji.
+  Przyciski u góry filtrują *Pewne* / *Do akceptacji*.
+
+**Excel / Google Sheets:** pliki CSV otworzysz w obu. W Google Sheets: Plik → Importuj (kody EAN zostają bez zmian).
+W Excelu nie otwieraj CSV dwuklikiem, bo EAN zamieni się na `5,9E+12`. Użyj Dane → Z tekstu/CSV i ustaw kolumny
+z kodami jako *Tekst*. Pliku do importu w IdoSell nie zapisuj z Excela, tylko używaj CSV wygenerowanego przez skrypt
+albo pobranego z Google Sheets.
+
+Pliki `_pewne` i `_do_akceptacji` są odświeżane po każdym uruchomieniu (także po Ctrl+C), więc
+możesz zacząć przeglądać produkty, zanim skończy się cała baza.
+
+Inne opcje: `--bez-zdjec` (tylko opisy — zdjęcia nie są szukane ani pobierane, PEWNY zależy wtedy tylko
+od źródła i opisu), `--bez-pobierania` (tylko linki do zdjęć, bez zapisywania plików), `--workers 3` (ile produktów
+naraz), `--sep ";"` (CSV ze średnikami), `--search serpapi`, `--output inna_nazwa.csv`.
+
+### Kontrola opisu
+
+Każdy wygenerowany opis przechodzi kontrole:
+
+* **Literówki w słowach z nazwy** są poprawiane automatycznie: słowo, które różni się o jedną literę od słowa z nazwy
+  produktu albo jego odmiany (-a/-y/-ę/-ą/-i/-e/-ie), np. „Zasuga” → „Zasuwa”, „żyliwo” → „żeliwo”. Wielkość liter
+  zostaje, w kolumnie Powod pojawia się „poprawiona literówka: Zasuga→Zasuwa” (sama poprawka nie zmienia statusu).
+  Pomijane, żeby nie psuć poprawnych słów: różnice tylko w ogonku (ó/o, ł/l…), odmiana (zaworem, nakrętce, żeliwne),
+  inny przedrostek (zbudowany/wbudowany), krótkie rdzenie (stal, woda) i słowa częste w nazwach bazy.
+* **Zakazane ogólniki** (`BANNED_PHRASES` w skrypcie): wysoka jakość, niezawodność, odporność na korozję /
+  chemikalia / warunki atmosferyczne, zgodność z normami / standardami, łatwy montaż, trwałość. Zdanie (albo punkt
+  listy) z taką frazą jest usuwane, chyba że źródło mówi o tym samym (np. „korozja” jest w tekście strony
+  źródłowej). Jeśli po usunięciu opis ma mniej niż 200 znaków, produkt idzie do akceptacji.
+* **Nagłówek `<h2>`** musi zawierać rodzaj produktu z nazwy (pierwsze słowo, np. „zasuwa”, „trójnik”; odmiana
+  dozwolona; wystarczy rdzeń dowolnego rzeczownika z nazwy).
+* **Każdy opis jest ogólny i marketingowy** (także gdy jest strona producenta) — przeznaczenie i korzyści dla
+  instalatora, bez parametrów technicznych, norm, certyfikatów, ciśnień, gwintów, temperatur i materiałów, które
+  nie wynikają wprost z nazwy (z rozwiniętymi skrótami: PE → polietylen, PN16 → ciśnienie nominalne). Strona
+  źródłowa służy tylko do potwierdzenia produktu i jego przeznaczenia. Skrypt usuwa każde zdanie z taką daną albo
+  z liczbą spoza nazwy (`NAME_ONLY_TECH`); nagłówek z danymi spoza nazwy dostaje osobny powód (do akceptacji).
+  Opisy zapisane wcześniej zmienią się dopiero po ponownym wygenerowaniu.
+
+Zapisane już opisy można poprawić i przeliczyć bez generowania od nowa (najpierw powstaje kopia
+`*_kopia_przed_przeliczeniem_*.csv`):
+
+```powershell
+py wzbogac_produkty.py --przelicz-statusy --output opisy_wszystkie.csv
+```
+
+## Strony producentów (najlepsze zdjęcia i dane)
+
+Skrypt **najpierw** szuka produktu na stronach producenta (`site:aeon-sale.com AG0828` itd.), dopiero potem
+w reszcie internetu. Ze strony producenta bierze też zdjęcie serii bez kodu w nazwie pliku (producent często ma
+jedno zdjęcie na wszystkie DN). Listę stron ustawiasz na górze skryptu w `PRODUCER_SITES`:
+
+```python
+PRODUCER_SITES = {
+    # "HAWLE": ["hawle.pl"],   # producent, którego strona pokazuje kod lub EAN produktu
+}
+```
+
+Wpisuj tylko strony, na których przy produkcie widać kod producenta lub EAN — inaczej skrypt nie potwierdzi
+na nich produktu, a tylko wydłuży szukanie. (Sklep AEON aeon-sale.com kodów nie pokazuje, więc go tu nie ma.)
+
+Zaraz po stronach producenta skrypt sprawdza hurtownie z rzetelnymi kartami produktów (kod producenta + EAN),
+ustawione w `TRUSTED_SITES` (domyślnie `cetel-hurtownia.pl`, `mateomarket.pl`). Na tych stronach szuka po kodzie
+producenta; EAN sprawdza w ogólnym wyszukiwaniu.
+
+**Sklep producenta po nazwie (AEON, Valvex, Gebo)** — w `PRODUCER_SEARCH` jest wyszukiwarka sklepu i fragment adresu
+karty produktu, np. `{"url": "https://aeon-sale.com/?s={q}&post_type=product", "link": "/product/"}` (Valvex: `/produkt/`,
+Gebo: `/p/`). Gdy hurtownia potwierdzi produkt po kodzie, model AI
+wyciąga z jej karty pełną nazwę serii (np. „zasuwa gaz OptiValve typ A kołnierzowa”), skrypt wpisuje ją
+w wyszukiwarkę sklepu producenta, a model wybiera z wyników **jedną** pozycję tej samej serii (rodzaj,
+gaz/woda, sposób połączenia, typ, F4/F5). Zdjęcie z tej karty ma pierwszeństwo przed innymi; gdy nic nie
+pasuje na pewno, skrypt bierze zdjęcie z innych stron.
+
+**Bezpośrednie wyszukiwanie u producenta / w hurtowni** — `DIRECT_SEARCH` zawiera adresy wyszukiwarek, w które
+skrypt wpisuje kod producenta (bez DuckDuckGo, więc wynik jest powtarzalny). Każdy wpis działa tylko dla podanych
+producentów; karta z wyników i tak przechodzi zwykłą weryfikację kodu/EAN. Obecnie:
+
+| Producent | Wyszukiwarka | Uwagi |
+|---|---|---|
+| AFRISO | `afriso.pl/wyszukiwanie?search=KOD` | szuka po kodzie (nie po EAN); adres karty zaczyna się od kodu, EAN jest w danych JSON-LD karty |
+| CONEX | `conexbanninger.com/products/?lang=en&srch=KOD` | karta `/product/…` zawiera kod |
+| GEBERIT | API `catalog.geberit.pl/api/suggest?brand=geberit&locale=pl-PL&term=KOD` | katalog działa w JavaScript; pole `exactMatches`; karta produktu `PRO_…` ma pierwszeństwo przed stroną części zamiennej `SPT_…` |
+| VALVEX | `valvex.com/?s=KOD` | karta `/produkt/…` zawiera kod |
+| GEBO | `gebo.group/de-DE/search?search=KOD` | tylko wersja niemiecka (pl-PL nie istnieje); kod w adresie karty |
+| FERRO | API Meilisearch (publiczny klucz z HTML ferro.pl) | pola `part_number`, `ean`; karta z pola `url` |
+| DANFOSS | API `store.danfoss.com/pl/pl/search/autocomplete/SearchBoxNextStore?term=KOD` | tylko produkty ze sklepu Danfoss (np. 003Z1031 nie ma) |
+| BOHAMET-ARMATURA | katalog WooCommerce `bohamet-armatura.pl/wp-json/wc/store/v1/products` (pobierany raz) | to NIE bohamet.pl (inna firma). SKU to często wzorce (`21.550.DN.1`, `10.100.X`) — kod dopasowany do wzorca, wariant wybierany po średnicy; ok. 1/3 kodów jest w sklepie |
+| ALCA | JSON `alcadrain.pl/index.php?option=com_search&searchphrase=exact&tmpl=raw&type=json&searchword=KOD` | kod w tytule wyniku i na karcie; ok. 1/4 kodów (alcaplast.pl nie działa) |
+| AWENTA | `awenta.pl/search/query:KOD` | karta serii BEZ kodu — przyjmowana tylko, gdy to jedyny wynik (`"trusted"`); ok. 40% kodów |
+| GAZEX | `gazex.com/pl/wyszukaj/?query=KOD` | karta `/pl/produkty/model/zb-40/` — kod w adresie; kody 3-znakowe (LD-2) za krótkie |
+| DAFI | `dafi.pl/catalogsearch/result/?q=KOD` (Magento) | karta `*.html` ze SKU i EAN; kody hurtowni (DLW…) nieznane |
+| CALEFFI | API Typesense `search.caleffi.com` (klucz tylko do wyszukiwania z HTML strony wyników) | karta serii z tabelą artykułów (kod w tabeli) |
+
+Gdy kod jest potwierdzony tylko wyszukiwarką producenta (karta Awenty bez kodu albo wzorzec SKU Bohamet), opis
+powstaje z tej karty, ale produkt idzie do akceptacji z powodem „kod potwierdzony tylko wyszukiwarką producenta”.
+
+`PRODUCER_SEARCH` (zdjęcie z karty serii po nazwie, gdy hurtownia potwierdzi kod): AEON, Valvex, Gebo, Auraton
+(`auraton.pl/szukaj?s=`), Apator-Powogaz (`apator.com/wyszukiwarka?search=`), Awenta. Linki z menu (widoczne przy
+każdym zapytaniu) są pomijane.
+
+Wpis z API JSON (`"api": {...}`) obsługuje: metodę, parametry/JSON z `{q}`, klucz pobierany ze strony (`key_from`),
+listę wyników (`items`, `None` = lista na najwyższym poziomie), pola z kodem/EAN (`code_fields`) i adres karty (`url_field`
++ `base` albo `url_from_id`). Brane są tylko pozycje, które w polach kodu mają NASZ kod albo EAN.
+
+Sprawdzone i nieprzydatne do szukania po kodzie (październik 2026): blokują skrypty (HTTP 403) — Onninen, Armacell,
+Flamco; wyszukiwarka nie zna kodów — Kaczmarek (kaczmarek2.pl), KAN-therm (także API WordPressa CMS), Auraton i
+Apator-Powogaz (tylko po nazwie — są w `PRODUCER_SEARCH`); AGRU (agru.at) — brak działającej wyszukiwarki, kody tylko
+w katalogach PDF; wyniki tylko w JavaScript, bez znalezionego otwartego API — Wavin (Contentstack), Galmet,
+Rothenberger; karty bez kodów i EAN — Flowair, Ferroli (ferroli.com/pl); Galmet — wyszukiwarka sklep.galmet.com.pl nic
+nie zwraca; brak wyszukiwarki lub strona nie odpowiada — Purmo, Georg Fischer, Vesbo, Grundfos, De Dietrich, Biawar
+i ferroli.pl (błąd certyfikatu SSL); Famas — brak strony z katalogiem (famas.eu na sprzedaż). Czy wyszukiwarka odpowiada skryptowi, sprawdzisz:
+`py wzbogac_produkty.py --test-wyszukiwarki KOD`. Strony, które kilka razy z rzędu odmówią dostępu (403), są pomijane
+do końca przebiegu. Skrypt czyta też dane strukturalne JSON-LD stron (sku, gtin = EAN) — wiele sklepów pokazuje EAN tylko tam.
+
+**Ponowne przetworzenie produktów bez źródła** — gdy dojdą nowe wyszukiwarki albo DuckDuckGo miał gorszy dzień:
+
+```powershell
+py wzbogac_produkty.py --ponow-brak-strony --output opisy_wszystkie.csv --bez-zdjec
+```
+
+Przetwarza tylko wiersze z powodem „nie znaleziono strony”; pozostałe zostają bez zmian. Plik jest zapisywany
+co 50 produktów, przerwanie niczego nie psuje. Dwa przebiegi na tym samym pliku nie ruszą naraz (blokada `*.lock`).
+
+Strony, które nakładają **znak wodny** na zdjęcia, wpisz w `WATERMARK_SITES` (domyślnie `onninen.pl`).
+Skrypt bierze z nich tylko tekst (potwierdzenie kodu/EAN i dane do opisu), a zdjęcie od razu szuka gdzie indziej
+— np. w innej hurtowni czy sklepie z tym samym kodem.
+
+Zdjęcia mniejsze niż 400 px (krótszy bok) są odrzucane jako słabej jakości.
+
+## Kontrola zdjęć (znak wodny, logo, czy to produkt)
+
+Już przy wyborze zdjęcia skrypt odrzuca pliki z „logo/banner/icon” w adresie, ikonki (< 150 px) i obrazki
+o proporcjach banera (szersze niż 1,9:1). Znaku wodnego nie da się jednak wykryć regułami, więc jest drugi etap:
+model wizyjny w Ollamie ogląda każde zdjęcie.
+
+```powershell
+ollama pull qwen2.5vl:7b          # jednorazowo, jeśli go nie masz
+py wzbogac_produkty.py --sprawdz-zdjecia
+```
+
+* Sprawdza tylko zdjęcia, których jeszcze nie sprawdził — można przerywać (Ctrl+C) i wznawiać.
+* **Gdy zdjęcie zostanie odrzucone, skrypt szuka zastępczego** (ze strony źródłowej i z wyszukiwarki obrazów),
+  ogląda je tym samym modelem i podstawia pierwsze bez znaku wodnego. Jeśli żadne nie przejdzie (do 3 prób),
+  produkt zostaje **bez zdjęcia** i trafia do akceptacji — lepiej brak zdjęcia niż cudzy znak wodny.
+  Zdjęcie zastępcze niepotwierdzone kodem/EAN też trafia do akceptacji.
+* Odrzuca: znak wodny, nałożone logo sklepu/firmy, adres www lub telefon na zdjęciu, a także obrazki,
+  które nie są zdjęciem produktu (logo, baner, rysunek, tabela, inny przedmiot).
+* **Produkt jest PEWNY tylko wtedy, gdy jego zdjęcie przeszło tę kontrolę.** Dopóki jej nie uruchomisz,
+  produkty ze zdjęciem trafiają do akceptacji z powodem „zdjęcie niesprawdzone”.
+* Wyniki są w `produkty_wzbogacone_kontrola_zdjec.csv`; pliki `_pewne`, `_do_akceptacji` i podgląd
+  odświeżają się automatycznie.
+* Uruchamiaj ją **po** przetwarzaniu opisów (albo w przerwie) — karta graficzna z 12 GB nie pomieści naraz
+  modelu do opisów i modelu do zdjęć. Inny model wizyjny: `$env:OLLAMA_VISION_MODEL="nazwa:tag"`.
+* Model może się czasem pomylić (np. nie zauważyć bardzo bladego znaku wodnego) — przy akceptacji
+  rzuć okiem na zdjęcia w podglądzie.
+
+## 4. Akceptacja niepewnych produktów
+
+1. Wgraj `produkty_wzbogacone_do_akceptacji.csv` do Google Sheets (Plik → Importuj).
+2. Przejrzyj kolumny `Powod`, `Opis_HTML`, `Zdjecie_URL`. Popraw opis/zdjęcie, jeśli trzeba,
+   i wpisz **`TAK`** w kolumnie `Akceptacja` przy produktach, które mają iść do sklepu.
+   Wiersze bez `TAK` zostaną pominięte.
+3. Pobierz arkusz jako CSV (np. `zaakceptowane.csv`) do folderu ze skryptem i uruchom:
+   ```powershell
+   py wzbogac_produkty.py --zatwierdz zaakceptowane.csv
+   ```
+4. Powstaje **`produkty_wzbogacone_do_importu.csv`** = produkty pewne + zaakceptowane przez Ciebie
+   (status `ZAAKCEPTOWANY`). Ten plik importujesz do IdoSell.
+
+Jeśli po akceptacji uruchomisz przetwarzanie ponownie, skrypt nie nadpisze pliku, w którym są już Twoje
+oznaczenia `TAK` — nowa lista trafi do `produkty_wzbogacone_do_akceptacji_nowe.csv`.
+
+## Test na próbce całej bazy
+
+Pierwsze wiersze pliku to zwykle jeden producent — test na nich nie mówi, jak skrypt poradzi sobie z resztą.
+Próbka proporcjonalna do producentów (najwięcej z największych, min. 1 z każdego z 15 największych):
+
+```powershell
+py wzbogac_produkty.py --input produkty.csv --utworz-probke 50
+# albo tylko wybrani producenci:
+py wzbogac_produkty.py --input produkty.csv --utworz-probke 50 --producenci "GEBERIT,WAVIN,VALVEX"
+py wzbogac_produkty.py --input produkty_probka.csv --output wyniki_probka.csv
+py wzbogac_produkty.py --sprawdz-zdjecia --output wyniki_probka.csv
+start wyniki_probka_podglad.html
+```
+
+## Checkpointy i błędy
+
+* Co **10 wierszy** wynik jest dopisywany do pliku roboczego i zrzucany na dysk.
+* Po przerwaniu (Ctrl+C, zanik sieci, restart komputera) uruchom **tę samą komendę** — skrypt zacznie od
+  pierwszego niezapisanego wiersza. Jeśli plik wejściowy zmienił kolejność, odmówi wznowienia.
+* Timeout / rate limit / błąd sieci → odczekanie 5 s (przy kolejnych błędach 10 s, 15 s …) i ponowienie, do 6 prób.
+  Jeśli wszystkie zawiodą, produkt trafia do akceptacji z odpowiednim powodem, a skrypt jedzie dalej.
+* Zły klucz API albo brak środków na koncie Gemini/OpenAI → skrypt zatrzymuje się (postęp zostaje zapisany).
+* Pełny log trafia do `wzbogacanie.log`.
+
+## Zdjęcia a import do IdoSell
+
+* Import przez CSV: IdoSell pobiera zdjęcie z linku w `Zdjecie_URL`. To, że skrypt pobrał zdjęcie, oznacza,
+  że link działał w chwili przetwarzania.
+* Jeśli wolisz nie zależeć od cudzych stron, wgraj pliki z folderu `zdjecia/` na własny serwer/FTP sklepu
+  i podmień linki, albo dodaj je ręcznie w panelu IdoSell.
+* Jeśli w pliku do akceptacji wpiszesz inny link w `Zdjecie_URL`, plik w `zdjecia/` zostaje stary —
+  do importu liczy się link.
+
+## Czego skrypt NIE gwarantuje
+
+* Status `PEWNY` oznacza, że kod/EAN występuje na stronie źródłowej i AI nie znalazło niezgodności —
+  to mocny filtr, ale nie zastępuje wyrywkowej kontroli. Przejrzyj kilkadziesiąt produktów `PEWNY` po teście.
+* Dla produktów, których nie ma nigdzie w sieci, opis powstaje tylko z nazwy — zawsze trafiają do akceptacji.
+* Zdjęcia pochodzą z cudzych stron — upewnij się, że masz prawo ich użyć (najbezpieczniej: materiały
+  producenta/hurtowni).
+
+## Czas i koszt (orientacyjnie)
+
+* Koszt AI zależy od modelu i cennika dostawcy — sprawdź go po teście na 10 produktach w panelu Google AI Studio
+  (lub OpenAI) i przelicz na 28 000. Tekst strony źródłowej wydłuża każde zapytanie.
+* Każdy produkt to 1–2 wyszukiwania i pobranie kilku stron, więc pełny przebieg potrwa **od kilkudziesięciu godzin
+  wzwyż**. Można przerywać i wznawiać. Przy DuckDuckGo część zapytań może być blokowana — do pełnego przebiegu
+  stabilniejszy jest SerpApi.
