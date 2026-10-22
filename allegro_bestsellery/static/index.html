@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bestsellery Allegro</title>
+<style>
+:root {
+  --bg: #f5f6f8; --karta: #ffffff; --tekst: #1d2330; --muted: #6b7280;
+  --linia: #e3e6eb; --akcent: #ff5a00; --zielony: #15803d; --czerwony: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171d; --karta: #1d2129; --tekst: #e8eaf0; --muted: #9aa3b2;
+    --linia: #2c3240; --akcent: #ff7a2e; --zielony: #4ade80; --czerwony: #f87171;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171d; --karta: #1d2129; --tekst: #e8eaf0; --muted: #9aa3b2;
+  --linia: #2c3240; --akcent: #ff7a2e; --zielony: #4ade80; --czerwony: #f87171;
+}
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--tekst); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+header { background: var(--akcent); color: #fff; padding: 14px 16px; }
+header h1 { margin: 0; font-size: 18px; }
+header p { margin: 2px 0 0; font-size: 13px; opacity: .9; }
+nav { display: flex; gap: 4px; padding: 8px 12px; background: var(--karta); border-bottom: 1px solid var(--linia); overflow-x: auto; }
+nav button { border: 0; background: none; color: var(--muted); padding: 8px 12px; border-radius: 6px; cursor: pointer; font: inherit; white-space: nowrap; }
+nav button.aktywna { background: var(--bg); color: var(--tekst); font-weight: 600; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+.karta { background: var(--karta); border: 1px solid var(--linia); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.filtry { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; align-items: end; }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+input, select, textarea { font: inherit; color: var(--tekst); background: var(--bg); border: 1px solid var(--linia); border-radius: 6px; padding: 8px; min-width: 0; }
+button.glowny { background: var(--akcent); color: #fff; border: 0; border-radius: 6px; padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+button.drugi { background: none; color: var(--tekst); border: 1px solid var(--linia); border-radius: 6px; padding: 9px 16px; font: inherit; cursor: pointer; }
+.tabela-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 8px; border-bottom: 1px solid var(--linia); text-align: left; vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
+td.liczba, th.liczba { text-align: right; white-space: nowrap; }
+tr.klik { cursor: pointer; }
+tr.klik:hover { background: var(--bg); }
+a { color: var(--akcent); }
+.muted { color: var(--muted); font-size: 13px; }
+.wynik-kalk { font-size: 18px; margin-top: 12px; line-height: 1.8; }
+.zysk-dodatni { color: var(--zielony); font-weight: 700; }
+.zysk-ujemny { color: var(--czerwony); font-weight: 700; }
+#komunikat { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--tekst); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-size: 14px; max-width: 90vw; }
+h2 { font-size: 16px; margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bestsellery Allegro</h1>
+  <p>Szukaj ofert, sprawdzaj popyt i licz zysk z jednej sztuki.</p>
+</header>
+
+<nav>
+  <button data-tab="szukaj" class="aktywna">Wyszukiwarka</button>
+  <button data-tab="analiza">Analiza fraz</button>
+  <button data-tab="kalkulator">Kalkulator zysku</button>
+  <button data-tab="dane">Dane</button>
+</nav>
+
+<main>
+  <section data-tab="szukaj">
+    <div class="karta">
+      <div class="filtry">
+        <label>Szukaj w tytule lub sprzedawcy<input id="q" placeholder="np. sluchawki"></label>
+        <label>Fraza
+          <select id="fraza"><option value="">wszystkie</option></select>
+        </label>
+        <label>Cena od (zł)<input id="cena_min" inputmode="decimal"></label>
+        <label>Cena do (zł)<input id="cena_max" inputmode="decimal"></label>
+        <label>Min. sprzedaży dziennie<input id="min_dziennie" inputmode="decimal" placeholder="np. 1"></label>
+        <label>Sortuj
+          <select id="sortuj">
+            <option value="sprzedane">Najlepiej sprzedające się</option>
+            <option value="dziennie">Sprzedaż dziennie</option>
+            <option value="przychod">Przychód</option>
+            <option value="cena_rosnaco">Cena rosnąco</option>
+            <option value="cena_malejaco">Cena malejąco</option>
+          </select>
+        </label>
+      </div>
+      <p style="margin:12px 0 0"><button class="glowny" id="btn-szukaj">Szukaj</button>
+        <span class="muted" id="licznik" style="margin-left:8px"></span></p>
+    </div>
+
+    <div class="karta tabela-wrap">
+      <table id="wyniki">
+        <thead><tr>
+          <th>Tytuł</th><th>Fraza</th><th class="liczba">Cena</th><th class="liczba">Sprzedane</th>
+          <th class="liczba">Dziennie</th><th class="liczba">Przychód</th><th class="liczba">Ocena</th><th>Sprzedawca</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section data-tab="analiza" hidden>
+    <div class="karta tabela-wrap">
+      <h2>Które frazy się opłacają</h2>
+      <p class="muted">Sprzedaż dziennie na ofertę = ile sztuk dziennie sprzedaje przeciętna oferta z danej frazy.
+        Kliknij wiersz, żeby zobaczyć oferty z tej frazy.</p>
+      <table id="frazy">
+        <thead><tr>
+          <th>Fraza</th><th class="liczba">Ofert</th><th class="liczba">Sprzedane</th>
+          <th class="liczba">Dziennie łącznie</th><th class="liczba">Dziennie na ofertę</th><th class="liczba">Mediana ceny</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section data-tab="kalkulator" hidden>
+    <div class="karta">
+      <h2>Zysk z jednej sztuki</h2>
+      <div class="filtry">
+        <label>Cena sprzedaży (zł)<input id="k_cena" inputmode="decimal"></label>
+        <label>Koszt zakupu (zł)<input id="k_koszt" inputmode="decimal"></label>
+        <label>Wysyłka (zł)<input id="k_wysylka" inputmode="decimal" value="0"></label>
+        <label>Prowizja Allegro (%)<input id="k_prowizja" inputmode="decimal" value="10"></label>
+        <label>Opłata stała (zł)<input id="k_stala" inputmode="decimal" value="0"></label>
+      </div>
+      <p class="muted">Prowizja i opłaty to wartości orientacyjne. Wpisz stawki z cennika Allegro dla swojej kategorii.</p>
+      <button class="glowny" id="btn-kalk">Policz</button>
+      <div class="wynik-kalk" id="wynik-kalk"></div>
+    </div>
+  </section>
+
+  <section data-tab="dane" hidden>
+    <div class="karta">
+      <h2>Wczytaj oferty z pliku CSV</h2>
+      <p class="muted">Pierwszy wiersz to nagłówek. Wymagane kolumny: <b>tytul, cena, sprzedane</b>.
+        Opcjonalnie: <b>fraza, kategoria, dni, ocena, opinie, sprzedawca, url</b>.
+        <b>dni</b> to liczba dni, przez które oferta była aktywna (domyślnie 30) - bez tego wskaźnik dzienny będzie niedokładny.
+        Separator: <code>;</code> lub <code>,</code>. Zapisz plik jako CSV UTF-8.</p>
+      <p><input type="file" id="plik" accept=".csv,text/csv"></p>
+      <p><button class="glowny" id="btn-import">Wczytaj</button>
+        <button class="drugi" id="btn-demo">Wczytaj dane przykładowe</button></p>
+      <pre class="muted" style="overflow-x:auto">tytul;fraza;kategoria;cena;sprzedane;dni;sprzedawca;url
+Etui iPhone 15 silikon;etui iphone;telefony;24,99;310;30;sklep-x;https://allegro.pl/oferta/...</pre>
+    </div>
+  </section>
+</main>
+
+<div id="komunikat" hidden></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = (n, d = 2) => Number(n).toLocaleString("pl-PL", {minimumFractionDigits: d, maximumFractionDigits: d});
+const bezpieczny = (url) => /^https?:\/\//.test(url || "");
+
+function pokazKomunikat(tekst) {
+  const k = $("#komunikat");
+  k.textContent = tekst;
+  k.hidden = false;
+  clearTimeout(pokazKomunikat.t);
+  pokazKomunikat.t = setTimeout(() => (k.hidden = true), 3500);
+}
+
+async function api(url, opcje) {
+  const odpowiedz = await fetch(url, opcje);
+  const dane = await odpowiedz.json();
+  if (!odpowiedz.ok) throw new Error(dane.blad || "Błąd serwera");
+  return dane;
+}
+
+function pokaz(tab) {
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("aktywna", b.dataset.tab === tab));
+  document.querySelectorAll("section[data-tab]").forEach((s) => (s.hidden = s.dataset.tab !== tab));
+  if (tab === "analiza") ladujFrazy().catch(blad);
+}
+
+function blad(e) {
+  pokazKomunikat(e.message || String(e));
+}
+
+async function odswiezListeFraz() {
+  const frazy = await api("/api/frazy");
+  const obecna = $("#fraza").value;
+  $("#fraza").innerHTML = `<option value="">wszystkie</option>` +
+    frazy.map((f) => `<option value="${esc(f.fraza)}">${esc(f.fraza)}</option>`).join("");
+  $("#fraza").value = obecna;
+  return frazy;
+}
+
+async function szukaj() {
+  const p = new URLSearchParams({
+    q: $("#q").value,
+    fraza: $("#fraza").value,
+    cena_min: $("#cena_min").value,
+    cena_max: $("#cena_max").value,
+    min_dziennie: $("#min_dziennie").value,
+    sortuj: $("#sortuj").value,
+  });
+  const oferty = await api("/api/oferty?" + p);
+  $("#licznik").textContent = `Znaleziono: ${oferty.length}`;
+  $("#wyniki tbody").innerHTML = oferty.length
+    ? oferty.map((o) => `<tr>
+        <td>${bezpieczny(o.url) ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.tytul)}</a>` : esc(o.tytul)}</td>
+        <td>${esc(o.fraza)}</td>
+        <td class="liczba">${fmt(o.cena)} zł</td>
+        <td class="liczba">${o.sprzedane}</td>
+        <td class="liczba">${fmt(o.dziennie)}</td>
+        <td class="liczba">${fmt(o.przychod, 0)} zł</td>
+        <td class="liczba">${o.ocena ?? "–"}</td>
+        <td>${esc(o.sprzedawca)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="8" class="muted">Brak wyników. Zmień filtry albo wczytaj dane w zakładce „Dane”.</td></tr>`;
+}
+
+async function ladujFrazy() {
+  const frazy = await odswiezListeFraz();
+  $("#frazy tbody").innerHTML = frazy.length
+    ? frazy.map((f) => `<tr class="klik" data-fraza="${esc(f.fraza)}">
+        <td><b>${esc(f.fraza)}</b></td>
+        <td class="liczba">${f.liczba_ofert}</td>
+        <td class="liczba">${f.sprzedane_lacznie}</td>
+        <td class="liczba">${fmt(f.sprzedaz_dziennie_lacznie)}</td>
+        <td class="liczba">${fmt(f.sprzedaz_dziennie_na_oferte)}</td>
+        <td class="liczba">${fmt(f.mediana_ceny)} zł</td>
+      </tr>`).join("")
+    : `<tr><td colspan="6" class="muted">Brak danych. Wczytaj plik CSV w zakładce „Dane”.</td></tr>`;
+}
+
+async function liczZysk() {
+  const p = new URLSearchParams({
+    cena: $("#k_cena").value,
+    koszt: $("#k_koszt").value,
+    wysylka: $("#k_wysylka").value,
+    prowizja: $("#k_prowizja").value,
+    stala: $("#k_stala").value,
+  });
+  const w = await api("/api/kalkulator?" + p);
+  const klasa = w.zysk >= 0 ? "zysk-dodatni" : "zysk-ujemny";
+  $("#wynik-kalk").innerHTML = `Prowizja: ${fmt(w.prowizja)} zł<br>
+    Zysk na sztukę: <span class="${klasa}">${fmt(w.zysk)} zł</span><br>
+    Marża: ${fmt(w.marza_proc, 1)} %`;
+}
+
+async function importuj() {
+  const plik = $("#plik").files[0];
+  if (!plik) return pokazKomunikat("Najpierw wybierz plik CSV");
+  const wynik = await api("/api/import", {
+    method: "POST",
+    headers: {"Content-Type": "text/csv; charset=utf-8"},
+    body: await plik.text(),
+  });
+  pokazKomunikat(`Wczytano ofert: ${wynik.zaimportowano}`);
+  await odswiezListeFraz();
+}
+
+async function danePrzykladowe() {
+  const wynik = await api("/api/demo", {method: "POST"});
+  pokazKomunikat(wynik.dodano ? `Dodano dane przykładowe: ${wynik.dodano}` : "Baza nie jest pusta - dane przykładowe nie zostały dodane");
+  await odswiezListeFraz();
+}
+
+document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => pokaz(b.dataset.tab)));
+$("#btn-szukaj").onclick = () => szukaj().catch(blad);
+$("#btn-kalk").onclick = () => liczZysk().catch(blad);
+$("#btn-import").onclick = () => importuj().catch(blad);
+$("#btn-demo").onclick = () => danePrzykladowe().catch(blad);
+$("#q").addEventListener("keydown", (e) => e.key === "Enter" && szukaj().catch(blad));
+$("#frazy").addEventListener("click", (e) => {
+  const wiersz = e.target.closest("tr[data-fraza]");
+  if (!wiersz) return;
+  $("#fraza").value = wiersz.dataset.fraza;
+  pokaz("szukaj");
+  szukaj().catch(blad);
+});
+
+odswiezListeFraz().then(() => szukaj()).catch(blad);
+</script>
+</body>
+</html>

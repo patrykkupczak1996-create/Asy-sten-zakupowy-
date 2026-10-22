@@ -12,3 +12,6 @@ wynik_pomiaru.png
 wymiary.json
 rektyfikacja*.png
 marker_*.png
+
+# Bestsellery Allegro - baza lokalna
+allegro_bestsellery/bestsellery.sqlite3
