@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block tytul %}Panel — {{ k.inwestycja.nazwa }}{% endblock %}
+{% block glowa %}<meta name="robots" content="noindex">{% endblock %}
+{% block naglowek %}
+<header class="panel-top"><div class="wrap">
+  <a class="marka" href="{{ url_for('panel') }}">Panel cen</a>
+  {% if session.zalogowany %}
+  <a href="{{ url_for('panel') }}">Ceny i statusy</a>
+  <a href="{{ url_for('panel_lokal') }}">Dodaj lokal</a>
+  <a href="{{ url_for('panel_zapytania') }}">Zapytania</a>
+  <a href="{{ url_for('strona_glowna') }}" target="_blank" style="margin-left:auto">Zobacz stronę ↗</a>
+  <form method="post" action="{{ url_for('wyloguj') }}" style="margin:0"><input type="hidden" name="csrf" value="{{ csrf() }}"><button>Wyloguj</button></form>
+  {% endif %}
+</div></header>
+{% endblock %}
+{% block tresc %}
+<section style="padding-top:28px"><div class="wrap">
+  {% with wiadomosci = get_flashed_messages(with_categories=true) %}{% for kat, w in wiadomosci %}<p class="komunikat {{ kat }}" role="status">{{ w }}</p>{% endfor %}{% endwith %}
+  {% block panel %}{% endblock %}
+</div></section>
+{% endblock %}
+{% block stopka %}{% endblock %}

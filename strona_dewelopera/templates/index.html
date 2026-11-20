@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% from "_makra.html" import plan, adres with context %}
+{% set inw = k.inwestycja %}
+{% block tytul %}{{ inw.nazwa }} — jawne ceny domów{% if p.min_m2 %} od {{ p.min_m2|zl }}/m²{% endif %}{% endblock %}
+{% block opis %}{{ inw.nazwa }}: {{ p.wszystkie }} {{ inw.rodzaj_zabudowy }}{% if inw.polozenie %}, {{ inw.polozenie }}{% endif %}.{% if p.min_m2 %} Ceny od {{ p.min_m2|zl }} za m² brutto.{% endif %} Pełny cennik z historią cen.{% endblock %}
+
+{% block glowa %}
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@graph": [
+    {"@type": "Organization", "@id": adres_strony ~ "/#firma", "name": k.firma.pelna_nazwa,
+     "alternateName": k.firma.krotka_nazwa, "taxID": k.firma.nip, "telephone": k.kontakt.telefon,
+     "email": k.kontakt.email_publiczny, "url": adres_strony,
+     "address": {"@type": "PostalAddress", "streetAddress": k.firma.siedziba.ulica ~ " " ~ k.firma.siedziba.nr_nieruchomosci,
+                 "postalCode": k.firma.siedziba.kod_pocztowy, "addressLocality": k.firma.siedziba.miejscowosc, "addressCountry": "PL"}},
+    {"@type": "WebSite", "@id": adres_strony ~ "/#strona", "url": adres_strony, "name": inw.nazwa, "inLanguage": "pl",
+     "publisher": {"@id": adres_strony ~ "/#firma"}, "dateModified": p.aktualizacja},
+    {"@type": "ItemList", "name": "Cennik — " ~ inw.nazwa, "itemListElement": oferty}
+  ]
+}|tojson }}
+</script>
+{% endblock %}
+
+{% block tresc %}
+<div class="hero"><div class="wrap">
+  <div class="hero-tekst">
+    <div>
+      <p class="eyebrow">{{ inw.rodzaj_zabudowy }}{% if inw.polozenie %} · {{ inw.polozenie }}{% endif %}</p>
+      <h1>{{ inw.nazwa }}</h1>
+    </div>
+    <p class="odpowiedz">
+      {{ inw.nazwa }} to <strong>{{ p.wszystkie }} {{ inw.rodzaj_zabudowy }}</strong> w miejscowości {{ inw.adres.miejscowosc }}{% if inw.polozenie %} ({{ inw.polozenie }}){% endif %}.
+      {% if p.dostepne %}Wolnych jest <strong>{{ p.dostepne }}</strong>{% if p.min_cena %}, w cenach <strong class="mono">{{ p.min_cena|zl }} – {{ p.max_cena|zl }}</strong> brutto{% endif %}.{% else %}Obecnie nie ma wolnych domów.{% endif %}
+      Wszystkie ceny, także domów sprzedanych, są jawne i co noc trafiają do portalu dane.gov.pl.
+    </p>
+  </div>
+  {{ plan(lokale) }}
+  <dl class="fakty">
+    <div><dt>Cena za m² (oferta)</dt><dd>{% if p.min_m2 %}{{ p.min_m2|zl(waluta=False) }}{% if p.max_m2 != p.min_m2 %}–{{ p.max_m2|zl(waluta=False) }}{% endif %} zł{% else %}—{% endif %}</dd></div>
+    <div><dt>Dostępne</dt><dd>{{ p.dostepne }} z {{ p.wszystkie }}</dd></div>
+    <div><dt>Sprzedane</dt><dd>{{ p.sprzedane }}</dd></div>
+    <div><dt>Ostatnia zmiana cen</dt><dd>{{ p.aktualizacja|data_pl }}</dd></div>
+  </dl>
+</div></div>
+
+<section id="cennik"><div class="wrap">
+  <div class="sekcja-glowka">
+    <h2>Cennik</h2>
+    <p>Ceny brutto. Cena domu = cena za m² × powierzchnia użytkowa. Sprzedane domy zostają w cenniku, a przy każdym domu jest pełna historia ceny.</p>
+  </div>
+  <table class="cennik">
+    <thead><tr>
+      <th>Dom</th><th class="num">Pow. użytkowa</th><th class="num">Działka</th><th class="num">Pokoje</th>
+      <th class="num">Cena za m²</th><th class="num">Cena domu</th><th class="num">Z dodatkami</th><th>Status</th>
+    </tr></thead>
+    <tbody>
+    {% for l in lokale %}
+      <tr class="{{ l.status }}">
+        <td><a class="ozn" href="{{ url_for('lokal', oznaczenie=l.oznaczenie) }}">{{ l.oznaczenie }}</a><span class="pod">{{ l.termin or '' }}</span></td>
+        <td class="cena" data-l="Pow. użytkowa">{{ l.powierzchnia|m2 }}</td>
+        <td class="cena" data-l="Działka">{{ l.dzialka|m2 if l.dzialka else '—' }}</td>
+        <td class="cena" data-l="Pokoje">{{ l.pokoje or '—' }}</td>
+        <td class="cena" data-l="Cena za m²">{{ l.cena_m2_gr|zl }}</td>
+        <td class="cena" data-l="Cena domu"><strong>{{ l.cena_gr|zl }}</strong></td>
+        <td class="cena" data-l="Z dodatkami">{{ l.cena_z_dodatkami_gr|zl }}</td>
+        <td data-l="Status"><span class="status {{ l.status }}">{{ l.status }}</span> <a class="pod" href="{{ url_for('lokal', oznaczenie=l.oznaczenie) }}#historia">historia ceny</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="przypis">„Z dodatkami” obejmuje płatne dodatki i opłaty (np. miejsce postojowe, przyłącza). Szczegóły na stronie każdego domu.
+    Dane dla dane.gov.pl: <a href="{{ url_for('dane', plik='data.xml') }}">data.xml</a>.
+    {% if inw.prospekt %}<a href="{{ url_for('prospekt') }}">Prospekt informacyjny (PDF)</a>.{% endif %}</p>
+</div></section>
+
+{% if inw.standard %}
+<section id="standard"><div class="wrap dwie">
+  <div>
+    <h2>Standard</h2>
+    <p class="odpowiedz">Każdy dom w inwestycji {{ inw.nazwa }} ma:</p>
+  </div>
+  <div class="karta"><ul class="lista-std">{% for s in inw.standard[:8] %}<li>{{ s }}</li>{% endfor %}</ul></div>
+</div></section>
+{% endif %}
+
+<section id="lokalizacja"><div class="wrap dwie">
+  <div>
+    <h2>Lokalizacja</h2>
+    <p class="odpowiedz">{{ adres(inw.adres) }}{% if inw.polozenie %} — {{ inw.polozenie }}{% endif %}.</p>
+    {% if inw.mapa %}
+    <iframe class="mapa" loading="lazy" title="Mapa inwestycji"
+      src="https://www.openstreetmap.org/export/embed.html?bbox={{ inw.mapa.lon - 0.012 }},{{ inw.mapa.lat - 0.007 }},{{ inw.mapa.lon + 0.012 }},{{ inw.mapa.lat + 0.007 }}&layer=mapnik&marker={{ inw.mapa.lat }},{{ inw.mapa.lon }}"></iframe>
+    <p class="przypis"><a href="https://www.openstreetmap.org/?mlat={{ inw.mapa.lat }}&mlon={{ inw.mapa.lon }}#map=16/{{ inw.mapa.lat }}/{{ inw.mapa.lon }}" rel="noopener">Otwórz większą mapę</a></p>
+    {% endif %}
+  </div>
+  {% if inw.odleglosci %}
+  <div class="karta">
+    <h3>Odległości</h3>
+    <table class="odl">{% for co, ile in inw.odleglosci[:6] %}<tr><td>{{ co }}</td><td>{{ ile }}</td></tr>{% endfor %}</table>
+  </div>
+  {% endif %}
+</div></section>
+
+{% if zdjecia %}
+<section id="budowa"><div class="wrap">
+  <div class="sekcja-glowka"><h2>Z budowy</h2><p>Postęp prac, od najnowszych zdjęć.</p></div>
+  <div class="budowa">
+    {% for z in zdjecia %}
+    <figure><img src="{{ url_for('static', filename='budowa/' ~ z.plik) }}" alt="{{ z.etap }} — {{ z.data|data_pl }}" loading="lazy"><figcaption><strong>{{ z.etap }}</strong> · <span class="mono">{{ z.data|data_pl }}</span></figcaption></figure>
+    {% endfor %}
+  </div>
+</div></section>
+{% endif %}
+
+<section id="pytania" class="faq"><div class="wrap">
+  <h2>Pytania kupujących</h2>
+  {% for q, a in pytania %}
+  <details{% if loop.first %} open{% endif %}><summary><h3>{{ q }}</h3></summary><div><p>{{ a }}</p></div></details>
+  {% endfor %}
+</div></section>
+<script type="application/ld+json">
+{{ {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": faq_ld}|tojson }}
+</script>
+
+{% include "_kontakt.html" %}
+{% endblock %}

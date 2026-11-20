@@ -1,0 +1,19 @@
+# {{ k.inwestycja.nazwa }}
+
+> {{ k.inwestycja.rodzaj_zabudowy|capitalize }} — {{ k.inwestycja.adres.miejscowosc }}{% if k.inwestycja.polozenie %}, {{ k.inwestycja.polozenie }}{% endif %}. Deweloper: {{ k.firma.pelna_nazwa }} (NIP {{ k.firma.nip }}). Jawne ceny wszystkich domów z historią zmian, codziennie przekazywane do dane.gov.pl.
+
+Stan na {{ p.aktualizacja or dzis }}: {{ p.wszystkie }} domów, dostępnych {{ p.dostepne }}, sprzedanych {{ p.sprzedane }}.{% if p.min_m2 %} Ceny w ofercie: {{ p.min_m2|zl }}–{{ p.max_m2|zl }} za m² brutto.{% endif %}
+
+## Strony
+
+- [Cennik i wizualizacja]({{ adres_strony }}/): wszystkie domy, ceny brutto, statusy
+{% for l in lokale %}- [Dom {{ l.oznaczenie }}]({{ adres_strony }}/dom/{{ l.oznaczenie }}): {{ l.powierzchnia|m2 }}, {{ l.cena_m2_gr|zl }}/m², {{ l.cena_gr|zl }}, {{ l.status }}
+{% endfor %}
+## Dane
+
+- [Dane o cenach dla dane.gov.pl]({{ adres_strony }}/dane/data.xml)
+{% if k.inwestycja.prospekt %}- [Prospekt informacyjny]({{ adres_strony }}/prospekt)
+{% endif %}
+## Kontakt
+
+Telefon {{ k.kontakt.telefon }}{% if k.kontakt.email_publiczny %}, e-mail {{ k.kontakt.email_publiczny }}{% endif %}.

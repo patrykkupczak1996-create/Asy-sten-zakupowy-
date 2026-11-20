@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block tytul %}{% if kod == 404 %}Nie ma takiej strony{% else %}Coś poszło nie tak{% endif %} — {{ k.inwestycja.nazwa }}{% endblock %}
+{% block tresc %}
+<section><div class="wrap">
+  <p class="eyebrow">Błąd {{ kod }}</p>
+  <h1>{% if kod == 404 %}Nie ma takiej strony{% else %}Coś poszło nie tak{% endif %}</h1>
+  <p>{{ opis or "Wróć do cennika — tam są wszystkie domy i ich ceny." }}</p>
+  <p><a class="btn" href="{{ url_for('strona_glowna') }}#cennik">Zobacz cennik</a></p>
+</div></section>
+{% endblock %}

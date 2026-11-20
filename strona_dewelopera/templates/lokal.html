@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% from "_makra.html" import plan with context %}
+{% block tytul %}Dom {{ l.oznaczenie }} — {{ l.cena_gr|zl if l.status != 'sprzedany' else 'sprzedany' }} — {{ k.inwestycja.nazwa }}{% endblock %}
+{% block opis %}Dom {{ l.oznaczenie }} w inwestycji {{ k.inwestycja.nazwa }}: {{ l.powierzchnia|m2 }}{% if l.dzialka %}, działka {{ l.dzialka|m2 }}{% endif %}. Cena {{ l.cena_m2_gr|zl }}/m² brutto, status: {{ l.status }}. Historia ceny.{% endblock %}
+{% block glowa %}
+<script type="application/ld+json">
+{{ {"@context": "https://schema.org", "@graph": [
+  {"@type": "BreadcrumbList", "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": k.inwestycja.nazwa, "item": adres_strony ~ "/"},
+    {"@type": "ListItem", "position": 2, "name": "Dom " ~ l.oznaczenie, "item": adres_strony ~ "/dom/" ~ l.oznaczenie}]}
+]}|tojson }}
+</script>
+{% endblock %}
+{% block tresc %}
+<div class="wrap">
+  <nav aria-label="Okruszki" class="przypis" style="margin-top:20px"><a href="{{ url_for('strona_glowna') }}">{{ k.inwestycja.nazwa }}</a> / <a href="{{ url_for('strona_glowna') }}#cennik">Cennik</a> / Dom {{ l.oznaczenie }}</nav>
+  <div class="dom-glowka">
+    <div>
+      <p class="eyebrow">{{ l.rodzaj }}{% if l.budynek %} · {{ l.budynek }}{% endif %}</p>
+      <h1>Dom {{ l.oznaczenie }}</h1>
+      <p class="odpowiedz">Dom {{ l.oznaczenie }} ma <strong>{{ l.powierzchnia|m2 }}</strong> powierzchni użytkowej{% if l.pokoje %} i {{ l.pokoje }} pokoi{% endif %}{% if l.dzialka %}, na działce {{ l.dzialka|m2 }}{% endif %}.
+        {% if l.cena_gr %}Cena: <strong class="mono">{{ l.cena_gr|zl }}</strong> brutto ({{ l.cena_m2_gr|zl }} za m²), obowiązuje od {{ l.cena_od|data_pl }}.{% endif %}
+        Status: {{ l.status }}.</p>
+      <dl class="parametry">
+        <div><dt>Powierzchnia użytkowa</dt><dd>{{ l.powierzchnia|m2 }}</dd></div>
+        {% if l.dzialka %}<div><dt>Działka</dt><dd>{{ l.dzialka|m2 }}</dd></div>{% endif %}
+        {% if l.pokoje %}<div><dt>Pokoje</dt><dd>{{ l.pokoje }}</dd></div>{% endif %}
+        {% if l.pietro %}<div><dt>Piętro</dt><dd>{{ l.pietro }}</dd></div>{% endif %}
+        {% if l.balkon %}<div><dt>Balkon / loggia / taras</dt><dd>{{ l.balkon }}</dd></div>{% endif %}
+        {% if l.ogrodek %}<div><dt>Ogródek</dt><dd>{{ l.ogrodek|m2 }}</dd></div>{% endif %}
+        {% if l.termin %}<div><dt>Termin oddania</dt><dd>{{ l.termin }}</dd></div>{% endif %}
+      </dl>
+      {{ plan(lokale, aktywny=l) }}
+    </div>
+    <aside class="karta dom-cena" aria-label="Cena">
+      <span class="status {{ l.status }}">{{ l.status }}</span>
+      <p class="duza">{{ l.cena_gr|zl }}</p>
+      <p style="margin:0" class="mono">{{ l.cena_m2_gr|zl }} / m² brutto</p>
+      <p class="przypis" style="margin-top:4px">obowiązuje od {{ l.cena_od|data_pl }}</p>
+      {% if l.dodatki %}
+      <table class="historia" style="margin:12px 0">
+        {% for d in l.dodatki %}<tr><td style="font-family:var(--font-body)">{{ d.oznaczenie }}</td><td>{% if d.w_cenie %}w cenie{% else %}{{ d.cena_gr|zl }}{% endif %}</td></tr>{% endfor %}
+        <tr><td style="font-family:var(--font-body)"><strong>Razem z dodatkami</strong></td><td><strong>{{ l.cena_z_dodatkami_gr|zl }}</strong></td></tr>
+      </table>
+      {% endif %}
+      {% if l.status != 'sprzedany' %}<a class="btn" href="#kontakt">Zapytaj o ten dom</a>{% endif %}
+      {% if k.inwestycja.prospekt %}<p class="przypis"><a href="{{ url_for('prospekt') }}">Prospekt informacyjny (PDF)</a></p>{% endif %}
+    </aside>
+  </div>
+
+  {% if l.rzut %}
+  <section id="rzuty" style="padding-bottom:0">
+    <h2>Rzuty</h2>
+    <div class="budowa">
+      {% for r in l.rzut.split(',') %}<figure><img src="{{ url_for('static', filename='rzuty/' ~ r.strip()) }}" alt="Rzut domu {{ l.oznaczenie }}" loading="lazy" style="object-fit:contain;background:#fff"></figure>{% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section id="historia">
+    <h2>Historia ceny</h2>
+    <p class="przypis">Każda zmiana ceny jest zapisana z datą, od której obowiązuje. Ceny brutto.</p>
+    {% if historia|length > 1 %}
+      {% set ceny = historia|map(attribute='cena_m2_gr')|list %}
+      {% set lo = ceny|min %}{% set hi = ceny|max %}{% set zakres = (hi - lo) or 1 %}
+      {% set n = historia|length %}
+      <svg class="wykres" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Wykres zmian ceny za m²">
+        {# wykres schodkowy: cena obowiązuje aż do następnej zmiany #}
+        {% set pts = [] %}{% set kroki = historia|reverse|list %}
+        {% for h in kroki %}{% set x = 10 + loop.index0 * 580 / n %}{% set y = 100 - (h.cena_m2_gr - lo) / zakres * 80 %}{% if not loop.first %}{% set py = 100 - (loop.previtem.cena_m2_gr - lo) / zakres * 80 %}{% if pts.append(x ~ ',' ~ py) %}{% endif %}{% endif %}{% if pts.append(x ~ ',' ~ y) %}{% endif %}{% if loop.last %}{% if pts.append('590,' ~ y) %}{% endif %}{% endif %}{% endfor %}
+        <polyline points="{{ pts|join(' ') }}" fill="none" stroke="var(--marka)" stroke-width="3" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+      </svg>
+    {% endif %}
+    <table class="historia">
+      <thead><tr><th>Obowiązuje od</th><th>Cena za m²</th><th>Cena domu</th></tr></thead>
+      <tbody>{% for h in historia %}<tr><td>{{ h.data_od|data_pl }}</td><td>{{ h.cena_m2_gr|zl }}</td><td>{{ h.cena_gr|zl }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </section>
+</div>
+{% include "_kontakt.html" %}
+{% endblock %}
