@@ -15,3 +15,9 @@ marker_*.png
 
 # Bestsellery Allegro - baza lokalna
 allegro_bestsellery/bestsellery.sqlite3
+
+# Strona dewelopera - dane lokalne i sekrety
+strona_dewelopera/strona.sqlite3
+strona_dewelopera/dane/
+strona_dewelopera/.haslo_panelu
+strona_dewelopera/.sekret_sesji

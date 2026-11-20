@@ -1,0 +1,75 @@
+{%- set inw = k.inwestycja -%}
+{%- set firma = k.firma -%}
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block tytul %}{{ inw.nazwa }} — ceny domów{% endblock %}</title>
+<meta name="description" content="{% block opis %}{{ inw.nazwa }}: {{ inw.rodzaj_zabudowy }}{% if inw.polozenie %}, {{ inw.polozenie }}{% endif %}. Jawne ceny wszystkich domów, z historią zmian.{% endblock %}">
+<link rel="canonical" href="{{ adres_strony }}{{ request.path }}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ self.tytul() }}">
+<meta property="og:description" content="{{ self.opis() }}">
+<meta property="og:url" content="{{ adres_strony }}{{ request.path }}">
+<meta property="og:image" content="{{ adres_strony }}{{ url_for('static', filename=inw.wizualizacja) }}">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>:root { --marka: {{ k.strona.kolor }}; }</style>
+{% block glowa %}{% endblock %}
+</head>
+<body>
+<a class="skip" href="#tresc">Przejdź do treści</a>
+{% block naglowek %}
+<header class="top">
+  <div class="wrap">
+    <a class="marka" href="{{ url_for('strona_glowna') }}">
+      {% if firma.logo %}<img src="{{ url_for('static', filename=firma.logo) }}" alt="{{ firma.krotka_nazwa }}">{% endif %}
+      <span>{{ inw.nazwa }}</span>
+    </a>
+    <nav aria-label="Główna">
+      <a href="{{ url_for('strona_glowna') }}#cennik">Cennik</a>
+      <a href="{{ url_for('strona_glowna') }}#standard">Standard</a>
+      <a href="{{ url_for('strona_glowna') }}#lokalizacja">Lokalizacja</a>
+      <a href="{{ url_for('strona_glowna') }}#pytania">Pytania</a>
+    </nav>
+    <a class="btn" href="tel:{{ k.kontakt.telefon|replace(' ', '') }}">{{ k.kontakt.telefon }}</a>
+  </div>
+</header>
+{% endblock %}
+<main id="tresc">
+{% block tresc %}{% endblock %}
+</main>
+{% block stopka %}
+<footer>
+  <div class="wrap">
+    <div class="kolumny">
+      <div>
+        <h3>{{ firma.pelna_nazwa }}</h3>
+        <p>{{ firma.siedziba.ulica }} {{ firma.siedziba.nr_nieruchomosci }}{% if firma.siedziba.nr_lokalu %}/{{ firma.siedziba.nr_lokalu }}{% endif %}, {{ firma.siedziba.kod_pocztowy }} {{ firma.siedziba.miejscowosc }}</p>
+        <p>NIP <span class="mono">{{ firma.nip }}</span>{% if firma.krs %} · KRS <span class="mono">{{ firma.krs }}</span>{% endif %}{% if firma.regon %} · REGON <span class="mono">{{ firma.regon }}</span>{% endif %}</p>
+      </div>
+      <div>
+        <h3>Biuro sprzedaży</h3>
+        {% for b in k.biura_sprzedazy %}
+        <p>{{ b.ulica }} {{ b.nr_nieruchomosci }}{% if b.nr_lokalu %}/{{ b.nr_lokalu }}{% endif %}, {{ b.kod_pocztowy }} {{ b.miejscowosc }}{% if b.godziny %}<br><small>{{ b.godziny }}</small>{% endif %}</p>
+        {% endfor %}
+        <p><a href="tel:{{ k.kontakt.telefon|replace(' ', '') }}">{{ k.kontakt.telefon }}</a>{% if k.kontakt.email_publiczny %} · <a href="mailto:{{ k.kontakt.email_publiczny }}">{{ k.kontakt.email_publiczny }}</a>{% endif %}</p>
+      </div>
+      <div>
+        <h3>Jawność cen</h3>
+        <p>{% if inw.prospekt %}<a href="{{ url_for('prospekt') }}">Prospekt informacyjny (PDF)</a>{% else %}Prospekt informacyjny — wkrótce{% endif %}</p>
+        <p><a href="{{ url_for('dane', plik='data.xml') }}">Dane o cenach dla dane.gov.pl</a></p>
+        <p><a href="https://dane.gov.pl" rel="noopener">Portal dane.gov.pl</a></p>
+      </div>
+    </div>
+    <p class="dol">Ceny brutto. Cennik ma charakter informacyjny zgodnie z ustawą o ochronie praw nabywcy lokalu mieszkalnego lub domu jednorodzinnego oraz Deweloperskim Funduszu Gwarancyjnym. · <a href="{{ url_for('logowanie') }}">Panel</a></p>
+  </div>
+</footer>
+{% endblock %}
+{% block skrypty %}{% endblock %}
+</body>
+</html>

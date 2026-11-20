@@ -1,0 +1,28 @@
+{% macro adres(a) -%}
+{{ a.ulica }} {{ a.nr_nieruchomosci }}{% if a.nr_lokalu %}/{{ a.nr_lokalu }}{% endif %}, {{ a.kod_pocztowy }} {{ a.miejscowosc }}
+{%- endmacro %}
+
+{% macro plan(lokale, aktywny=None) -%}
+{%- set inw = k.inwestycja -%}
+<figure class="plan" style="margin:0">
+  <img src="{{ url_for('static', filename=inw.wizualizacja) }}" alt="Wizualizacja inwestycji {{ inw.nazwa }} z zaznaczonymi domami" width="1600" height="900" fetchpriority="high">
+  <svg class="obrysy" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    {% for l in lokale if l.obrys %}
+    <a href="{{ url_for('lokal', oznaczenie=l.oznaczenie) }}" tabindex="-1">
+      <polygon class="obrys {{ l.status }}{% if aktywny and aktywny.id == l.id %} aktywny{% endif %}" points="{{ l.obrys }}" data-ozn="{{ l.oznaczenie }}"></polygon>
+    </a>
+    {% endfor %}
+  </svg>
+  {% for l in lokale if l.obrys %}{% set s = l.obrys|szczyt %}{% if s %}
+  <a class="metka {{ l.status }}{% if aktywny and aktywny.id == l.id %} aktywny{% endif %}" style="left:{{ s[0] }}%;top:{{ s[1] }}%;--i:{{ loop.index0 }}" href="{{ url_for('lokal', oznaczenie=l.oznaczenie) }}" data-ozn="{{ l.oznaczenie }}">
+    <b>{{ l.oznaczenie }}</b>
+    {% if l.status == 'sprzedany' %}sprzedany{% elif l.cena_m2_gr %}<span class="cena">{{ l.cena_m2_gr|zl }}/m²</span>{% if l.status == 'zarezerwowany' %}<br>rezerwacja{% endif %}{% endif %}
+  </a>
+  {% endif %}{% endfor %}
+</figure>
+<ul class="legenda">
+  <li style="--c:var(--dostepny)">dostępny</li>
+  <li style="--c:var(--zarezerwowany)">zarezerwowany</li>
+  <li style="--c:var(--sprzedany)">sprzedany</li>
+</ul>
+{%- endmacro %}

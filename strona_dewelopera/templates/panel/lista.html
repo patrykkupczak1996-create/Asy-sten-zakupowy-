@@ -1,0 +1,37 @@
+{% extends "panel/_baza.html" %}
+{% block panel %}
+<div class="sekcja-glowka">
+  <h1 style="font-size:2rem;margin:0">Ceny i statusy</h1>
+  <form method="post" action="{{ url_for('panel_eksport') }}" style="margin:0">
+    <input type="hidden" name="csrf" value="{{ csrf() }}">
+    <button class="btn cichy">Wyślij ceny do dane.gov.pl teraz</button>
+  </form>
+</div>
+<p class="uwaga">Wpisz nową cenę za m² i kliknij <strong>Zapisz</strong>. Stara cena zostaje w historii — tak wymaga ustawa.
+  Ceny trafiają do dane.gov.pl automatycznie każdej nocy.
+  {% if ostatni_eksport %}Ostatni plik: <strong class="mono">{{ ostatni_eksport.data|data_pl }}</strong> ({{ ostatni_eksport.utworzono }}).{% else %}<strong>Nie wysłano jeszcze żadnego pliku.</strong>{% endif %}
+  {% if nowe_zapytania %}<br><a href="{{ url_for('panel_zapytania') }}">Nowe zapytania z ostatnich 7 dni: {{ nowe_zapytania }}</a>{% endif %}</p>
+
+<form method="post">
+  <input type="hidden" name="csrf" value="{{ csrf() }}">
+  <table class="cennik panel-tabela" style="margin-top:16px">
+    <thead><tr><th>Lokal</th><th class="num">Pow.</th><th class="num">Obecna cena za m²</th><th class="num">Nowa cena za m² (zł)</th><th class="num">Cena lokalu</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for l in lokale %}
+    <tr class="{{ l.status }}">
+      <td><strong>{{ l.oznaczenie }}</strong></td>
+      <td class="cena" data-l="Pow.">{{ l.powierzchnia|m2 }}</td>
+      <td class="cena" data-l="Obecna cena za m²">{{ l.cena_m2_gr|zl }}<span class="pod">od {{ l.cena_od|data_pl }}</span></td>
+      <td class="cena" data-l="Nowa cena za m²"><input type="text" inputmode="decimal" name="cena_{{ l.id }}" placeholder="{{ l.cena_m2_gr|zl(waluta=False) }}" aria-label="Nowa cena za m² dla {{ l.oznaczenie }}"></td>
+      <td class="cena" data-l="Cena lokalu">{{ l.cena_gr|zl }}</td>
+      <td data-l="Status"><select name="status_{{ l.id }}" aria-label="Status {{ l.oznaczenie }}">{% for s in statusy %}<option{% if s == l.status %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></td>
+      <td><a href="{{ url_for('panel_lokal', lokal_id=l.id) }}">szczegóły</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">Nie ma jeszcze lokali. <a href="{{ url_for('panel_lokal') }}">Dodaj pierwszy</a>.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p><button class="btn">Zapisz</button></p>
+</form>
+{% endblock %}

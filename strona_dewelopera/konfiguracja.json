@@ -1,0 +1,94 @@
+{
+  "_uwaga": "PRZYKŁADOWE DANE. Podmień każdą wartość na dane klienta z listy 'co przygotować'. Pola z null są opcjonalne.",
+
+  "firma": {
+    "pelna_nazwa": "Przykładowy Deweloper Sp. z o.o.",
+    "forma_prawna": "spółka z ograniczoną odpowiedzialnością",
+    "krotka_nazwa": "Przykładowy Deweloper",
+    "nip": "0000000000",
+    "regon": null,
+    "krs": "0000000000",
+    "ceidg": null,
+    "siedziba": {
+      "wojewodztwo": "wielkopolskie",
+      "powiat": "wrzesiński",
+      "gmina": "Września",
+      "miejscowosc": "Września",
+      "ulica": "Przykładowa",
+      "nr_nieruchomosci": "1",
+      "nr_lokalu": null,
+      "kod_pocztowy": "62-300"
+    },
+    "logo": null
+  },
+
+  "biura_sprzedazy": [
+    {
+      "wojewodztwo": "wielkopolskie",
+      "powiat": "wrzesiński",
+      "gmina": "Września",
+      "miejscowosc": "Września",
+      "ulica": "Przykładowa",
+      "nr_nieruchomosci": "1",
+      "nr_lokalu": null,
+      "kod_pocztowy": "62-300",
+      "godziny": "po umówieniu telefonicznym"
+    }
+  ],
+  "sposob_kontaktu": "telefonicznie, e-mailem lub w biurze sprzedaży",
+
+  "inwestycja": {
+    "nazwa": "Domy przy Lipowej",
+    "rodzaj_zabudowy": "domy wolnostojące",
+    "polozenie": "8 km od centrum Wrześni",
+    "adres": {
+      "wojewodztwo": "wielkopolskie",
+      "powiat": "wrzesiński",
+      "gmina": "Września",
+      "miejscowosc": "Przykładowo",
+      "ulica": "Lipowa",
+      "nr_nieruchomosci": "dz. 123/4",
+      "kod_pocztowy": "62-300"
+    },
+    "mapa": {"lat": 52.3249, "lon": 17.5665},
+    "wizualizacja": "wizualizacja.svg",
+    "prospekt": null,
+    "standard": [
+      "pompa ciepła powietrze–woda",
+      "ogrzewanie podłogowe w całym domu",
+      "garaż w bryle domu",
+      "okna trzyszybowe",
+      "rekuperacja",
+      "instalacja pod fotowoltaikę"
+    ],
+    "odleglosci": [
+      ["szkoła podstawowa", "1,2 km"],
+      ["przedszkole", "1,4 km"],
+      ["sklep spożywczy", "800 m"],
+      ["przystanek autobusowy", "400 m"],
+      ["centrum Wrześni", "8 km"],
+      ["autostrada A2 (węzeł Września)", "6 km"]
+    ],
+    "budowa": []
+  },
+
+  "kontakt": {
+    "telefon": "+48 600 000 000",
+    "email_publiczny": "biuro@przyklad.pl",
+    "email_zapytania": "biuro@przyklad.pl",
+    "email_alarmy": "biuro@przyklad.pl"
+  },
+
+  "strona": {
+    "adres": "https://domylipowa.example",
+    "kolor": "#2F5D50"
+  },
+
+  "smtp": {
+    "_uwaga": "Opcjonalnie. Bez tego zapytania zapisują się tylko w panelu, a alarm eksportu trafia do logu.",
+    "host": null,
+    "port": 587,
+    "uzytkownik": null,
+    "nadawca": null
+  }
+}

@@ -1,0 +1,100 @@
+{% extends "panel/_baza.html" %}
+{% block panel %}
+<p><a href="{{ url_for('panel') }}">← Wszystkie lokale</a></p>
+<h1 style="font-size:2rem">{% if l %}Lokal {{ l.oznaczenie }}{% else %}Nowy lokal{% endif %}</h1>
+
+<form method="post" class="karta" id="dane">
+  <input type="hidden" name="csrf" value="{{ csrf() }}">
+  <input type="hidden" name="akcja" value="zapisz">
+  <div class="siatka-form">
+    <label>Oznaczenie lokalu <input name="oznaczenie" value="{{ l.oznaczenie if l else '' }}" required></label>
+    <label>Rodzaj <select name="rodzaj">{% for r in rodzaje %}<option{% if l and l.rodzaj == r %} selected{% endif %}>{{ r }}</option>{% endfor %}</select></label>
+    <label>Status <select name="status">{% for s in statusy %}<option{% if l and l.status == s %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+    <label>Budynek <input name="budynek" value="{{ l.budynek or '' if l else '' }}"></label>
+    <label>Powierzchnia użytkowa (m²) <input name="powierzchnia" inputmode="decimal" value="{{ l.powierzchnia if l else '' }}" required></label>
+    <label>Pokoje <input name="pokoje" inputmode="numeric" value="{{ l.pokoje or '' if l else '' }}"></label>
+    <label>Piętro (mieszkania) <input name="pietro" value="{{ l.pietro or '' if l else '' }}"></label>
+    <label>Balkon / loggia / taras <input name="balkon" value="{{ l.balkon or '' if l else '' }}"></label>
+    <label>Ogródek m² (mieszkania) <input name="ogrodek" inputmode="decimal" value="{{ l.ogrodek or '' if l else '' }}"></label>
+    <label>Działka m² (domy) <input name="dzialka" inputmode="decimal" value="{{ l.dzialka or '' if l else '' }}"></label>
+    <label>Termin oddania <input name="termin" value="{{ l.termin or '' if l else '' }}" placeholder="np. IV kwartał 2027"></label>
+    <label>Kolejność w cenniku <input name="kolejnosc" inputmode="numeric" value="{{ l.kolejnosc if l else 0 }}"></label>
+    <label>Rzuty (pliki w static/rzuty, po przecinku) <input name="rzut" value="{{ l.rzut or '' if l else '' }}" placeholder="a1-parter.png, a1-pietro.png"></label>
+    {% if not l %}<label>Cena za m² brutto (zł) <input name="cena" inputmode="decimal" required></label>{% endif %}
+  </div>
+
+  <h2 style="font-size:1.3rem;margin-top:24px">Zaznaczenie na wizualizacji</h2>
+  <p class="przypis">Klikaj kolejne narożniki domu na obrazie. Przerywane obrysy to inne lokale.</p>
+  <input type="hidden" name="obrys" id="obrys" value="{{ l.obrys or '' if l else '' }}">
+  <div class="edytor" id="edytor">
+    <img src="{{ url_for('static', filename=k.inwestycja.wizualizacja) }}" alt="" draggable="false">
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+      {% for x in inne if x.obrys and (not l or x.id != l.id) %}<polygon class="inny" points="{{ x.obrys }}"/>{% endfor %}
+      <polygon id="wielokat" points=""/><g id="punkty"></g>
+    </svg>
+  </div>
+  <p><button type="button" class="btn cichy" id="cofnij">Cofnij punkt</button> <button type="button" class="btn cichy" id="wyczysc">Wyczyść</button></p>
+  <p><button class="btn">{% if l %}Zapisz zmiany{% else %}Dodaj lokal{% endif %}</button></p>
+</form>
+
+{% if l %}
+<section style="padding:32px 0 0">
+  <h2 style="font-size:1.4rem">Dodatki i opłaty</h2>
+  <p class="przypis">Miejsce postojowe, garaż, komórka, ogródek, przyłącza itp. — każdy z ceną brutto albo „w cenie”. Zmiana ceny też zostaje w historii.</p>
+  <table class="cennik panel-tabela">
+    <thead><tr><th>Rodzaj</th><th>Oznaczenie</th><th class="num">Cena</th><th>Zmień cenę</th><th></th></tr></thead>
+    <tbody>
+    {% for d in l.dodatki %}
+    <tr>
+      <td data-l="Rodzaj">{{ d.rodzaj }}</td><td data-l="Oznaczenie">{{ d.oznaczenie }}</td>
+      <td class="cena" data-l="Cena">{% if d.w_cenie %}w cenie{% else %}{{ d.cena_gr|zl }}{% endif %}<span class="pod">od {{ d.data_od|data_pl }}</span></td>
+      <td><form method="post" style="display:flex;gap:8px;align-items:center;margin:0">
+        <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="akcja" value="cena_dodatku"><input type="hidden" name="dodatek_id" value="{{ d.id }}">
+        <input type="text" name="cena_dodatku" inputmode="decimal" placeholder="zł">
+        <label style="display:flex;gap:4px;font-weight:400"><input type="checkbox" name="w_cenie" style="width:auto"> w cenie</label>
+        <button class="btn cichy">Zapisz</button></form></td>
+      <td><form method="post" style="margin:0" onsubmit="return confirm('Usunąć ten dodatek?')">
+        <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="akcja" value="usun_dodatek"><input type="hidden" name="dodatek_id" value="{{ d.id }}">
+        <button class="btn cichy">Usuń</button></form></td>
+    </tr>
+    {% else %}<tr><td colspan="5">Brak dodatków.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  <form method="post" class="karta siatka-form" style="margin-top:16px;align-items:end">
+    <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="akcja" value="dodaj_dodatek">
+    <label>Rodzaj <select name="rodzaj">{% for r in rodzaje_dodatkow %}<option>{{ r }}</option>{% endfor %}</select></label>
+    <label>Oznaczenie / opis <input name="oznaczenie_dodatku" placeholder="np. MP-3, Przyłącza mediów"></label>
+    <label>Cena brutto (zł) <input name="cena_dodatku" inputmode="decimal"></label>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="w_cenie" style="width:auto"> w cenie lokalu</label>
+    <button class="btn">Dodaj</button>
+  </form>
+</section>
+
+<section style="padding:32px 0 0">
+  <h2 style="font-size:1.4rem">Historia ceny</h2>
+  <table class="historia"><thead><tr><th>Od</th><th>Cena za m²</th><th>Cena lokalu</th></tr></thead>
+  <tbody>{% for h in historia %}<tr><td>{{ h.data_od|data_pl }}</td><td>{{ h.cena_m2_gr|zl }}</td><td>{{ h.cena_gr|zl }}</td></tr>{% endfor %}</tbody></table>
+</section>
+{% endif %}
+{% endblock %}
+{% block skrypty %}
+<script>
+(() => {
+  const pole = document.getElementById('obrys'), ed = document.getElementById('edytor');
+  const wiel = document.getElementById('wielokat'), grupa = document.getElementById('punkty');
+  let pkt = pole.value.trim() ? pole.value.trim().split(/\s+/).map(p => p.split(',').map(Number)) : [];
+  const rysuj = () => {
+    const t = pkt.map(p => p.map(v => v.toFixed(2)).join(',')).join(' ');
+    pole.value = t; wiel.setAttribute('points', t);
+    grupa.innerHTML = pkt.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="0.6"/>`).join('');
+  };
+  ed.addEventListener('click', e => {
+    const r = ed.getBoundingClientRect();
+    pkt.push([(e.clientX - r.left) / r.width * 100, (e.clientY - r.top) / r.height * 100]); rysuj();
+  });
+  document.getElementById('cofnij').onclick = () => { pkt.pop(); rysuj(); };
+  document.getElementById('wyczysc').onclick = () => { pkt = []; rysuj(); };
+  rysuj();
+})();
+</script>
+{% endblock %}

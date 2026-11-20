@@ -1,0 +1,14 @@
+{% extends "panel/_baza.html" %}
+{% block panel %}
+<h1 style="font-size:2rem">Zapytania ze strony</h1>
+<table class="cennik">
+  <thead><tr><th>Kiedy</th><th>Kto</th><th>Kontakt</th><th>Lokal</th><th>Wiadomość</th></tr></thead>
+  <tbody>
+  {% for z in zapytania %}
+  <tr><td class="mono" data-l="Kiedy">{{ z.utworzono }}</td><td data-l="Kto">{{ z.imie }}</td><td data-l="Kontakt">{{ z.kontakt }}</td><td data-l="Lokal">{{ z.oznaczenie or '—' }}</td><td data-l="Wiadomość" style="white-space:pre-wrap">{{ z.tresc }}</td></tr>
+  {% else %}
+  <tr><td colspan="5">Nie ma jeszcze zapytań.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

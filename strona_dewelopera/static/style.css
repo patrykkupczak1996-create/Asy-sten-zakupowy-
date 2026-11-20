@@ -1,0 +1,186 @@
+/* Domy z jawnymi cenami — system wizualny
+   Teza: cena wisi na domu jak metka. Ceny zawsze krojem mono (tabelaryczne cyfry) — jak w księdze. */
+:root {
+  --tlo: #f1f5f4;
+  --papier: #ffffff;
+  --atrament: #15212b;
+  --szary: #56636e;
+  --linia: #d6dee1;
+  --marka: #2f5d50;          /* nadpisywane z konfiguracji */
+  --dostepny: #23704f;
+  --zarezerwowany: #a8690f;
+  --sprzedany: #87919b;
+  --blad: #b3261e;
+  --r: 14px;
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-body: "Manrope", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation: none !important; transition: none !important; } }
+body { margin: 0; background: var(--tlo); color: var(--atrament); font: 16px/1.6 var(--font-body); }
+img, svg { max-width: 100%; display: block; }
+a { color: var(--marka); text-underline-offset: 3px; }
+:focus-visible { outline: 3px solid var(--marka); outline-offset: 3px; border-radius: 4px; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 .5em; }
+h1 { font-size: clamp(2.2rem, 5vw, 4rem); font-weight: 700; }
+h2 { font-size: clamp(1.6rem, 3vw, 2.4rem); font-weight: 650; }
+h3 { font-size: 1.2rem; font-weight: 650; }
+.mono, .cena { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.wrap { width: min(1180px, 100% - 32px); margin-inline: auto; }
+.skip { position: absolute; left: -999px; } .skip:focus { left: 16px; top: 16px; z-index: 10; background: #fff; padding: 8px 12px; }
+
+/* nagłówek */
+.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--tlo) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--linia); }
+.top .wrap { display: flex; align-items: center; gap: 24px; height: 64px; }
+.marka { font: 700 1.1rem var(--font-display); color: var(--atrament); text-decoration: none; display: flex; align-items: center; gap: 10px; }
+.marka img { height: 36px; width: auto; }
+.top nav { display: flex; gap: 20px; margin-left: auto; }
+.top nav a { color: var(--atrament); text-decoration: none; font-weight: 600; font-size: .95rem; }
+.top nav a:hover { color: var(--marka); }
+.btn { display: inline-flex; align-items: center; gap: 8px; background: var(--marka); color: #fff; border: 0; border-radius: 999px; padding: 11px 20px; font: 700 .95rem var(--font-body); text-decoration: none; cursor: pointer; }
+.btn:hover { filter: brightness(1.08); }
+.btn.cichy { background: transparent; color: var(--marka); box-shadow: inset 0 0 0 2px var(--marka); }
+@media (max-width: 860px) { .top nav { display: none; } .top .btn { margin-left: auto; padding: 9px 14px; } }
+
+/* hero */
+.hero { padding: 40px 0 24px; }
+.hero-tekst { display: grid; grid-template-columns: 1.2fr 1fr; gap: 32px; align-items: end; margin-bottom: 28px; }
+.eyebrow { font: 600 .8rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--szary); margin: 0 0 12px; }
+.odpowiedz { font-size: 1.08rem; color: var(--szary); margin: 0; }
+.odpowiedz strong { color: var(--atrament); }
+@media (max-width: 860px) { .hero-tekst { grid-template-columns: 1fr; gap: 12px; } }
+
+/* SIGNATURE: wizualizacja z metkami */
+.plan { position: relative; border-radius: var(--r); overflow: hidden; background: #dfe7e6; box-shadow: 0 30px 60px -30px rgba(21,33,43,.35); }
+.plan > img { width: 100%; height: auto; }
+.plan svg.obrysy { position: absolute; inset: 0; width: 100%; height: 100%; }
+.obrys { fill: transparent; stroke: transparent; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; transition: fill .2s, stroke .2s; }
+.obrys.dostępny:hover, .obrys.dostępny:focus, .obrys.aktywny { fill: color-mix(in srgb, var(--dostepny) 28%, transparent); stroke: #fff; }
+.obrys.zarezerwowany:hover, .obrys.zarezerwowany:focus { fill: color-mix(in srgb, var(--zarezerwowany) 28%, transparent); stroke: #fff; }
+.obrys.sprzedany { fill: rgba(40,48,56,.28); }
+.obrys.sprzedany:hover, .obrys.sprzedany:focus { fill: rgba(40,48,56,.42); stroke: #fff; }
+.metka { position: absolute; transform: translate(-50%, calc(-100% - 10px)); background: var(--papier); color: var(--atrament); border-radius: 8px; padding: 6px 10px 6px 12px; text-decoration: none; white-space: nowrap; box-shadow: 0 8px 20px -8px rgba(21,33,43,.45); font-size: .78rem; line-height: 1.25; transition: transform .2s; border-left: 4px solid var(--dostepny); animation: zawies .6s cubic-bezier(.3,1.6,.5,1) both; animation-delay: calc(var(--i) * 70ms + 200ms); transform-origin: 50% 100%; }
+.metka::after { content: ""; position: absolute; left: 50%; bottom: -6px; width: 10px; height: 10px; background: inherit; transform: translateX(-50%) rotate(45deg); }
+.metka b { display: block; font: 700 .9rem var(--font-display); }
+.metka .cena { font-weight: 600; }
+.metka.zarezerwowany { border-left-color: var(--zarezerwowany); }
+.metka.sprzedany { border-left-color: var(--sprzedany); color: var(--szary); }
+.metka.sprzedany .cena { text-decoration: line-through; text-decoration-thickness: 1px; }
+.metka:hover, .metka.aktywny { transform: translate(-50%, calc(-100% - 16px)); z-index: 2; }
+@keyframes zawies { from { opacity: 0; transform: translate(-50%, calc(-100% - 30px)) rotate(-6deg); } }
+@media (max-width: 700px) { .metka { font-size: .62rem; padding: 3px 6px 3px 7px; } .metka b { font-size: .7rem; } .metka .cena { display: none; } }
+.legenda { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 14px 0 0; padding: 0; list-style: none; font-size: .9rem; color: var(--szary); }
+.legenda li::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; background: var(--c); }
+
+/* liczniki */
+.fakty { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--linia); border: 1px solid var(--linia); border-radius: var(--r); overflow: hidden; margin: 28px 0 0; }
+.fakty div { background: var(--papier); padding: 16px 18px; }
+.fakty dt { font-size: .82rem; color: var(--szary); }
+.fakty dd { margin: 2px 0 0; font: 600 1.15rem var(--font-mono); font-variant-numeric: tabular-nums; }
+@media (max-width: 700px) { .fakty { grid-template-columns: 1fr 1fr; } }
+
+/* sekcje */
+section { padding: 56px 0; }
+.sekcja-glowka { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.sekcja-glowka p { margin: 0; color: var(--szary); max-width: 60ch; }
+.karta { background: var(--papier); border-radius: var(--r); border: 1px solid var(--linia); padding: 24px; }
+
+/* cennik */
+.cennik { width: 100%; border-collapse: collapse; background: var(--papier); border-radius: var(--r); overflow: hidden; border: 1px solid var(--linia); font-size: .95rem; }
+.cennik th { text-align: left; font: 600 .75rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--szary); padding: 14px 12px; border-bottom: 1px solid var(--linia); background: #f8faf9; }
+.cennik td { padding: 14px 12px; border-bottom: 1px solid var(--linia); vertical-align: top; }
+.cennik tr:last-child td { border-bottom: 0; }
+.cennik td.cena, .cennik th.num { text-align: right; white-space: nowrap; }
+.cennik tr.sprzedany td { color: var(--szary); }
+.cennik tbody tr:hover td { background: #f6f9f8; }
+.cennik a.ozn { font: 700 1.05rem var(--font-display); color: var(--atrament); text-decoration: none; }
+.cennik .pod { display: block; font-size: .8rem; color: var(--szary); font-family: var(--font-body); }
+.status { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: .85rem; white-space: nowrap; }
+.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.status.dostępny { color: var(--dostepny); } .status.zarezerwowany { color: var(--zarezerwowany); } .status.sprzedany { color: var(--sprzedany); }
+@media (max-width: 860px) {
+  .cennik thead { display: none; }
+  .cennik, .cennik tbody, .cennik tr, .cennik td { display: block; width: 100%; }
+  .cennik tr { border-bottom: 1px solid var(--linia); padding: 12px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+  .cennik td { border: 0; padding: 2px 0; }
+  .cennik td.cena { text-align: left; }
+  .cennik td[data-l]::before { content: attr(data-l); display: block; font: 600 .68rem var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--szary); }
+  .cennik td:first-child { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; }
+}
+.przypis { font-size: .88rem; color: var(--szary); margin-top: 14px; }
+
+/* dwie kolumny */
+.dwie { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 860px) { .dwie { grid-template-columns: 1fr; } }
+.lista-std { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+.lista-std li { padding-left: 28px; position: relative; }
+.lista-std li::before { content: ""; position: absolute; left: 0; top: .55em; width: 14px; height: 8px; border-left: 2.5px solid var(--marka); border-bottom: 2.5px solid var(--marka); transform: rotate(-45deg); }
+.odl { width: 100%; border-collapse: collapse; }
+.odl td { padding: 10px 0; border-bottom: 1px dashed var(--linia); }
+.odl td:last-child { text-align: right; font-family: var(--font-mono); }
+.mapa { width: 100%; aspect-ratio: 16/10; border: 0; border-radius: var(--r); margin-top: 16px; background: #e4ebe9; }
+
+/* budowa */
+.budowa { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.budowa figure { margin: 0; background: var(--papier); border-radius: var(--r); overflow: hidden; border: 1px solid var(--linia); }
+.budowa img { aspect-ratio: 4/3; object-fit: cover; width: 100%; }
+.budowa figcaption { padding: 10px 14px; font-size: .9rem; }
+
+/* FAQ */
+.faq details { background: var(--papier); border: 1px solid var(--linia); border-radius: var(--r); margin-bottom: 10px; }
+.faq summary { cursor: pointer; padding: 16px 20px; font: 650 1.05rem var(--font-display); list-style: none; display: flex; justify-content: space-between; gap: 16px; }
+.faq summary::after { content: "+"; font-family: var(--font-mono); color: var(--marka); }
+.faq details[open] summary::after { content: "−"; }
+.faq details > div { padding: 0 20px 18px; color: var(--szary); }
+.faq h3 { display: inline; font: inherit; margin: 0; }
+
+/* formularz */
+form.kontakt { display: grid; gap: 14px; }
+label { display: grid; gap: 6px; font-weight: 600; font-size: .92rem; }
+input, select, textarea { font: inherit; padding: 11px 13px; border: 1.5px solid var(--linia); border-radius: 10px; background: #fff; color: var(--atrament); width: 100%; }
+input:focus, select:focus, textarea:focus { border-color: var(--marka); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--marka) 20%, transparent); }
+.pulapka { position: absolute; left: -9999px; }
+.komunikat { padding: 12px 16px; border-radius: 10px; margin: 0 0 16px; font-weight: 600; }
+.komunikat.ok { background: #e3f1ea; color: #134a33; }
+.komunikat.blad { background: #fbe7e5; color: #7c1a14; }
+
+/* strona domu */
+.dom-glowka { display: grid; grid-template-columns: 1.4fr 1fr; gap: 28px; align-items: start; padding-top: 32px; }
+.dom-cena { position: sticky; top: 84px; }
+.dom-cena .duza { font: 600 clamp(1.8rem, 4vw, 2.6rem) var(--font-mono); letter-spacing: -0.02em; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+.parametry { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0; background: var(--papier); border: 1px solid var(--linia); border-radius: var(--r); overflow: hidden; margin: 20px 0; }
+.parametry div { padding: 14px 16px; box-shadow: 0 0 0 .5px var(--linia); }
+.parametry dt { font-size: .8rem; color: var(--szary); } .parametry dd { margin: 0; font-weight: 700; }
+.historia { width: 100%; border-collapse: collapse; font-size: .95rem; }
+.historia th, .historia td { padding: 10px 8px; border-bottom: 1px solid var(--linia); text-align: right; }
+.historia th:first-child, .historia td:first-child { text-align: left; }
+.historia th { font: 600 .72rem var(--font-mono); text-transform: uppercase; letter-spacing: .06em; color: var(--szary); }
+.historia td { font-family: var(--font-mono); }
+.historia tr:first-child td { font-weight: 700; }
+.wykres { width: 100%; height: 120px; margin: 8px 0 16px; }
+@media (max-width: 860px) { .dom-glowka { grid-template-columns: 1fr; } .dom-cena { position: static; } }
+
+/* stopka */
+footer { background: var(--atrament); color: #c9d3d8; padding: 48px 0 32px; margin-top: 40px; font-size: .92rem; }
+footer a { color: #fff; }
+footer .kolumny { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 28px; }
+footer h3 { color: #fff; font-size: 1rem; }
+footer p { margin: 0 0 6px; }
+footer .dol { border-top: 1px solid #2c3a45; margin-top: 32px; padding-top: 16px; font-size: .82rem; color: #8b98a1; }
+
+/* panel */
+.panel-top { background: var(--atrament); color: #fff; }
+.panel-top .wrap { display: flex; align-items: center; gap: 18px; height: 56px; }
+.panel-top a, .panel-top button { color: #fff; background: none; border: 0; font: 600 .92rem var(--font-body); text-decoration: none; cursor: pointer; padding: 0; }
+.panel-top .marka { color: #fff; }
+.panel-tabela input[type=text] { width: 9.5em; text-align: right; font-family: var(--font-mono); }
+.panel-tabela select { width: auto; }
+.uwaga { background: #fff6e0; border: 1px solid #f0d58c; border-radius: 10px; padding: 12px 16px; }
+.siatka-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.edytor { position: relative; cursor: crosshair; user-select: none; }
+.edytor svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.edytor polygon { fill: color-mix(in srgb, var(--marka) 30%, transparent); stroke: #fff; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.edytor polygon.inny { fill: rgba(255,255,255,.25); stroke: rgba(255,255,255,.6); stroke-dasharray: 4 4; }
+.edytor circle { fill: #fff; stroke: var(--marka); stroke-width: 2; vector-effect: non-scaling-stroke; }

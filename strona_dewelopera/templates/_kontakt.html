@@ -1,0 +1,23 @@
+{% from "_makra.html" import adres %}
+<section id="kontakt"><div class="wrap dwie">
+  <div>
+    <h2>Zapytaj o dom</h2>
+    <p class="odpowiedz">Zadzwoń: <a href="tel:{{ k.kontakt.telefon|replace(' ', '') }}" class="mono">{{ k.kontakt.telefon }}</a>{% if k.kontakt.email_publiczny %} albo napisz: <a href="mailto:{{ k.kontakt.email_publiczny }}">{{ k.kontakt.email_publiczny }}</a>{% endif %}.</p>
+    {% for b in k.biura_sprzedazy %}
+    <p>Biuro sprzedaży: {{ adres(b) }}{% if b.godziny %} — {{ b.godziny }}{% endif %}.</p>
+    {% endfor %}
+  </div>
+  <div class="karta">
+    {% with wiadomosci = get_flashed_messages(with_categories=true) %}{% for kat, w in wiadomosci %}<p class="komunikat {{ kat }}" role="status">{{ w }}</p>{% endfor %}{% endwith %}
+    <form class="kontakt" method="post" action="{{ url_for('zapytanie') }}">
+      <input type="hidden" name="powrot" value="{{ request.path }}">
+      {% if l %}<input type="hidden" name="lokal_id" value="{{ l.id }}">{% endif %}
+      <label class="pulapka" aria-hidden="true">Strona www <input name="strona_www" tabindex="-1" autocomplete="off"></label>
+      <label>Imię <input name="imie" required autocomplete="name"></label>
+      <label>Telefon lub e-mail <input name="kontakt" required autocomplete="tel"></label>
+      <label>Wiadomość <textarea name="tresc" rows="4">{% if l %}Dzień dobry, interesuje mnie dom {{ l.oznaczenie }}.{% endif %}</textarea></label>
+      <button class="btn" type="submit">Wyślij zapytanie</button>
+      <p class="przypis" style="margin:0">Dane z formularza wykorzystamy tylko do odpowiedzi na zapytanie. Administrator: {{ k.firma.pelna_nazwa }}.</p>
+    </form>
+  </div>
+</div></section>
